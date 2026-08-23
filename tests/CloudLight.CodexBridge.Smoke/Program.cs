@@ -8,15 +8,15 @@ using Microsoft.Win32;
 if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreCase))
 {
     var logs = new LogService();
-    var settings = new UserSettings
+    var retrySettings = new UserSettings
     {
         CodexCustomPath = @"C:\Users\test\manual-codex.exe",
         DetectedCodexPath = @"C:\Users\test\previous-detected-codex.exe"
     };
     var failed = new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None);
-    Assert(!CodexPathSettings.RememberAutomaticDiscovery(settings, failed),
+    Assert(!CodexPathSettings.RememberAutomaticDiscovery(retrySettings, failed),
         "失败的瞬时 discovery 不得修改路径设置");
-    Assert(settings.CodexCustomPath == @"C:\Users\test\manual-codex.exe",
+    Assert(retrySettings.CodexCustomPath == @"C:\Users\test\manual-codex.exe",
         "失败的瞬时 discovery 不得清空用户手动路径");
 
     var attemptCount = 0;
@@ -51,8 +51,8 @@ if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreC
         "退避级别用尽后必须按最大间隔继续检测，而不是停止 retry");
 
     var automatic = new CodexDiscoveryResult(true, recoveredPath, "codex-cli test", CodexDiscoverySource.ChatGPTProcess);
-    Assert(CodexPathSettings.RememberAutomaticDiscovery(settings, automatic), "自动发现路径必须单独保存");
-    Assert(settings.CodexCustomPath == @"C:\Users\test\manual-codex.exe" && settings.DetectedCodexPath == recoveredPath,
+    Assert(CodexPathSettings.RememberAutomaticDiscovery(retrySettings, automatic), "自动发现路径必须单独保存");
+    Assert(retrySettings.CodexCustomPath == @"C:\Users\test\manual-codex.exe" && retrySettings.DetectedCodexPath == recoveredPath,
         "自动发现结果不得覆盖用户手动路径");
 
     using var cancellation = new CancellationTokenSource();
