@@ -340,6 +340,7 @@ public sealed class MirrorStatus
 public sealed class UserSettings
 {
     public string CodexCustomPath { get; set; } = "";
+    public string DetectedCodexPath { get; set; } = "";
     public string Language { get; set; } = "zh-CN";
     public string SandboxMode { get; set; } = "workspace-write";
     public List<long> TelegramAllowedUserIds { get; set; } = [];

@@ -6,6 +6,9 @@ namespace CloudLight.CodexBridge.ViewModels;
 
 internal static class UiText
 {
+    public const string CodexDiscoveryRetrying = "暂未找到 Codex，正在后台重新检测。";
+    public const string CodexDiscoveryNotFound = "暂未找到 Codex。软件会在后续刷新时继续检测，也可以在设置中手动指定路径。";
+
     public static string LocalDateTime(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return "—";

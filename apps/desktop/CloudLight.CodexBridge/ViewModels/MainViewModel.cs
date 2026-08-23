@@ -13,8 +13,12 @@ public sealed class MainViewModel : ObservableObject
     private readonly SettingsService _settingsService;
     private readonly LogService _logs;
     private readonly CodexDiscoveryService _codexDiscoveryService;
+    private readonly CodexDiscoveryRetryRunner _codexDiscoveryRetryRunner;
     private CodexDiscoveryResult _codexDiscovery;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly object _codexRetrySync = new();
+    private Task? _codexRetryTask;
+    private CancellationTokenSource? _codexRetryCancellation;
     private CancellationTokenSource? _eventRefresh;
     private object _currentPage;
     private string _backendState = "正在启动";
@@ -23,6 +27,7 @@ public sealed class MainViewModel : ObservableObject
     private string _errorMessage = "";
     private bool _stopped;
     private bool _initialized;
+    private bool _isCodexDiscoveryRetrying;
 
     public MainViewModel(DaemonProcessManager daemon, BridgeApiClient api, SessionsViewModel sessions,
         ChannelsViewModel channels, CommandsViewModel commands, OverviewViewModel overview, MirrorViewModel mirror, BackupViewModel backup,
@@ -44,6 +49,7 @@ public sealed class MainViewModel : ObservableObject
         _settingsService = settingsService;
         _logs = logs;
         _codexDiscoveryService = codexDiscoveryService;
+        _codexDiscoveryRetryRunner = new CodexDiscoveryRetryRunner(logs);
         _codexDiscovery = codexDiscovery;
         CurrentPageKey = settings.RestoreLastPage ? NormalizePage(settings.LastPage) : "overview";
         _currentPage = ResolvePage(CurrentPageKey);
@@ -80,32 +86,25 @@ public sealed class MainViewModel : ObservableObject
     public string CodexCliState { get => _codexCliState; private set => SetProperty(ref _codexCliState, value); }
     public string AppServerState { get => _appServerState; private set => SetProperty(ref _appServerState, value); }
     public string ErrorMessage { get => _errorMessage; private set { if (SetProperty(ref _errorMessage, value)) OnPropertyChanged(nameof(ErrorVisibility)); } }
+    public bool IsCodexDiscoveryRetrying { get => _isCodexDiscoveryRetrying; private set => SetProperty(ref _isCodexDiscoveryRetrying, value); }
     public Visibility ErrorVisibility => string.IsNullOrWhiteSpace(ErrorMessage) ? Visibility.Collapsed : Visibility.Visible;
 
     public async Task InitializeAsync()
     {
         try
         {
-            var ready = await _daemon.StartAsync(_settings, _lifetime.Token);
+            var startupCodexPath = _codexDiscovery.Found ? _codexDiscovery.Path : CodexPathSettings.EffectiveSavedPath(_settings);
+            var ready = await _daemon.StartAsync(_settings, startupCodexPath, _lifetime.Token);
             _api.Connect(new Uri(ready.Address), _daemon.Token);
             _api.StartEventStream();
             if (!_codexDiscovery.Found)
             {
-                _codexDiscovery = await _codexDiscoveryService.DiscoverAsync(_settings.CodexCustomPath, _lifetime.Token);
+                _codexDiscovery = await DiscoverInBackgroundAsync(_lifetime.Token);
                 if (_codexDiscovery.Found)
                 {
-                    _settings.CodexCustomPath = _codexDiscovery.Path;
                     Settings.UpdateDiscovery(_codexDiscovery);
                     _logs.Add("codex-config", $"[codex-config] runtime path updated path={_codexDiscovery.Path} target=desktop-settings");
-                    try
-                    {
-                        await _settingsService.SaveAsync(_settings);
-                        _logs.Add("codex-config", $"[codex-config] persisted path={_codexDiscovery.Path}");
-                    }
-                    catch (Exception exception)
-                    {
-                        _logs.AddException("codex-config", "持久化自动发现的 Codex 路径失败；仍将应用到当前运行时。", exception);
-                    }
+                    await RememberAutomaticDiscoveryAsync(_codexDiscovery);
                 }
             }
             if (_codexDiscovery.Found)
@@ -115,6 +114,7 @@ public sealed class MainViewModel : ObservableObject
                 Settings.UpdateRuntimeStatus(applied, BackendState);
             }
             BackendState = "运行中";
+            if (!_codexDiscovery.Found) EnsureCodexDiscoveryRetryStarted();
             await RefreshAsync();
             await InitializeRemoteChannelsAsync(forceRetry: false);
             if (CurrentPageKey == "commands") await Commands.EnsureInitializedAsync(_lifetime.Token);
@@ -163,7 +163,18 @@ public sealed class MainViewModel : ObservableObject
             AppServerState = status.AppServerRunning ? "已连接" : "未连接";
             Overview.CodexState = status.AppServerRunning ? "已连接" : status.CodexCliAvailable ? "CLI 已就绪" : "未连接";
             Settings.UpdateRuntimeStatus(status, BackendState);
-            ErrorMessage = string.IsNullOrWhiteSpace(status.LastError) ? "" : UiText.UserError(status.LastError, "连接");
+            if (!status.CodexCliAvailable && !_codexDiscovery.Found) EnsureCodexDiscoveryRetryStarted();
+            if (IsCodexDiscoveryRetrying && !status.CodexCliAvailable)
+            {
+                CodexCliState = "正在后台检测";
+                Overview.CodexState = "正在检测";
+                Settings.UpdateDiscoveryRetrying(true);
+                ErrorMessage = UiText.CodexDiscoveryRetrying;
+            }
+            else
+            {
+                ErrorMessage = string.IsNullOrWhiteSpace(status.LastError) ? "" : UiText.UserError(status.LastError, "连接");
+            }
             if (status.AppServerRunning) await Sessions.RefreshAsync(_lifetime.Token);
         }
         catch (Exception exception)
@@ -175,6 +186,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task PauseRuntimeAsync()
     {
+        await CancelCodexDiscoveryRetryAsync();
         await _daemon.StopAsync();
         BackendState = "已暂停以恢复数据";
         AppServerState = "已停止";
@@ -186,11 +198,23 @@ public sealed class MainViewModel : ObservableObject
         foreach (var property in typeof(UserSettings).GetProperties().Where(property => property.CanRead && property.CanWrite))
             property.SetValue(_settings, property.GetValue(restored));
         Settings.ReloadUserPreferences(_settings);
-        var ready = await _daemon.StartAsync(_settings, _lifetime.Token);
+        _codexDiscovery = await DiscoverInBackgroundAsync(_lifetime.Token);
+        Settings.UpdateDiscovery(_codexDiscovery);
+        var effectiveCodexPath = _codexDiscovery.Found
+            ? _codexDiscovery.Path
+            : CodexPathSettings.EffectiveSavedPath(_settings);
+        var ready = await _daemon.StartAsync(_settings, effectiveCodexPath, _lifetime.Token);
         _api.Connect(new Uri(ready.Address), _daemon.Token);
         _api.StartEventStream();
-        if (!string.IsNullOrWhiteSpace(_settings.CodexCustomPath))
-            await _api.ApplyCodexPathAsync(_settings.CodexCustomPath, "SavedPath", _lifetime.Token);
+        if (_codexDiscovery.Found)
+        {
+            await _api.ApplyCodexPathAsync(_codexDiscovery.Path, _codexDiscovery.RuntimeSource, _lifetime.Token);
+            await RememberAutomaticDiscoveryAsync(_codexDiscovery);
+        }
+        else
+        {
+            EnsureCodexDiscoveryRetryStarted();
+        }
         await RefreshAsync();
         await InitializeRemoteChannelsAsync(forceRetry: true);
         await Commands.RefreshAsync(_lifetime.Token);
@@ -245,13 +269,126 @@ public sealed class MainViewModel : ObservableObject
     }
     public void ReportRecoverableUiException(Exception exception) => ErrorMessage = UiText.UserError(exception);
 
+    private Task<CodexDiscoveryResult> DiscoverInBackgroundAsync(CancellationToken cancellationToken)
+    {
+        var customPath = _settings.CodexCustomPath;
+        var detectedPath = _settings.DetectedCodexPath;
+        return Task.Run(() => _codexDiscoveryService.DiscoverAsync(customPath, detectedPath, cancellationToken), cancellationToken);
+    }
+
+    private void EnsureCodexDiscoveryRetryStarted()
+    {
+        lock (_codexRetrySync)
+        {
+            if (_stopped || _lifetime.IsCancellationRequested || _codexDiscovery.Found ||
+                _codexRetryTask is { IsCompleted: false }) return;
+
+            IsCodexDiscoveryRetrying = true;
+            Settings.UpdateDiscoveryRetrying(true);
+            ErrorMessage = UiText.CodexDiscoveryRetrying;
+            _codexRetryCancellation?.Dispose();
+            _codexRetryCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+            _codexRetryTask = RunCodexDiscoveryRetryAsync(_codexRetryCancellation.Token);
+        }
+    }
+
+    private async Task RunCodexDiscoveryRetryAsync(CancellationToken cancellationToken)
+    {
+        var recovered = false;
+        try
+        {
+            recovered = await _codexDiscoveryRetryRunner.RunAsync(
+                DiscoverInBackgroundAsync,
+                (discovery, token) => InvokeOnUiAsync(() => ApplyRecoveredDiscoveryAsync(discovery, token)),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logs.Add("codex-discovery", "[codex-discovery] retry cancelled");
+        }
+        catch (Exception exception)
+        {
+            _logs.AddException("codex-discovery", "Codex 后台检测任务异常。", exception);
+        }
+        finally
+        {
+            try
+            {
+                await InvokeOnUiAsync(() =>
+                {
+                    IsCodexDiscoveryRetrying = false;
+                    if (!recovered && !_stopped && !_codexDiscovery.Found)
+                    {
+                        Settings.UpdateDiscovery(new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None));
+                        ErrorMessage = UiText.CodexDiscoveryNotFound;
+                    }
+                    return Task.CompletedTask;
+                }).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (_stopped && exception is (TaskCanceledException or OperationCanceledException or ObjectDisposedException)) { }
+        }
+    }
+
+    private async Task ApplyRecoveredDiscoveryAsync(CodexDiscoveryResult discovery, CancellationToken cancellationToken)
+    {
+        _logs.Add("codex-daemon", $"[codex-daemon] applying new Codex path path={discovery.Path}");
+        var applied = await _api.ApplyCodexPathAsync(discovery.Path, discovery.RuntimeSource, cancellationToken);
+        _codexDiscovery = discovery;
+        Settings.UpdateDiscovery(discovery);
+        Settings.UpdateRuntimeStatus(applied, BackendState);
+        ErrorMessage = "";
+        await RememberAutomaticDiscoveryAsync(discovery);
+        await RefreshAsync();
+    }
+
+    private async Task RememberAutomaticDiscoveryAsync(CodexDiscoveryResult discovery)
+    {
+        if (!CodexPathSettings.RememberAutomaticDiscovery(_settings, discovery)) return;
+        try
+        {
+            await _settingsService.SaveAsync(_settings);
+            _logs.Add("codex-config", $"[codex-config] persisted detected path={_settings.DetectedCodexPath}");
+        }
+        catch (Exception exception)
+        {
+            _logs.AddException("codex-config", "持久化自动发现的 Codex 路径失败；仍将应用到当前运行时。", exception);
+        }
+    }
+
+    private static async Task InvokeOnUiAsync(Func<Task> action)
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            await action();
+            return;
+        }
+        await await dispatcher.InvokeAsync(action);
+    }
+
+    private async Task CancelCodexDiscoveryRetryAsync()
+    {
+        Task? retryTask;
+        lock (_codexRetrySync)
+        {
+            _codexRetryCancellation?.Cancel();
+            retryTask = _codexRetryTask;
+        }
+        if (retryTask is null) return;
+        try { await retryTask.ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+    }
+
     public async Task StopAsync()
     {
         if (_stopped) return;
         _stopped = true;
         _eventRefresh?.Cancel(); _eventRefresh?.Dispose();
         _api.EventReceived -= OnEventReceived; _api.EventStreamConnectionChanged -= OnEventStreamConnectionChanged;
+        _lifetime.Cancel();
+        await CancelCodexDiscoveryRetryAsync().ConfigureAwait(false);
+        _codexRetryCancellation?.Dispose();
         await Channels.StopAsync().ConfigureAwait(false);
-        _lifetime.Cancel(); _api.Dispose(); await _daemon.StopAsync().ConfigureAwait(false); _lifetime.Dispose();
+        _api.Dispose(); await _daemon.StopAsync().ConfigureAwait(false); _lifetime.Dispose();
     }
 }

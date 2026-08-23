@@ -5,6 +5,69 @@ using CloudLight.CodexBridge.Services;
 using CloudLight.CodexBridge.Models;
 using Microsoft.Win32;
 
+if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreCase))
+{
+    var logs = new LogService();
+    var settings = new UserSettings
+    {
+        CodexCustomPath = @"C:\Users\test\manual-codex.exe",
+        DetectedCodexPath = @"C:\Users\test\previous-detected-codex.exe"
+    };
+    var failed = new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None);
+    Assert(!CodexPathSettings.RememberAutomaticDiscovery(settings, failed),
+        "失败的瞬时 discovery 不得修改路径设置");
+    Assert(settings.CodexCustomPath == @"C:\Users\test\manual-codex.exe",
+        "失败的瞬时 discovery 不得清空用户手动路径");
+
+    var attemptCount = 0;
+    var applyCount = 0;
+    var refreshCount = 0;
+    var recoveredPath = @"C:\Program Files\OpenAI\codex.exe";
+    var runner = new CodexDiscoveryRetryRunner(logs,
+        [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
+    var recovered = await runner.RunAsync(
+        _ => Task.FromResult(++attemptCount < 3
+            ? failed
+            : new CodexDiscoveryResult(true, recoveredPath, "codex-cli test", CodexDiscoverySource.ChatGPTProcess)),
+        (discovery, _) =>
+        {
+            applyCount++;
+            Assert(discovery.Path == recoveredPath, "重试成功后必须应用本次发现的路径");
+            refreshCount++;
+            return Task.CompletedTask;
+        },
+        CancellationToken.None);
+    Assert(recovered && attemptCount == 3, "前两次失败、第三次成功时必须在当前进程恢复");
+    Assert(applyCount == 1 && refreshCount == 1, "恢复后必须且只能调用一次 ApplyCodexPath 和 UI 刷新");
+
+    var periodicAttempts = 0;
+    var periodicRunner = new CodexDiscoveryRetryRunner(logs, [TimeSpan.Zero, TimeSpan.Zero]);
+    Assert(await periodicRunner.RunAsync(
+            _ => Task.FromResult(++periodicAttempts < 5
+                ? failed
+                : new CodexDiscoveryResult(true, recoveredPath, "codex-cli test", CodexDiscoverySource.PATH)),
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None) && periodicAttempts == 5,
+        "退避级别用尽后必须按最大间隔继续检测，而不是停止 retry");
+
+    var automatic = new CodexDiscoveryResult(true, recoveredPath, "codex-cli test", CodexDiscoverySource.ChatGPTProcess);
+    Assert(CodexPathSettings.RememberAutomaticDiscovery(settings, automatic), "自动发现路径必须单独保存");
+    Assert(settings.CodexCustomPath == @"C:\Users\test\manual-codex.exe" && settings.DetectedCodexPath == recoveredPath,
+        "自动发现结果不得覆盖用户手动路径");
+
+    using var cancellation = new CancellationTokenSource();
+    var cancellationRunner = new CodexDiscoveryRetryRunner(logs, [TimeSpan.FromMinutes(1)]);
+    var cancellationTask = cancellationRunner.RunAsync(_ => Task.FromResult(failed), (_, _) => Task.CompletedTask, cancellation.Token);
+    cancellation.Cancel();
+    var cancelled = false;
+    try { await cancellationTask; }
+    catch (OperationCanceledException) { cancelled = true; }
+    Assert(cancelled, "应用退出取消令牌必须立即终止 retry");
+
+    Console.WriteLine("PASS Codex discovery retry recovery, path preservation, apply/refresh, cancellation");
+    return;
+}
+
 if (args.Length == 2 && args[0].Equals("--validate-backup", StringComparison.OrdinalIgnoreCase))
 {
     var manifest = await new BackupService(new SettingsService()).ReadAndValidateAsync(args[1]);

@@ -42,24 +42,15 @@ public partial class App : Application
         ApplyTheme(settings.Theme);
         if (!string.IsNullOrWhiteSpace(settingsService.LastLoadWarning)) logs.Add("desktop", settingsService.LastLoadWarning);
 
-        var savedCodexPath = settings.CodexCustomPath;
         var codexDiscoveryService = new CodexDiscoveryService(logs);
-        var codexDiscovery = await codexDiscoveryService.DiscoverAsync(savedCodexPath);
-        if (codexDiscovery.Found)
-        {
-            settings.CodexCustomPath = codexDiscovery.Path;
-            logs.Add("codex-config", $"[codex-config] runtime path updated path={codexDiscovery.Path} target=desktop-settings");
-        }
-        else if (!string.IsNullOrWhiteSpace(savedCodexPath))
-        {
-            settings.CodexCustomPath = "";
-        }
-        if (!string.Equals(savedCodexPath, settings.CodexCustomPath, StringComparison.OrdinalIgnoreCase))
+        var codexDiscovery = await codexDiscoveryService.DiscoverAsync(
+            settings.CodexCustomPath, settings.DetectedCodexPath);
+        if (CodexPathSettings.RememberAutomaticDiscovery(settings, codexDiscovery))
         {
             try
             {
                 await settingsService.SaveAsync(settings);
-                logs.Add("codex-config", $"[codex-config] persisted path={settings.CodexCustomPath}");
+                logs.Add("codex-config", $"[codex-config] persisted detected path={settings.DetectedCodexPath}");
             }
             catch (Exception exception) { logs.AddException("desktop", "保存自动发现的 Codex 路径失败。", exception); }
         }

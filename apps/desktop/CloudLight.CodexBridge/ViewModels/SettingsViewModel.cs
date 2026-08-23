@@ -122,8 +122,6 @@ public sealed class SettingsViewModel : ObservableObject
     {
         if (discovery.Found)
         {
-            _settings.CodexCustomPath = discovery.Path;
-            CodexCustomPath = discovery.Path;
             CodexCliPath = discovery.Path;
             CodexPathSource = discovery.RuntimeSource;
             CodexValidationStatus = "succeeded";
@@ -137,6 +135,14 @@ public sealed class SettingsViewModel : ObservableObject
             CodexConnectionStatus = "not-found";
         }
         RebuildCodexDetection();
+    }
+
+    public void UpdateDiscoveryRetrying(bool retrying)
+    {
+        if (!retrying || !string.IsNullOrWhiteSpace(CodexCliPath)) return;
+        CodexValidationStatus = "pending";
+        CodexConnectionStatus = "reconnecting";
+        CodexDetection = "暂未找到 Codex，正在后台重新检测。";
     }
 
     public string BackendStatus

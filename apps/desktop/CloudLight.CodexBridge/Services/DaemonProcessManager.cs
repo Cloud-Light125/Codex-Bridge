@@ -15,6 +15,12 @@ public sealed class DaemonProcessManager(LogService logs) : IAsyncDisposable
     public int ProcessId => _process?.HasExited == false ? _process.Id : 0;
 
     public async Task<ReadyMessage> StartAsync(UserSettings settings, CancellationToken cancellationToken = default)
+        => await StartAsync(settings, null, cancellationToken);
+
+    public async Task<ReadyMessage> StartAsync(
+        UserSettings settings,
+        string? codexPathOverride,
+        CancellationToken cancellationToken = default)
     {
         if (_process is { HasExited: false })
         {
@@ -41,10 +47,13 @@ public sealed class DaemonProcessManager(LogService logs) : IAsyncDisposable
         startInfo.ArgumentList.Add(Token);
         startInfo.ArgumentList.Add("--sandbox");
         startInfo.ArgumentList.Add(settings.SandboxMode is "read-only" ? "read-only" : "workspace-write");
-        if (!string.IsNullOrWhiteSpace(settings.CodexCustomPath))
+        var effectiveCodexPath = !string.IsNullOrWhiteSpace(codexPathOverride)
+            ? codexPathOverride.Trim()
+            : CodexPathSettings.EffectiveSavedPath(settings);
+        if (!string.IsNullOrWhiteSpace(effectiveCodexPath))
         {
             startInfo.ArgumentList.Add("--codex-path");
-            startInfo.ArgumentList.Add(settings.CodexCustomPath.Trim());
+            startInfo.ArgumentList.Add(effectiveCodexPath);
         }
 
         var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
