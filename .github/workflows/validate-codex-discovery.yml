@@ -1,0 +1,34 @@
+name: Validate Codex discovery fix
+
+on:
+  push:
+    branches:
+      - ci/validate-codex-first-launch-discovery
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/bridge-daemon/go.mod
+          cache-dependency-path: services/bridge-daemon/go.sum
+
+      - name: Codex discovery recovery tests
+        run: dotnet run --project tests/CloudLight.CodexBridge.Smoke/CloudLight.CodexBridge.Smoke.csproj --configuration Release -- --codex-discovery-retry-tests
+
+      - name: Connection recovery Go tests
+        working-directory: services/bridge-daemon
+        run: go test ./internal/runtime ./internal/qqbot ./internal/telegram
+
+      - name: Release build
+        run: dotnet build apps/desktop/CloudLight.CodexBridge/CloudLight.CodexBridge.csproj --configuration Release --runtime win-x64 --no-self-contained -p:Platform=x64 --nologo
