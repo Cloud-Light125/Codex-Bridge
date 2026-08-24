@@ -7,13 +7,17 @@ import (
 
 type ApprovalPolicy string
 
-const ApprovalOnRequest ApprovalPolicy = "on-request"
+const (
+	ApprovalNever     ApprovalPolicy = "never"
+	ApprovalOnRequest ApprovalPolicy = "on-request"
+)
 
 type SandboxMode string
 
 const (
-	SandboxReadOnly       SandboxMode = "read-only"
-	SandboxWorkspaceWrite SandboxMode = "workspace-write"
+	SandboxDangerFullAccess SandboxMode = "danger-full-access"
+	SandboxReadOnly         SandboxMode = "read-only"
+	SandboxWorkspaceWrite   SandboxMode = "workspace-write"
 )
 
 func ParseSandboxMode(value string) (SandboxMode, error) {

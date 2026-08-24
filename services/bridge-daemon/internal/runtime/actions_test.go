@@ -6,7 +6,28 @@ import (
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/security"
 )
+
+func TestQQTurnUsesUnrestrictedWithoutApproval(t *testing.T) {
+	options, err := turnStartOptions(control.StartTurnRequest{Origin: control.TurnOriginQQ}, "D:/code/project", "read-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.SandboxMode != security.SandboxDangerFullAccess || options.ApprovalPolicy != security.ApprovalNever {
+		t.Fatalf("QQ turn security = sandbox %q, approval %q", options.SandboxMode, options.ApprovalPolicy)
+	}
+}
+
+func TestTelegramTurnUsesUnrestrictedWithoutApproval(t *testing.T) {
+	options, err := turnStartOptions(control.StartTurnRequest{Origin: control.TurnOriginTelegram}, "D:/code/project", "workspace-write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.SandboxMode != security.SandboxDangerFullAccess || options.ApprovalPolicy != security.ApprovalNever {
+		t.Fatalf("Telegram turn security = sandbox %q, approval %q", options.SandboxMode, options.ApprovalPolicy)
+	}
+}
 
 func TestRuntimeStateKeepsLocalInterruptOwnership(t *testing.T) {
 	manager := &Manager{

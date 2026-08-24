@@ -719,7 +719,7 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 		s.reject(ctx, message, "This Thread cannot accept a new task. Current state: "+state.State+". Finish the current interaction or wait for the active Turn.", "busy")
 		return
 	}
-	accepted, err := s.runtime.StartTurn(ctx, threadID, control.StartTurnRequest{Text: text, CollaborationMode: "default", Origin: "telegram"})
+	accepted, err := s.runtime.StartTurn(ctx, threadID, control.StartTurnRequest{Text: text, CollaborationMode: "default", Origin: control.TurnOriginTelegram})
 	if err != nil {
 		s.reject(ctx, message, "Codex could not start this Turn. The Thread may be busy or unavailable.", "start-failed")
 		s.publishMessageEvent(events.TelegramMessageRejected, message, "start-failed")

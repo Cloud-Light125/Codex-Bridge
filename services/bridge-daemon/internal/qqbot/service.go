@@ -700,7 +700,7 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 		s.reject(ctx, message, "该 Thread 当前忙碌或正在等待交互，暂不能提交新任务。", "busy")
 		return
 	}
-	accepted, err := s.runtime.StartTurn(ctx, binding.ThreadID, control.StartTurnRequest{Text: text, Origin: "qqbot"})
+	accepted, err := s.runtime.StartTurn(ctx, binding.ThreadID, control.StartTurnRequest{Text: text, Origin: control.TurnOriginQQ})
 	if err != nil {
 		s.reject(ctx, message, "无法启动任务；Thread 可能正忙、不可用或已归档。", "start-failed")
 		return
@@ -732,7 +732,7 @@ func (s *Service) startTurnNumbered(ctx context.Context, message channels.Inboun
 		s.reject(ctx, message, "该会话正在运行或等待输入，暂不能提交新任务。", "busy")
 		return
 	}
-	accepted, err := s.runtime.StartTurn(ctx, threadID, control.StartTurnRequest{Text: text, Origin: "qqbot"})
+	accepted, err := s.runtime.StartTurn(ctx, threadID, control.StartTurnRequest{Text: text, Origin: control.TurnOriginQQ})
 	if err != nil {
 		s.reject(ctx, message, "无法启动任务；会话可能忙碌或不可用。", "start-failed")
 		return

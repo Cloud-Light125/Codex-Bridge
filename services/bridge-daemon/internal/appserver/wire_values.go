@@ -54,8 +54,8 @@ func buildTurnStartParams(threadID, text string, options TurnStartOptions) (map[
 
 func toAppServerApprovalPolicy(policy security.ApprovalPolicy) (string, error) {
 	switch policy {
-	case security.ApprovalOnRequest:
-		return "on-request", nil
+	case security.ApprovalNever, security.ApprovalOnRequest:
+		return string(policy), nil
 	default:
 		return "", fmt.Errorf("unsupported approval policy: %s", policy)
 	}
@@ -63,6 +63,8 @@ func toAppServerApprovalPolicy(policy security.ApprovalPolicy) (string, error) {
 
 func toAppServerSandboxPolicy(mode security.SandboxMode, cwd string) (map[string]any, string, bool, error) {
 	switch mode {
+	case security.SandboxDangerFullAccess:
+		return map[string]any{"type": "dangerFullAccess"}, "dangerFullAccess", true, nil
 	case security.SandboxReadOnly:
 		return map[string]any{"type": "readOnly", "networkAccess": false}, "readOnly", false, nil
 	case security.SandboxWorkspaceWrite:
