@@ -6,6 +6,7 @@ namespace CloudLight.CodexBridge.Services;
 public enum CodexDiscoverySource
 {
     None,
+    Manual,
     SavedPath,
     PATH,
     CodexProcess,
@@ -22,6 +23,7 @@ public sealed record CodexDiscoveryResult(
     {
         CodexDiscoverySource.CodexProcess => "RunningCodex",
         CodexDiscoverySource.ChatGPTProcess => "RunningChatGPT",
+        CodexDiscoverySource.Manual => "Manual",
         CodexDiscoverySource.PATH => "PATH",
         CodexDiscoverySource.SavedPath => "SavedPath",
         _ => ""
@@ -47,21 +49,28 @@ public sealed class CodexDiscoveryService(LogService logs)
         CancellationToken cancellationToken = default)
     {
         var attempted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var savedCandidates = new[] { customPath, detectedPath }
-            .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Select(path => path!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        if (savedCandidates.Length > 0)
+        if (!string.IsNullOrWhiteSpace(customPath))
         {
-            var saved = await ValidateFirstAsync(
-                savedCandidates, CodexDiscoverySource.SavedPath, attempted, logMissingCandidates: true, cancellationToken).ConfigureAwait(false);
-            if (saved.Found) return LogSuccess(saved);
-            LogThrottled("saved-path-summary", $"[codex-discovery] SavedPath candidates={savedCandidates.Length} valid=0; continuing");
+            var manual = await ValidateFirstAsync(
+                [customPath], CodexDiscoverySource.Manual, attempted, logMissingCandidates: true, cancellationToken).ConfigureAwait(false);
+            if (manual.Found) return LogSuccess(manual);
+            LogThrottled("manual-path-summary", "[codex-discovery] Manual candidates=1 valid=0; continuing");
         }
 
-        var pathCandidates = EnumeratePathCandidates().Where(File.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (!string.IsNullOrWhiteSpace(detectedPath))
+        {
+            var saved = await ValidateFirstAsync(
+                [detectedPath], CodexDiscoverySource.SavedPath, attempted, logMissingCandidates: true, cancellationToken).ConfigureAwait(false);
+            if (saved.Found) return LogSuccess(saved);
+            LogThrottled("saved-path-summary", "[codex-discovery] SavedPath candidates=1 valid=0; continuing");
+        }
+
+        var preferredCandidates = EnumeratePreferredLaunchCandidates().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var fromPreferredEntry = await ValidateFirstAsync(
+            preferredCandidates, CodexDiscoverySource.PATH, attempted, logMissingCandidates: false, cancellationToken).ConfigureAwait(false);
+        if (fromPreferredEntry.Found) return LogSuccess(fromPreferredEntry);
+
+        var pathCandidates = EnumeratePathCandidates().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         LogThrottled("path-summary:" + string.Join("|", pathCandidates), $"[codex-discovery] PATH candidates={pathCandidates.Length}" +
             (pathCandidates.Length == 0 ? "" : $" paths={FormatPaths(pathCandidates)}"));
         var fromPath = await ValidateFirstAsync(
@@ -88,6 +97,22 @@ public sealed class CodexDiscoveryService(LogService logs)
 
         LogThrottled("discovery-failed", "[codex-discovery] failed sources=SavedPath,PATH,RunningCodex,RunningChatGPT");
         return new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None);
+    }
+
+    public Task<CodexDiscoveryResult> ValidateManualPathAsync(
+        string? path,
+        CancellationToken cancellationToken = default) =>
+        DiscoverCandidatesAsync(path is null ? [] : [path], CodexDiscoverySource.Manual, cancellationToken);
+
+    public async Task<CodexDiscoveryResult> DiscoverCandidatesAsync(
+        IEnumerable<string> candidates,
+        CodexDiscoverySource source,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await ValidateFirstAsync(
+            candidates, source, new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            logMissingCandidates: true, cancellationToken).ConfigureAwait(false);
+        return result.Found ? LogSuccess(result) : result;
     }
 
     private CodexDiscoveryResult LogSuccess(CodexDiscoveryResult result)
@@ -138,6 +163,11 @@ public sealed class CodexDiscoveryService(LogService logs)
         {
             var expanded = Environment.ExpandEnvironmentVariables(candidate.Trim().Trim('"'));
             var fullPath = Path.GetFullPath(expanded);
+            if (IsPackagedAppInternalPath(fullPath))
+            {
+                failure = "packaged-app-internal-path";
+                return null;
+            }
             if (File.Exists(fullPath)) return fullPath;
             failure = "file-not-found";
             return null;
@@ -261,6 +291,20 @@ public sealed class CodexDiscoveryService(LogService logs)
         }
     }
 
+    private static IEnumerable<string> EnumeratePreferredLaunchCandidates()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData)) yield break;
+
+        var win32Directory = Path.Combine(localAppData, "Programs", "OpenAI", "Codex", "bin");
+        foreach (var name in CodexFileNames)
+            yield return Path.Combine(win32Directory, name);
+
+        var aliasDirectory = Path.Combine(localAppData, "Microsoft", "WindowsApps");
+        foreach (var name in CodexFileNames)
+            yield return Path.Combine(aliasDirectory, name);
+    }
+
     private ProcessScanResult ScanProcessPaths(Func<string, bool> matches, string label)
     {
         Process[] processes;
@@ -309,10 +353,17 @@ public sealed class CodexDiscoveryService(LogService logs)
     private static bool IsChatGPTProcessName(string processName) =>
         processName.Equals("ChatGPT", StringComparison.OrdinalIgnoreCase);
 
-    private static IEnumerable<string> EnumerateCodexProcessCandidates(IEnumerable<string> processPaths)
+    private IEnumerable<string> EnumerateCodexProcessCandidates(IEnumerable<string> processPaths)
     {
         foreach (var processPath in processPaths)
         {
+            if (IsPackagedAppInternalPath(processPath))
+            {
+                LogThrottled($"package-clue:Codex:{processPath}",
+                    $"[codex-discovery] RunningCodex package path retained as installation clue only path={LogService.Redact(processPath)}");
+                foreach (var launchEntry in EnumeratePreferredLaunchCandidates()) yield return launchEntry;
+                continue;
+            }
             var fileName = Path.GetFileNameWithoutExtension(processPath);
             if (fileName.Equals("codex", StringComparison.OrdinalIgnoreCase)) yield return processPath;
             var directory = Path.GetDirectoryName(processPath);
@@ -325,6 +376,13 @@ public sealed class CodexDiscoveryService(LogService logs)
     {
         foreach (var chatGPTPath in chatGPTPaths.Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            if (IsPackagedAppInternalPath(chatGPTPath))
+            {
+                LogThrottled($"package-clue:ChatGPT:{chatGPTPath}",
+                    $"[codex-discovery] RunningChatGPT package path retained as installation clue only path={LogService.Redact(chatGPTPath)}");
+                foreach (var launchEntry in EnumeratePreferredLaunchCandidates()) yield return launchEntry;
+                continue;
+            }
             var installationDirectory = Path.GetDirectoryName(chatGPTPath);
             if (installationDirectory is null) continue;
             LogThrottled($"chatgpt-directory:{installationDirectory}",
@@ -388,6 +446,30 @@ public sealed class CodexDiscoveryService(LogService logs)
         }
     }
 
+    public static bool IsPackagedAppInternalPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            var normalized = Path.GetFullPath(Environment.ExpandEnvironmentVariables(path.Trim().Trim('"')))
+                .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+            var programFilesRoots = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetEnvironmentVariable("ProgramW6432") ?? ""
+            };
+            return programFilesRoots
+                .Where(root => !string.IsNullOrWhiteSpace(root))
+                .Select(root => Path.Combine(Path.GetFullPath(root), "WindowsApps") + Path.DirectorySeparatorChar)
+                .Any(root => normalized.StartsWith(root, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
     private void LogThrottled(string key, string message)
     {
         var now = DateTimeOffset.UtcNow;
@@ -400,6 +482,7 @@ public sealed class CodexDiscoveryService(LogService logs)
     {
         CodexDiscoverySource.CodexProcess => "RunningCodex",
         CodexDiscoverySource.ChatGPTProcess => "RunningChatGPT",
+        CodexDiscoverySource.Manual => "Manual",
         _ => source.ToString()
     };
 

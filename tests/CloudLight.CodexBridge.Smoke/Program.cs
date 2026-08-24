@@ -55,6 +55,51 @@ if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreC
     Assert(retrySettings.CodexCustomPath == @"C:\Users\test\manual-codex.exe" && retrySettings.DetectedCodexPath == recoveredPath,
         "自动发现结果不得覆盖用户手动路径");
 
+    var testRoot = Path.Combine(Path.GetTempPath(), $"CodexDiscovery-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(testRoot);
+    var executableEntry = Path.Combine(testRoot, "codex.cmd");
+    await File.WriteAllTextAsync(executableEntry, "@echo off\r\necho codex-cli test\r\n");
+    try
+    {
+        var packagedInternal = @"C:\Program Files\WindowsApps\OpenAI.Codex_test\app\resources\codex.exe";
+        var continued = await new CodexDiscoveryService(logs).DiscoverCandidatesAsync(
+            [packagedInternal, executableEntry], CodexDiscoverySource.PATH);
+        Assert(continued.Found && continued.Path == executableEntry,
+            "WindowsApps 包内部 exe 必须被拒绝，并继续验证普通可执行入口");
+    }
+    finally
+    {
+        Directory.Delete(testRoot, true);
+    }
+
+    var invalidManualSettings = new UserSettings { CodexCustomPath = @"C:\previous-valid-codex.exe" };
+    var invalidManualValidation = await new CodexDiscoveryService(logs)
+        .ValidateManualPathAsync(@"C:\missing-codex.exe");
+    Assert(!CodexPathSettings.TryPrepareManualSave(
+            invalidManualSettings, @"C:\missing-codex.exe", invalidManualValidation, out var invalidApplyPath) &&
+           invalidManualSettings.CodexCustomPath == @"C:\previous-valid-codex.exe" && invalidApplyPath == "",
+        "无效手动路径不得修改持久化值或产生 Apply 路径");
+
+    var manualDiscovery = new CodexDiscoveryResult(
+        true, executableEntry, "codex-cli test", CodexDiscoverySource.Manual);
+    Assert(!CodexPathSettings.RememberAutomaticDiscovery(retrySettings, manualDiscovery),
+        "手动验证结果不得写入自动发现路径");
+
+    var automaticSettings = new UserSettings { CodexCustomPath = @"C:\stale-manual-codex.exe", DetectedCodexPath = recoveredPath };
+    Assert(CodexPathSettings.TryPrepareManualSave(
+            automaticSettings, "", failed, out var automaticApplyPath) &&
+           automaticSettings.CodexCustomPath == "" && automaticSettings.DetectedCodexPath == recoveredPath && automaticApplyPath == "",
+        "自动模式保存必须清除旧手动路径，且不得覆盖自动路径或提交 Manual Apply");
+
+    var legacyAutomaticSettings = new UserSettings
+    {
+        CodexCustomPath = @"C:\Users\test\manual-codex.exe",
+        DetectedCodexPath = @"C:\Program Files\WindowsApps\OpenAI.Codex_test\app\resources\codex.exe"
+    };
+    CodexPathSettings.RemoveUnsafeAutomaticPath(legacyAutomaticSettings);
+    Assert(legacyAutomaticSettings.CodexCustomPath == @"C:\Users\test\manual-codex.exe" && legacyAutomaticSettings.DetectedCodexPath == "",
+        "清理旧的包内自动路径时不得修改手动路径");
+
     using var cancellation = new CancellationTokenSource();
     var cancellationRunner = new CodexDiscoveryRetryRunner(logs, [TimeSpan.FromMinutes(1)]);
     var cancellationTask = cancellationRunner.RunAsync(_ => Task.FromResult(failed), (_, _) => Task.CompletedTask, cancellation.Token);
@@ -64,7 +109,7 @@ if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreC
     catch (OperationCanceledException) { cancelled = true; }
     Assert(cancelled, "应用退出取消令牌必须立即终止 retry");
 
-    Console.WriteLine("PASS Codex discovery retry recovery, path preservation, apply/refresh, cancellation");
+    Console.WriteLine("PASS Codex discovery retry, WindowsApps filtering, manual/automatic save isolation, cancellation");
     return;
 }
 
@@ -87,8 +132,8 @@ if (args.Contains("--live-codex-discovery", StringComparer.OrdinalIgnoreCase))
         Environment.SetEnvironmentVariable("PATH", "");
         var liveDiscovery = await new CodexDiscoveryService(new LogService())
             .DiscoverAsync(@"Z:\missing-codex.exe");
-        Assert(liveDiscovery.Found && liveDiscovery.Source is CodexDiscoverySource.CodexProcess or CodexDiscoverySource.ChatGPTProcess,
-            "清空 PATH 后必须能从当前 Codex/ChatGPT 进程发现有效 Codex");
+        Assert(liveDiscovery.Found && !CodexDiscoveryService.IsPackagedAppInternalPath(liveDiscovery.Path),
+            "清空 PATH 后必须能根据普通入口或当前 Codex/ChatGPT 安装线索发现有效 Codex，且不得返回包内部路径");
         Console.WriteLine($"PASS live Codex discovery: {liveDiscovery.Source} {liveDiscovery.Path} {liveDiscovery.Version}");
         return;
     }

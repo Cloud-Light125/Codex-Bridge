@@ -73,6 +73,7 @@ public sealed class SettingsService
     {
         settings.CodexCustomPath = settings.CodexCustomPath?.Trim() ?? "";
         settings.DetectedCodexPath = settings.DetectedCodexPath?.Trim() ?? "";
+        CodexPathSettings.RemoveUnsafeAutomaticPath(settings);
         settings.TelegramAllowedUserIds ??= [];
         settings.TelegramAllowedUserIds = settings.TelegramAllowedUserIds.Where(id => id > 0).Distinct().ToList();
         settings.TelegramPollingTimeoutSeconds = Math.Clamp(settings.TelegramPollingTimeoutSeconds, 10, 60);

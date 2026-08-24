@@ -11,12 +11,45 @@ public static class CodexPathSettings
 
     public static bool RememberAutomaticDiscovery(UserSettings settings, CodexDiscoveryResult discovery)
     {
-        if (!discovery.Found || discovery.Source == CodexDiscoverySource.SavedPath ||
+        if (!discovery.Found || discovery.Source is not (
+                CodexDiscoverySource.PATH or CodexDiscoverySource.CodexProcess or CodexDiscoverySource.ChatGPTProcess) ||
             string.Equals(settings.DetectedCodexPath, discovery.Path, StringComparison.OrdinalIgnoreCase))
             return false;
 
         settings.DetectedCodexPath = discovery.Path;
         return true;
+    }
+
+    public static bool TryPrepareManualSave(
+        UserSettings settings,
+        string? requestedPath,
+        CodexDiscoveryResult validation,
+        out string pathToApply)
+    {
+        var requested = requestedPath?.Trim() ?? "";
+        if (requested.Length == 0)
+        {
+            settings.CodexCustomPath = "";
+            pathToApply = "";
+            return true;
+        }
+
+        if (!validation.Found || validation.Source != CodexDiscoverySource.Manual ||
+            string.IsNullOrWhiteSpace(validation.Path))
+        {
+            pathToApply = "";
+            return false;
+        }
+
+        settings.CodexCustomPath = validation.Path;
+        pathToApply = validation.Path;
+        return true;
+    }
+
+    public static void RemoveUnsafeAutomaticPath(UserSettings settings)
+    {
+        if (CodexDiscoveryService.IsPackagedAppInternalPath(settings.DetectedCodexPath))
+            settings.DetectedCodexPath = "";
     }
 }
 

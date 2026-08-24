@@ -47,7 +47,7 @@ public sealed class DaemonProcessManager(LogService logs) : IAsyncDisposable
         startInfo.ArgumentList.Add(Token);
         startInfo.ArgumentList.Add("--sandbox");
         startInfo.ArgumentList.Add(settings.SandboxMode is "read-only" ? "read-only" : "workspace-write");
-        var effectiveCodexPath = !string.IsNullOrWhiteSpace(codexPathOverride)
+        var effectiveCodexPath = codexPathOverride is not null
             ? codexPathOverride.Trim()
             : CodexPathSettings.EffectiveSavedPath(settings);
         if (!string.IsNullOrWhiteSpace(effectiveCodexPath))

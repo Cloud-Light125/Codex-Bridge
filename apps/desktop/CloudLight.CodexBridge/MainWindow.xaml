@@ -25,7 +25,7 @@
                 </StackPanel>
                 <StackPanel Grid.Row="2" Margin="0,0,0,12">
                     <RadioButton Content="设置" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsSettingsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="settings"/>
-                    <TextBlock Text="v1.0.1" Style="{StaticResource SecondaryTextStyle}" Margin="20,8,0,5"/>
+                    <TextBlock Text="v1.0.3" Style="{StaticResource SecondaryTextStyle}" Margin="20,8,0,5"/>
                 </StackPanel>
             </Grid>
         </Border>

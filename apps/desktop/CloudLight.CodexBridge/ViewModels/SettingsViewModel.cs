@@ -13,6 +13,7 @@ public sealed class SettingsViewModel : ObservableObject
     private readonly UserSettings _settings;
     private readonly LogService _logs;
     private readonly StartupService _startup;
+    private readonly CodexDiscoveryService _codexDiscoveryService;
 	private readonly SemaphoreSlim _mirrorOperationLock = new(1, 1);
     private string _codexCustomPath;
     private string _sandboxMode;
@@ -38,13 +39,15 @@ public sealed class SettingsViewModel : ObservableObject
     private int _threadRefreshIntervalSeconds;
     private string _theme;
 
-    public SettingsViewModel(SettingsService service, BridgeApiClient api, UserSettings settings, LogService logs, StartupService startup)
+    public SettingsViewModel(SettingsService service, BridgeApiClient api, UserSettings settings, LogService logs,
+        StartupService startup, CodexDiscoveryService codexDiscoveryService)
     {
         _service = service;
         _api = api;
         _settings = settings;
         _logs = logs;
         _startup = startup;
+        _codexDiscoveryService = codexDiscoveryService;
         _codexCustomPath = settings.CodexCustomPath;
         _sandboxMode = settings.SandboxMode is "read-only" ? "read-only" : "workspace-write";
         _startWithWindows = startup.IsEnabled;
@@ -294,7 +297,19 @@ public sealed class SettingsViewModel : ObservableObject
 
     private async Task SaveAsync()
     {
-        _settings.CodexCustomPath = CodexCustomPath.Trim();
+        var requestedManualPath = CodexCustomPath.Trim();
+        var manualValidation = string.IsNullOrWhiteSpace(requestedManualPath)
+            ? new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None)
+            : await _codexDiscoveryService.ValidateManualPathAsync(requestedManualPath);
+        if (!CodexPathSettings.TryPrepareManualSave(
+                _settings, requestedManualPath, manualValidation, out var manualPathToApply))
+        {
+            SaveResult = "自定义 Codex 路径不存在、不可执行或不是可直接启动的 CLI；设置未保存。请留空使用自动检测。";
+            _logs.Add("codex-config", $"[codex-config] manual path rejected before save path={LogService.Redact(requestedManualPath)}");
+            return;
+        }
+
+        CodexCustomPath = _settings.CodexCustomPath;
         _settings.SandboxMode = SandboxMode is "read-only" ? "read-only" : "workspace-write";
         _settings.StartWithWindows = StartWithWindows;
         _settings.SilentStartup = SilentStartup;
@@ -310,9 +325,9 @@ public sealed class SettingsViewModel : ObservableObject
         _logs.Add("codex-config", $"[codex-config] persisted path={_settings.CodexCustomPath}");
         try
         {
-            if (!string.IsNullOrWhiteSpace(_settings.CodexCustomPath))
+            if (!string.IsNullOrWhiteSpace(manualPathToApply))
             {
-                var codexStatus = await _api.ApplyCodexPathAsync(_settings.CodexCustomPath, "Manual");
+                var codexStatus = await _api.ApplyCodexPathAsync(manualPathToApply, "Manual");
                 UpdateRuntimeStatus(codexStatus, BackendStatus);
                 _logs.Add("codex-config", $"[codex-config] runtime path updated path={codexStatus.CodexCliPath} target=daemon");
             }
@@ -320,7 +335,9 @@ public sealed class SettingsViewModel : ObservableObject
 			ApplyMirrorStatus(mirror);
             var status = await _api.UpdateSecurityAsync(_settings.SandboxMode);
             ApprovalPolicy = status.ApprovalPolicy;
-            SaveResult = "设置已保存，Codex 程序路径已立即应用到当前运行时。";
+            SaveResult = string.IsNullOrWhiteSpace(manualPathToApply)
+                ? "设置已保存；Codex 路径保持自动检测，不会提交旧的手动路径。"
+                : "设置已保存，Codex 程序路径已立即应用到当前运行时。";
         }
         catch (Exception exception)
         {

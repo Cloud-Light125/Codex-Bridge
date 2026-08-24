@@ -61,7 +61,7 @@ public partial class App : Application
         var commands = new CommandsViewModel(api, logs);
         var channels = new ChannelsViewModel(api, settingsService, new TelegramSecretService(), new QqSecretService(), settings, logs);
         var startup = new StartupService();
-        var settingsViewModel = new SettingsViewModel(settingsService, api, settings, logs, startup);
+        var settingsViewModel = new SettingsViewModel(settingsService, api, settings, logs, startup, codexDiscoveryService);
         settingsViewModel.UpdateDiscovery(codexDiscovery);
         var logsViewModel = new LogsViewModel(logs, settingsService.LogDirectory);
         var overview = new OverviewViewModel(sessions, channels, settingsViewModel);

@@ -93,7 +93,7 @@ public sealed class MainViewModel : ObservableObject
     {
         try
         {
-            var startupCodexPath = _codexDiscovery.Found ? _codexDiscovery.Path : CodexPathSettings.EffectiveSavedPath(_settings);
+            var startupCodexPath = _codexDiscovery.Found ? _codexDiscovery.Path : "";
             var ready = await _daemon.StartAsync(_settings, startupCodexPath, _lifetime.Token);
             _api.Connect(new Uri(ready.Address), _daemon.Token);
             _api.StartEventStream();
@@ -200,9 +200,7 @@ public sealed class MainViewModel : ObservableObject
         Settings.ReloadUserPreferences(_settings);
         _codexDiscovery = await DiscoverInBackgroundAsync(_lifetime.Token);
         Settings.UpdateDiscovery(_codexDiscovery);
-        var effectiveCodexPath = _codexDiscovery.Found
-            ? _codexDiscovery.Path
-            : CodexPathSettings.EffectiveSavedPath(_settings);
+        var effectiveCodexPath = _codexDiscovery.Found ? _codexDiscovery.Path : "";
         var ready = await _daemon.StartAsync(_settings, effectiveCodexPath, _lifetime.Token);
         _api.Connect(new Uri(ready.Address), _daemon.Token);
         _api.StartEventStream();
