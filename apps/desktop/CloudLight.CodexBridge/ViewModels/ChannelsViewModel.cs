@@ -713,14 +713,23 @@ public sealed class ChannelsViewModel : ObservableObject
 
     private async Task PopulateThreadTitlesAsync(IEnumerable<ChannelBinding> bindings, CancellationToken cancellationToken)
     {
-        var groups = bindings.Where(binding => !string.IsNullOrWhiteSpace(binding.ThreadId))
-            .GroupBy(binding => binding.ThreadId, StringComparer.Ordinal);
+        var groups = bindings.Where(binding => !string.IsNullOrWhiteSpace(binding.TargetId))
+			.GroupBy(binding => $"{binding.Backend}:{binding.TargetId}", StringComparer.Ordinal);
         foreach (var group in groups)
         {
             try
             {
-                var thread = await _api.GetThreadAsync(group.Key, cancellationToken);
-                foreach (var binding in group) binding.ThreadTitle = thread.Title;
+				var first = group.First();
+				if (first.IsOpenClaw)
+				{
+					var session = await _api.GetOpenClawSessionAsync(first.TargetId, cancellationToken);
+					foreach (var binding in group) binding.ThreadTitle = session.Title;
+				}
+				else
+				{
+					var thread = await _api.GetThreadAsync(first.TargetId, cancellationToken);
+					foreach (var binding in group) binding.ThreadTitle = thread.Title;
+				}
             }
             catch (BridgeApiException)
             {

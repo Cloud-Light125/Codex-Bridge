@@ -21,6 +21,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/mirror"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/openclaw"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/qqbot"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/telegram"
@@ -84,6 +85,9 @@ func main() {
 	controlService := control.NewService(manager, manager, threadRegistry)
 	telegramService := telegram.NewService(controlService, manager, bindingRepository, broker, logger, threadRegistry)
 	qqbotService := qqbot.NewService(controlService, manager, bindingRepository, broker, logger, threadRegistry)
+	openClawService := openclaw.NewService(logger, broker)
+	telegramService.SetOpenClawBackend(openClawService)
+	qqbotService.SetOpenClawBackend(openClawService)
 	telegramService.SetCommandRegistry(commandRegistry)
 	qqbotService.SetCommandRegistry(commandRegistry)
 	mirrorService, err := mirror.New(paths.MirrorFile, controlService, manager, threadRegistry, broker, logger,
@@ -106,6 +110,7 @@ func main() {
 		os.Exit(1)
 	}
 	server := api.New(options.Token, manager, controlService, bindingRepository, broker, logger, telegramService, qqbotService, mirrorService, commandRegistry)
+	server.SetOpenClawBackend(openClawService)
 
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.Serve(listener) }()
@@ -157,6 +162,9 @@ func main() {
 		logger.Printf("QQ Official Bot shutdown: %v", err)
 	}
 	cancelQQ()
+	if err := openClawService.Close(); err != nil {
+		logger.Printf("OpenClaw shutdown: %v", err)
+	}
 	if err := manager.Close(); err != nil {
 		logger.Printf("runtime shutdown: %v", err)
 	}

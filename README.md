@@ -1,6 +1,6 @@
 # CloudLight Codex Bridge
 
-CloudLight Codex Bridge 是面向 Windows 的 Codex 桌面助手。它可以浏览并继续现有 Codex 会话，通过稳定的 `#N` 聊天编号从 Telegram 或 QQ 机器人发送任务，并把 Codex 的最终回答同步到指定渠道。
+CloudLight Codex Bridge 是面向 Windows 的 Codex 与 OpenClaw 桌面助手。它可以浏览并继续现有 Codex 会话，也可以通过 OpenClaw Gateway 选择已有 Session；Telegram 或 QQ 机器人始终由 Bridge 统一接收消息，再转发给选定后端。
 
 当前版本：`1.0.3`
 
@@ -9,8 +9,10 @@ CloudLight Codex Bridge 是面向 Windows 的 Codex 桌面助手。它可以浏�
 - 现代化 Windows 桌面界面，支持跟随系统、浅色和深色主题。
 - 概览、Codex 会话、远程渠道、消息同步、备份与恢复、设置和运行日志页面。
 - 浏览现有 Codex 会话，查看标题、项目目录、状态和本地时间。
+- 浏览 OpenClaw Gateway 的 Session，并在界面中以 `[OpenClaw]` 与 `[Codex]` 明确区分后端。
 - 在现有会话中继续对话或停止正在运行的任务。
 - 使用 `#N` 聊天编号从 Telegram 或 QQ 机器人精确选择会话。
+- 使用 `/bind oc:<session-key>` 将 Telegram 或 QQ 聊天绑定到 OpenClaw Session。
 - 每次任务只向各平台同步一次最终回答。
 - 完整备份和恢复 Codex 数据目录与应用数据。
 - 支持登录 Windows 后自动启动、静默启动、系统托盘和窗口状态恢复。
@@ -18,7 +20,7 @@ CloudLight Codex Bridge 是面向 Windows 的 Codex 桌面助手。它可以浏�
 ## 系统要求
 
 - Windows 10 1809 或更高版本，x64。
-- 已安装并能正常使用 Codex CLI 或 Codex Desktop。
+- 已安装并能正常使用 Codex CLI 或 Codex Desktop；OpenClaw 为可选后端。
 - Codex 已完成登录。
 - 使用 Telegram 或 QQ 时，网络需要能够连接对应平台。
 
@@ -50,8 +52,8 @@ artifacts\win-x64-1.0.3\CloudLight.CodexBridge.exe
 
 1. 启动 CloudLight Codex Bridge。
 2. 等待顶部状态显示“已连接”。
-3. 打开“Codex 会话”，从左侧选择一个会话。
-4. 如未自动找到 Codex，可在“设置 → Codex”中指定 Codex 程序路径。
+3. 打开“会话”，从左侧选择 `[Codex]` 或 `[OpenClaw]` 会话。
+4. 如未自动找到 Codex，可在“设置 → Codex”中指定 Codex 程序路径；OpenClaw 可在“设置 → OpenClaw”中自动发现本机 Gateway。
 
 软件不会更改 Codex 已生效的模型、推理强度或安全设置。
 
@@ -61,9 +63,9 @@ artifacts\win-x64-1.0.3\CloudLight.CodexBridge.exe
 
 查看 Codex、QQ、Telegram 和消息同步的当前状态，以及会话数量和最近活动。
 
-### Codex 会话
+### 会话
 
-左侧以 `#N` 和标题显示会话。右侧可以查看项目目录、模型、创建时间、最后更新时间、历史消息和等待处理的事项。
+左侧以 `[Codex]` / `[OpenClaw]` 和标题显示会话。Codex 会话使用 `#N` 编号；OpenClaw 使用 Gateway 返回的 Session Key。右侧可以查看状态、模型、创建时间、最后更新时间和历史消息。
 
 常用操作：
 
@@ -71,6 +73,7 @@ artifacts\win-x64-1.0.3\CloudLight.CodexBridge.exe
 - “复制 #N”：复制聊天编号。
 - “停止”：停止当前可控制的任务。
 - “发送”：在当前会话中继续对话。
+- OpenClaw 会话的“发送”和“停止”直接调用 Gateway 的 `chat.send` / `chat.abort`。
 - “…”：复制会话 ID，或重新检查保存状态。
 
 会话 ID 仅作为次要详细信息；日常使用优先使用更易读的 `#N` 编号。
@@ -89,7 +92,7 @@ artifacts\win-x64-1.0.3\CloudLight.CodexBridge.exe
 
 ### 设置
 
-管理窗口行为、自动启动、主题、数据位置、Codex 程序路径、会话刷新间隔，以及新任务的文件访问范围。
+管理窗口行为、自动启动、主题、数据位置、Codex 程序路径、OpenClaw Gateway 地址/认证/自动重连、会话刷新间隔，以及新任务的文件访问范围。OpenClaw Token/Password 保存在 Bridge 自己的 DPAPI 凭据文件中，不写入 `settings.json`，也不会修改 OpenClawTray。
 
 ### 运行日志
 
@@ -127,6 +130,17 @@ artifacts\win-x64-1.0.3\CloudLight.CodexBridge.exe
 这些是首次启动时自动加载并默认锁定的系统指令。“指令”页面可以逐条解锁、改名、添加别名、停用或恢复，也可以创建任意数量映射到受支持功能的自定义指令。QQ 与 Telegram 始终读取同一个有效配置；中文指令即使不符合 Telegram 菜单规则，仍可直接在聊天文本中使用。
 
 `/threads`、`/thread`、`/history`、`/running`、`/waiting`、`/recent`、`/failed`、`/quota` 和 `/status` 均由 Bridge 在本地直接查询，不会向 Codex 提交新任务、创建 User Message、改变会话或推进消息同步游标。查询命令不要求当前聊天先执行 `/bind`，但仍沿用 QQ 与 Telegram 已配置的允许账号列表。
+
+`/threads` 也会列出当前可用的 OpenClaw Session。OpenClaw 不使用 Codex 的 `#N` 编号，绑定时使用完整 Session Key：
+
+```text
+/bind oc:agent:main:main
+/current
+你好，继续处理上次任务
+/stop
+```
+
+OpenClaw 的最终回答由 Gateway `chat` 事件返回给 Bridge，再由 Bridge 发回当前 Telegram 或 QQ 聊天；OpenClaw 不会直接消费同一个 Bot。
 
 `/quota` 只显示当前 Codex App Server 的 `account/rateLimits/read` 实际返回值，不根据 Token 用量估算，也不会抓取网页。如果当前 Codex 版本、登录方式或账号没有返回可读额度，机器人会明确说明当前无法读取。
 

@@ -73,6 +73,7 @@ public sealed class SettingsService
     {
         settings.CodexCustomPath = settings.CodexCustomPath?.Trim() ?? "";
         settings.DetectedCodexPath = settings.DetectedCodexPath?.Trim() ?? "";
+		settings.OpenClawGatewayUrl = NormalizeOpenClawUrl(settings.OpenClawGatewayUrl);
         CodexPathSettings.RemoveUnsafeAutomaticPath(settings);
         settings.TelegramAllowedUserIds ??= [];
         settings.TelegramAllowedUserIds = settings.TelegramAllowedUserIds.Where(id => id > 0).Distinct().ToList();
@@ -108,6 +109,15 @@ public sealed class SettingsService
 		settings.WindowWidth = Math.Clamp(double.IsFinite(settings.WindowWidth) ? settings.WindowWidth : 1280, 1040, 3840);
 		settings.WindowHeight = Math.Clamp(double.IsFinite(settings.WindowHeight) ? settings.WindowHeight : 800, 680, 2160);
 		return settings;
+	}
+
+	private static string NormalizeOpenClawUrl(string? value)
+	{
+		var candidate = value?.Trim() ?? "";
+		if (candidate.Length == 0) return "ws://127.0.0.1:18789";
+		return Uri.TryCreate(candidate, UriKind.Absolute, out var uri) &&
+			(uri.Scheme.Equals("ws", StringComparison.OrdinalIgnoreCase) || uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase)) &&
+			!string.IsNullOrWhiteSpace(uri.Host) ? candidate : "ws://127.0.0.1:18789";
 	}
 
 	private static List<string> NormalizeOpenIds(IEnumerable<string>? values)

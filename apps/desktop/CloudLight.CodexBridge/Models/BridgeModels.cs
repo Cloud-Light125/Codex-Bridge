@@ -33,7 +33,9 @@ public sealed class ThreadListResponse
 
 public class ThreadSummary
 {
+	public string Backend { get; set; } = "codex";
     public string ThreadId { get; set; } = "";
+	public string SessionKey { get; set; } = "";
 	public int Number { get; set; }
     public string Title { get; set; } = "";
     public string Summary { get; set; } = "";
@@ -43,8 +45,12 @@ public class ThreadSummary
     public string UpdatedAt { get; set; } = "";
     public bool? Archived { get; set; }
     public string Status { get; set; } = "";
-	public string NumberPrefix => Number > 0 ? $"#{Number}" : "#?";
-	public string NumberedTitle => $"{NumberPrefix}  {Title}";
+	public bool IsOpenClaw => string.Equals(Backend, "openclaw", StringComparison.OrdinalIgnoreCase);
+	public string BackendLabel => IsOpenClaw ? "[OpenClaw]" : "[Codex]";
+	public string TargetId => IsOpenClaw && !string.IsNullOrWhiteSpace(SessionKey) ? SessionKey : ThreadId;
+	public string SessionKeyOrThreadId() => TargetId;
+	public string NumberPrefix => IsOpenClaw ? BackendLabel : Number > 0 ? $"{BackendLabel} #{Number}" : $"{BackendLabel} #?";
+	public string NumberedTitle => IsOpenClaw ? $"{BackendLabel}  {Title}" : $"{NumberPrefix}  {Title}";
     public string CreatedAtDisplay => UiText.LocalDateTime(CreatedAt);
     public string UpdatedAtDisplay => UiText.LocalDateTime(UpdatedAt);
     public string StatusDisplay => UiText.Status(Status);
@@ -55,6 +61,103 @@ public sealed class ThreadDetail : ThreadSummary
 {
     public List<TurnDetail> Turns { get; set; } = [];
     public ThreadRuntime Runtime { get; set; } = new();
+}
+
+public sealed class OpenClawConnectionStatus
+{
+    public string Backend { get; set; } = "openclaw";
+    public bool Configured { get; set; }
+    public bool Running { get; set; }
+    public bool Connected { get; set; }
+    public string State { get; set; } = "not-configured";
+    public string GatewayUrl { get; set; } = "";
+    public int Protocol { get; set; }
+    public string ServerVersion { get; set; } = "";
+    public string AuthMode { get; set; } = "";
+    public int SessionCount { get; set; }
+    public bool AutoReconnect { get; set; }
+    public int ReconnectCount { get; set; }
+    public string LastConnectedAt { get; set; } = "";
+    public string LastDisconnectedAt { get; set; } = "";
+    public string LastTickAt { get; set; } = "";
+    public string LastError { get; set; } = "";
+}
+
+public sealed class OpenClawConfigureRequest
+{
+    public string GatewayUrl { get; set; } = "";
+    public string Token { get; set; } = "";
+    public string Password { get; set; } = "";
+    public bool AutoReconnect { get; set; } = true;
+    public bool? Start { get; set; } = true;
+}
+
+public sealed class OpenClawSessionListResponse
+{
+    public List<OpenClawSessionSummary> Sessions { get; set; } = [];
+}
+
+public class OpenClawSessionSummary
+{
+    public string Backend { get; set; } = "openclaw";
+    public string Key { get; set; } = "";
+    public string SessionId { get; set; } = "";
+    public string AgentId { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Summary { get; set; } = "";
+    public string Cwd { get; set; } = "";
+    public string Model { get; set; } = "";
+    public string CreatedAt { get; set; } = "";
+    public string UpdatedAt { get; set; } = "";
+    public string Status { get; set; } = "idle";
+    public bool? Archived { get; set; }
+    public bool HasActiveRun { get; set; }
+    public List<string> ActiveRunIds { get; set; } = [];
+
+    public ThreadSummary ToThreadSummary() => new()
+    {
+        Backend = "openclaw", ThreadId = Key, SessionKey = Key, Title = Title, Summary = Summary,
+        Cwd = Cwd, Model = Model, CreatedAt = CreatedAt, UpdatedAt = UpdatedAt, Status = Status,
+        Archived = Archived
+    };
+}
+
+public sealed class OpenClawSessionDetail : OpenClawSessionSummary
+{
+    public List<OpenClawMessage> Messages { get; set; } = [];
+
+    public ThreadDetail ToThreadDetail() => new()
+    {
+        Backend = "openclaw", ThreadId = Key, SessionKey = Key, Title = Title, Summary = Summary,
+        Cwd = Cwd, Model = Model, CreatedAt = CreatedAt, UpdatedAt = UpdatedAt, Status = Status,
+        Archived = Archived
+    };
+}
+
+public sealed class OpenClawMessage
+{
+    public string Id { get; set; } = "";
+    public string Role { get; set; } = "assistant";
+    public string Text { get; set; } = "";
+    public string Timestamp { get; set; } = "";
+    public string RunId { get; set; } = "";
+}
+
+public sealed class OpenClawSendResult
+{
+    public string Backend { get; set; } = "openclaw";
+    public string SessionKey { get; set; } = "";
+    public string RunId { get; set; } = "";
+    public string Status { get; set; } = "";
+    public string AcceptedAt { get; set; } = "";
+}
+
+public sealed class OpenClawAbortResult
+{
+    public string Backend { get; set; } = "openclaw";
+    public string SessionKey { get; set; } = "";
+    public string RunId { get; set; } = "";
+    public string Status { get; set; } = "";
 }
 
 public sealed class ThreadRuntime
@@ -341,6 +444,9 @@ public sealed class UserSettings
 {
     public string CodexCustomPath { get; set; } = "";
     public string DetectedCodexPath { get; set; } = "";
+	public string OpenClawGatewayUrl { get; set; } = "ws://127.0.0.1:18789";
+	public bool OpenClawAutoDiscover { get; set; } = true;
+	public bool OpenClawAutoReconnect { get; set; } = true;
     public string Language { get; set; } = "zh-CN";
     public string SandboxMode { get; set; } = "workspace-write";
     public List<long> TelegramAllowedUserIds { get; set; } = [];
@@ -559,15 +665,30 @@ public sealed class BindingListResponse
     public List<ChannelBinding>? Bindings { get; set; } = [];
 }
 
+public sealed class CreateBindingRequest
+{
+	public string Backend { get; set; } = "codex";
+	public string ChannelType { get; set; } = "";
+	public string AccountId { get; set; } = "";
+	public string ConversationType { get; set; } = "default";
+	public string ChatId { get; set; } = "";
+	public string TopicId { get; set; } = "";
+	public string ThreadId { get; set; } = "";
+	public string SessionKey { get; set; } = "";
+	public bool? Enabled { get; set; }
+}
+
 public sealed class ChannelBinding
 {
     public string Id { get; set; } = "";
+	public string Backend { get; set; } = "codex";
     public string ChannelType { get; set; } = "";
     public string ConversationType { get; set; } = "";
     public string AccountId { get; set; } = "";
     public string ChatId { get; set; } = "";
     public string TopicId { get; set; } = "";
     public string ThreadId { get; set; } = "";
+	public string SessionKey { get; set; } = "";
     public string ThreadTitle { get; set; } = "";
 	public bool Enabled { get; set; }
 	public bool Legacy { get; set; }
@@ -579,6 +700,9 @@ public sealed class ChannelBinding
         ? "已失效的旧版绑定"
         : string.Empty;
     public string ShortThreadId => Abbreviate(ThreadId);
+	public bool IsOpenClaw => string.Equals(Backend, "openclaw", StringComparison.OrdinalIgnoreCase);
+	public string BackendLabel => IsOpenClaw ? "[OpenClaw]" : "[Codex]";
+	public string TargetId => IsOpenClaw && !string.IsNullOrWhiteSpace(SessionKey) ? SessionKey : ThreadId;
     public string SafeChatSummary => SafeSummary(ChatId);
     public string DisplayThreadTitle => string.IsNullOrWhiteSpace(ThreadTitle) ? "未提供标题" : ThreadTitle;
     public string CreatedAtDisplay => UiText.LocalDateTime(CreatedAt);

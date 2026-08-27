@@ -28,6 +28,31 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
     public Task<BridgeStatus> GetStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<BridgeStatus>("/api/v1/status", cancellationToken);
 
+    public Task<OpenClawConnectionStatus> GetOpenClawStatusAsync(CancellationToken cancellationToken = default) =>
+        GetAsync<OpenClawConnectionStatus>("/api/v1/openclaw/status", cancellationToken);
+
+    public Task<OpenClawConnectionStatus> ConfigureOpenClawAsync(OpenClawConfigureRequest input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<OpenClawConnectionStatus>(HttpMethod.Put, "/api/v1/settings/openclaw", input, cancellationToken);
+
+    public Task<OpenClawConnectionStatus> TestOpenClawAsync(OpenClawConfigureRequest input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<OpenClawConnectionStatus>(HttpMethod.Post, "/api/v1/openclaw/test", input, cancellationToken);
+
+    public async Task<OpenClawSessionListResponse> GetOpenClawSessionsAsync(int limit = 100, CancellationToken cancellationToken = default)
+    {
+        var result = await GetAsync<OpenClawSessionListResponse>($"/api/v1/openclaw/sessions?limit={limit}", cancellationToken);
+        result.Sessions ??= [];
+        return result;
+    }
+
+    public Task<OpenClawSessionDetail> GetOpenClawSessionAsync(string sessionKey, CancellationToken cancellationToken = default) =>
+        GetAsync<OpenClawSessionDetail>($"/api/v1/openclaw/sessions/{Uri.EscapeDataString(sessionKey)}", cancellationToken);
+
+    public Task<OpenClawSendResult> SendOpenClawMessageAsync(string sessionKey, string message, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<OpenClawSendResult>(HttpMethod.Post, $"/api/v1/openclaw/sessions/{Uri.EscapeDataString(sessionKey)}/messages", new { message }, cancellationToken);
+
+    public Task<OpenClawAbortResult> AbortOpenClawAsync(string sessionKey, string runId = "", CancellationToken cancellationToken = default) =>
+        SendJsonAsync<OpenClawAbortResult>(HttpMethod.Post, $"/api/v1/openclaw/sessions/{Uri.EscapeDataString(sessionKey)}/abort", new { runId }, cancellationToken);
+
     public Task<ThreadListResponse> GetThreadsAsync(int limit = 100, string cursor = "", CancellationToken cancellationToken = default)
     {
         var uri = $"/api/v1/threads?limit={limit}";
@@ -135,12 +160,15 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
 		return result;
 	}
 
-    public async Task<BindingListResponse> GetBindingsAsync(CancellationToken cancellationToken = default)
+	public async Task<BindingListResponse> GetBindingsAsync(CancellationToken cancellationToken = default)
 	{
 		var result = await GetAsync<BindingListResponse>("/api/v1/bindings", cancellationToken);
 		result.Bindings ??= [];
 		return result;
 	}
+
+    public Task<ChannelBinding> CreateBindingAsync(CreateBindingRequest input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<ChannelBinding>(HttpMethod.Post, "/api/v1/bindings", input, cancellationToken);
 
     public Task DeleteBindingAsync(string bindingId, CancellationToken cancellationToken = default) =>
         SendNoContentAsync(HttpMethod.Delete, $"/api/v1/bindings/{Uri.EscapeDataString(bindingId)}", cancellationToken);

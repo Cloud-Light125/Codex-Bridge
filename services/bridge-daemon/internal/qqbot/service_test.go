@@ -3,6 +3,7 @@ package qqbot
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
@@ -124,6 +126,46 @@ func TestMultiplePendingInteractionsRouteByThread(t *testing.T) {
 		t.Fatalf("responses=%#v", runtime.responses)
 	}
 }
+
+func TestCodexDisconnectClearsOnlyCodexInteractionState(t *testing.T) {
+	service, _, _ := newServiceFixture(t, &fakeControl{}, &fakeRuntime{})
+	codexAddress := channels.ChannelAddress{ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c", ChatID: "codex"}
+	openClawAddress := channels.ChannelAddress{ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c", ChatID: "openclaw"}
+	service.routes["codex-turn"] = &turnRoute{Address: codexAddress, UserID: "200", ThreadID: "thread-codex", TurnID: "codex-turn"}
+	service.routes["openclaw-run"] = &turnRoute{Address: openClawAddress, UserID: "201", Backend: conversation.BackendOpenClaw, ThreadID: "agent:main:main", TurnID: "openclaw-run"}
+	service.flows["codex-interaction"] = &interactionFlow{Address: codexAddress, UserID: "200", TurnID: "codex-turn", InteractionID: "codex-interaction"}
+	service.flows["openclaw-interaction"] = &interactionFlow{Address: openClawAddress, UserID: "201", TurnID: "openclaw-run", InteractionID: "openclaw-interaction"}
+	service.flowByInput[inputKey(codexAddress, "200")] = "codex-interaction"
+	service.flowByInput[inputKey(openClawAddress, "201")] = "openclaw-interaction"
+	service.interactionNotified = map[string]bool{"codex-interaction": true, "codex-approval": true}
+
+	service.handleEvent(events.Event{EventType: events.CodexDisconnected})
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if _, ok := service.routes["codex-turn"]; ok {
+		t.Fatal("Codex route remained after Codex disconnect")
+	}
+	if _, ok := service.routes["openclaw-run"]; !ok {
+		t.Fatal("OpenClaw route was removed by Codex disconnect")
+	}
+	if _, ok := service.flows["codex-interaction"]; ok {
+		t.Fatal("Codex interaction flow remained after Codex disconnect")
+	}
+	if _, ok := service.flowByInput[inputKey(codexAddress, "200")]; ok {
+		t.Fatal("Codex interaction input route remained after Codex disconnect")
+	}
+	if service.flowByInput[inputKey(openClawAddress, "201")] != "openclaw-interaction" {
+		t.Fatalf("OpenClaw input route was changed: %#v", service.flowByInput)
+	}
+	if service.interactionNotified["codex-interaction"] {
+		t.Fatal("Codex interaction notification remained after Codex disconnect")
+	}
+	if len(service.interactionNotified) != 0 {
+		t.Fatalf("Codex interaction notifications remained after disconnect: %#v", service.interactionNotified)
+	}
+}
+
 func (f *fakeRuntime) InterruptTurn(context.Context, string, string) (control.InterruptResult, error) {
 	f.interrupts++
 	return control.InterruptResult{}, nil
@@ -334,5 +376,61 @@ func TestInvalidAnswerDoesNotAdvanceFlow(t *testing.T) {
 	service.answerInteraction(context.Background(), channels.InboundMessage{Address: address, UserID: "200"}, "2")
 	if service.flows["input"].Index != 0 || len(runtime.responses) != 0 {
 		t.Fatal("invalid answer advanced or submitted the flow")
+	}
+}
+
+type fakeOpenClawBackend struct {
+	sends  []string
+	aborts []string
+}
+
+func (f *fakeOpenClawBackend) Backend() string { return conversation.BackendOpenClaw }
+func (f *fakeOpenClawBackend) ListSessions(context.Context, int) ([]conversation.Session, error) {
+	return []conversation.Session{{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Title: "Main", Status: "idle"}}, nil
+}
+func (f *fakeOpenClawBackend) ReadSession(context.Context, string) (conversation.Detail, error) {
+	return conversation.Detail{Session: conversation.Session{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Title: "Main", Status: "idle"}}, nil
+}
+func (f *fakeOpenClawBackend) SendMessage(_ context.Context, key, message string) (conversation.SendResult, error) {
+	f.sends = append(f.sends, key+":"+message)
+	return conversation.SendResult{Backend: conversation.BackendOpenClaw, SessionKey: key, RunID: "openclaw-run-" + strconv.Itoa(len(f.sends)), Status: "running"}, nil
+}
+func (f *fakeOpenClawBackend) Abort(_ context.Context, key, runID string) (conversation.AbortResult, error) {
+	f.aborts = append(f.aborts, key+":"+runID)
+	return conversation.AbortResult{Backend: conversation.BackendOpenClaw, SessionKey: key, RunID: runID, Status: "aborted"}, nil
+}
+func (f *fakeOpenClawBackend) SubscribeEvents(func(conversation.Event)) func() { return func() {} }
+func (f *fakeOpenClawBackend) ConnectionStatus() conversation.ConnectionStatus {
+	return conversation.ConnectionStatus{Backend: conversation.BackendOpenClaw, Configured: true, Running: true, Connected: true, State: "connected"}
+}
+
+func TestQQBotRoutesBoundOpenClawSessionAndFinalOrAbort(t *testing.T) {
+	service, adapter, repository := newServiceFixture(t, &fakeControl{}, &fakeRuntime{})
+	backend := &fakeOpenClawBackend{}
+	service.SetOpenClawBackend(backend)
+	address := channels.ChannelAddress{ChannelType: "qqbot", AccountID: "app-1", ConversationType: "c2c", ChatID: "openid-1"}
+	if _, _, err := repository.UpsertAddress(bindings.CreateRequest{
+		Backend: conversation.BackendOpenClaw, ChannelType: "qqbot", AccountID: "app-1", ConversationType: "c2c",
+		ChatID: "openid-1", ThreadID: "agent:main:main", SessionKey: "agent:main:main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := channels.InboundMessage{Address: address, UserID: "user-1", Text: "hello OpenClaw"}
+	service.startTurn(context.Background(), message, message.Text)
+	if len(backend.sends) != 1 || !strings.HasSuffix(backend.sends[0], ":hello OpenClaw") {
+		t.Fatalf("OpenClaw send was not routed from QQ: %#v", backend.sends)
+	}
+	service.handleEvent(events.Event{EventType: events.OpenClawMessageCompleted, ThreadID: "agent:main:main", TurnID: "openclaw-run-1", Payload: map[string]any{"text": "final answer"}})
+	if len(adapter.sent) == 0 || adapter.sent[0].Text != "final answer" {
+		t.Fatalf("QQ did not receive the OpenClaw final answer: %#v", adapter.sent)
+	}
+
+	service.startTurn(context.Background(), message, "second task")
+	service.stopTurn(context.Background(), message)
+	if len(backend.aborts) != 1 || backend.aborts[0] != "agent:main:main:openclaw-run-2" {
+		t.Fatalf("OpenClaw abort was not routed from QQ: %#v", backend.aborts)
+	}
+	if len(adapter.sent) < 2 || !strings.Contains(adapter.sent[len(adapter.sent)-1].Text, "已请求停止 OpenClaw") {
+		t.Fatalf("QQ did not acknowledge OpenClaw stop: %#v", adapter.sent)
 	}
 }

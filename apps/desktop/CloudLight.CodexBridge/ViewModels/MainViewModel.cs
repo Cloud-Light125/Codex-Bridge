@@ -70,8 +70,8 @@ public sealed class MainViewModel : ObservableObject
     public ICommand NavigateCommand { get; }
     public ICommand RefreshCommand { get; }
     public string CurrentPageKey { get; private set; }
-    public string PageTitle => CurrentPageKey switch { "sessions" => "Codex 会话", "channels" => "远程渠道", "commands" => "指令管理", "mirror" => "消息同步", "backup" => "备份与恢复", "settings" => "设置", "logs" => "运行日志", _ => "概览" };
-    public string PageDescription => CurrentPageKey switch { "sessions" => "浏览会话、处理等待事项并继续对话", "channels" => "管理 QQ 机器人与 Telegram", "commands" => "统一管理 QQ 和 Telegram 使用的远程指令", "mirror" => "将 Codex 的最终回答发送到指定渠道", "backup" => "备份或恢复 Codex 与应用数据", "settings" => "管理启动、窗口、外观与 Codex 设置", "logs" => "查看本机运行信息和错误详情", _ => "查看 Codex、远程渠道与消息同步状态" };
+    public string PageTitle => CurrentPageKey switch { "sessions" => "会话", "channels" => "远程渠道", "commands" => "指令管理", "mirror" => "消息同步", "backup" => "备份与恢复", "settings" => "设置", "logs" => "运行日志", _ => "概览" };
+    public string PageDescription => CurrentPageKey switch { "sessions" => "浏览 Codex 与 OpenClaw 会话、处理等待事项并继续对话", "channels" => "管理 QQ 机器人与 Telegram", "commands" => "统一管理 QQ 和 Telegram 使用的远程指令", "mirror" => "将 Codex 的最终回答发送到指定渠道", "backup" => "备份或恢复 Codex 与应用数据", "settings" => "管理启动、窗口、外观、Codex 与 OpenClaw 设置", "logs" => "查看本机运行信息和错误详情", _ => "查看 Codex、OpenClaw、远程渠道与消息同步状态" };
     public bool IsOverviewPage => CurrentPageKey == "overview";
     public bool IsSessionsPage => CurrentPageKey == "sessions";
     public bool IsChannelsPage => CurrentPageKey == "channels";
@@ -117,6 +117,7 @@ public sealed class MainViewModel : ObservableObject
             if (!_codexDiscovery.Found) EnsureCodexDiscoveryRetryStarted();
             await RefreshAsync();
             await InitializeRemoteChannelsAsync(forceRetry: false);
+			await Settings.InitializeOpenClawAsync(_lifetime.Token);
             if (CurrentPageKey == "commands") await Commands.EnsureInitializedAsync(_lifetime.Token);
             _initialized = true;
         }
@@ -175,7 +176,8 @@ public sealed class MainViewModel : ObservableObject
             {
                 ErrorMessage = string.IsNullOrWhiteSpace(status.LastError) ? "" : UiText.UserError(status.LastError, "连接");
             }
-            if (status.AppServerRunning) await Sessions.RefreshAsync(_lifetime.Token);
+			await Sessions.RefreshAsync(_lifetime.Token);
+			await Settings.RefreshOpenClawAsync(_lifetime.Token);
         }
         catch (Exception exception)
         {
@@ -215,6 +217,7 @@ public sealed class MainViewModel : ObservableObject
         }
         await RefreshAsync();
         await InitializeRemoteChannelsAsync(forceRetry: true);
+		await Settings.InitializeOpenClawAsync(_lifetime.Token);
         await Commands.RefreshAsync(_lifetime.Token);
     }
 
@@ -230,9 +233,9 @@ public sealed class MainViewModel : ObservableObject
     private void OnEventReceived(object? sender, BridgeEvent bridgeEvent)
     {
         QueueUiAction(() => Sessions.ApplyEvent(bridgeEvent));
-        if (bridgeEvent.EventType.StartsWith("channel.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("binding.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("telegram.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qq.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qqbot.", StringComparison.OrdinalIgnoreCase))
+        if (bridgeEvent.EventType.StartsWith("channel.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("binding.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("telegram.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qq.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qqbot.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("openclaw.", StringComparison.OrdinalIgnoreCase))
             if (Channels.IsContentReady) QueueUiAction(() => Channels.ApplyEvent(bridgeEvent));
-        if (bridgeEvent.EventType is "codex.connected" or "codex.disconnected" or "codex.config_updated" or "error") { QueueUiTask(RefreshAsync); return; }
+        if (bridgeEvent.EventType is "codex.connected" or "codex.disconnected" or "codex.config_updated" or "openclaw.connected" or "openclaw.disconnected" or "openclaw.reconnecting" or "openclaw.session.updated" or "error") { QueueUiTask(RefreshAsync); return; }
         if (bridgeEvent.EventType != "thread.updated") return;
         _eventRefresh?.Cancel(); _eventRefresh?.Dispose();
         _eventRefresh = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);

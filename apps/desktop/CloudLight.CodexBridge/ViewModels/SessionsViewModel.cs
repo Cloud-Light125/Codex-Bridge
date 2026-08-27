@@ -101,20 +101,27 @@ public sealed class SessionsViewModel : ObservableObject
                 SetViewState("empty");
                 return;
             }
-            BeginLoadDetail(value.ThreadId);
+            BeginLoadDetail(value.ThreadId, value.Backend);
         }
     }
 
     public ThreadDetail? SelectedDetail
     {
         get => _selectedDetail;
-        private set => SetProperty(ref _selectedDetail, value);
+        private set
+        {
+            if (!SetProperty(ref _selectedDetail, value)) return;
+            OnPropertyChanged(nameof(OpenDirectoryVisibility));
+            OnPropertyChanged(nameof(CodexOnlyVisibility));
+        }
     }
 
     public Visibility EmptyVisibility => _viewState == "empty" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility LoadingVisibility => _viewState == "loading" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ErrorVisibility => _viewState == "error" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility DetailsVisibility => _viewState == "details" ? Visibility.Visible : Visibility.Collapsed;
+	public Visibility OpenDirectoryVisibility => SelectedDetail?.IsOpenClaw == true ? Visibility.Collapsed : Visibility.Visible;
+	public Visibility CodexOnlyVisibility => SelectedDetail?.IsOpenClaw == true ? Visibility.Collapsed : Visibility.Visible;
     public Visibility ActionErrorVisibility => string.IsNullOrWhiteSpace(ActionError) ? Visibility.Collapsed : Visibility.Visible;
 
     public string ErrorText
@@ -149,9 +156,9 @@ public sealed class SessionsViewModel : ObservableObject
 
     public bool CanSend => SelectedDetail is not null && _runtime.CanSend && !_isSending && !string.IsNullOrWhiteSpace(MessageText);
     public bool CanStop => SelectedDetail is not null && _runtime.CanInterrupt && !_isSending && !string.IsNullOrWhiteSpace(_runtime.TurnId);
-    public bool CanVerifyPersistence => SelectedDetail is not null;
+    public bool CanVerifyPersistence => SelectedDetail is not null && !SelectedDetail.IsOpenClaw;
     public string RuntimeStateText => StateText(_runtime.State);
-    public string RuntimeSourceText => _runtime.Origin switch { "local" => "由本程序发起", "external" => "由其他 Codex 客户端发起", _ => "" };
+    public string RuntimeSourceText => _runtime.Origin switch { "local" => "由本程序发起", "external" => "由其他 Codex 客户端发起", "openclaw" => "OpenClaw Gateway", _ => "" };
     public string CurrentTurnId => _runtime.TurnId;
     public string PersistenceVerificationText { get; private set; } = "";
     public Visibility PersistenceVerificationVisibility => string.IsNullOrWhiteSpace(PersistenceVerificationText) ? Visibility.Collapsed : Visibility.Visible;
@@ -163,15 +170,32 @@ public sealed class SessionsViewModel : ObservableObject
         try
         {
             var selectedId = SelectedThread?.ThreadId;
-            var response = await _api.GetThreadsAsync(100, cancellationToken: cancellationToken);
+            var selectedBackend = SelectedThread?.Backend ?? "codex";
+            ThreadListResponse? response = null;
+            OpenClawSessionListResponse? openClawResponse = null;
+            Exception? codexError = null;
+            try { response = await _api.GetThreadsAsync(100, cancellationToken: cancellationToken); }
+            catch (Exception exception) when (exception is not OperationCanceledException) { codexError = exception; }
+            try { openClawResponse = await _api.GetOpenClawSessionsAsync(100, cancellationToken); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                if (response is null) _logs.Add("openclaw", $"OpenClaw 会话暂不可用：{exception.Message}");
+            }
+            if (response is null && openClawResponse is null)
+                throw codexError ?? new InvalidOperationException("Codex 和 OpenClaw 会话均不可用。");
             _suppressSelectionLoad = true;
             try
             {
                 Threads.Clear();
-                foreach (var thread in response.Threads) Threads.Add(thread);
+                foreach (var thread in response?.Threads ?? [])
+                {
+                    if (string.IsNullOrWhiteSpace(thread.Backend)) thread.Backend = "codex";
+                    Threads.Add(thread);
+                }
+                foreach (var session in openClawResponse?.Sessions ?? []) Threads.Add(session.ToThreadSummary());
                 SelectedThread = string.IsNullOrWhiteSpace(selectedId)
                     ? null
-                    : Threads.FirstOrDefault(thread => thread.ThreadId == selectedId);
+                    : Threads.FirstOrDefault(thread => thread.ThreadId == selectedId && string.Equals(thread.Backend, selectedBackend, StringComparison.OrdinalIgnoreCase));
             }
             finally
             {
@@ -187,7 +211,7 @@ public sealed class SessionsViewModel : ObservableObject
             }
             else if (reloadSelected)
             {
-                BeginLoadDetail(SelectedThread.ThreadId);
+                BeginLoadDetail(SelectedThread.ThreadId, SelectedThread.Backend);
             }
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -205,6 +229,11 @@ public sealed class SessionsViewModel : ObservableObject
     public void ApplyEvent(BridgeEvent bridgeEvent)
     {
         if (SelectedThread?.ThreadId != bridgeEvent.ThreadId) return;
+		if (SelectedThread.IsOpenClaw)
+		{
+			ApplyOpenClawEvent(bridgeEvent);
+			return;
+		}
 
         if (TryPayload<ThreadRuntime>(bridgeEvent.Payload, "runtime", out var runtime))
         {
@@ -319,7 +348,37 @@ public sealed class SessionsViewModel : ObservableObject
         RefreshCommandStates();
     }
 
-    private void BeginLoadDetail(string threadId)
+	private void ApplyOpenClawEvent(BridgeEvent bridgeEvent)
+	{
+		switch (bridgeEvent.EventType)
+		{
+			case "openclaw.message.delta":
+				AppendOpenClawDelta(bridgeEvent, PayloadText(bridgeEvent.Payload, "delta"));
+				SetRuntime(new ThreadRuntime { ThreadId = bridgeEvent.ThreadId, TurnId = bridgeEvent.TurnId, State = "running", Origin = "openclaw", CanInterrupt = true, CanSend = false });
+				break;
+			case "openclaw.message.completed":
+				CompleteOpenClawMessage(bridgeEvent);
+				SetRuntime(new ThreadRuntime { ThreadId = bridgeEvent.ThreadId, TurnId = bridgeEvent.TurnId, State = "completed", Origin = "openclaw", CanSend = true });
+				break;
+			case "openclaw.message.aborted":
+				AddOrUpdateTimeline(bridgeEvent, "status", "OpenClaw", "任务已停止", false, "已停止");
+				SetRuntime(new ThreadRuntime { ThreadId = bridgeEvent.ThreadId, TurnId = bridgeEvent.TurnId, State = "aborted", Origin = "openclaw", CanSend = true });
+				break;
+			case "openclaw.message.failed":
+				AddOrUpdateTimeline(bridgeEvent, "error", "OpenClaw", PayloadText(bridgeEvent.Payload, "error", "Gateway 返回错误"), false, "失败");
+				SetRuntime(new ThreadRuntime { ThreadId = bridgeEvent.ThreadId, TurnId = bridgeEvent.TurnId, State = "failed", Origin = "openclaw", CanSend = true });
+				break;
+			case "openclaw.disconnected":
+				SetRuntime(new ThreadRuntime { ThreadId = bridgeEvent.ThreadId, State = "disconnected", Origin = "openclaw", CanSend = false });
+				break;
+			case "openclaw.connected":
+				if (!_runtime.CanInterrupt) SetRuntime(new ThreadRuntime { ThreadId = bridgeEvent.ThreadId, State = "idle", Origin = "openclaw", CanSend = true });
+				break;
+		}
+		RefreshCommandStates();
+	}
+
+    private void BeginLoadDetail(string threadId, string backend = "codex")
     {
         CancelDetailLoad();
         SelectedDetail = null;
@@ -331,13 +390,30 @@ public sealed class SessionsViewModel : ObservableObject
         SetViewState("loading");
         var version = Interlocked.Increment(ref _selectionVersion);
         _detailCancellation = new CancellationTokenSource();
-        _ = LoadDetailAsync(threadId, version, _detailCancellation.Token);
+        _ = LoadDetailAsync(threadId, backend, version, _detailCancellation.Token);
     }
 
-    private async Task LoadDetailAsync(string threadId, long version, CancellationToken cancellationToken)
+    private async Task LoadDetailAsync(string threadId, string backend, long version, CancellationToken cancellationToken)
     {
         try
         {
+			if (string.Equals(backend, "openclaw", StringComparison.OrdinalIgnoreCase))
+			{
+				var openClawDetail = await _api.GetOpenClawSessionAsync(threadId, cancellationToken);
+				if (!IsCurrentSelection(threadId, version)) return;
+				SelectedDetail = openClawDetail.ToThreadDetail();
+				var canSend = !openClawDetail.HasActiveRun && openClawDetail.Archived != true;
+				SetRuntime(new ThreadRuntime
+				{
+					ThreadId = threadId, TurnId = openClawDetail.ActiveRunIds.FirstOrDefault() ?? "",
+					State = openClawDetail.HasActiveRun ? "running" : openClawDetail.Status,
+					Origin = "openclaw", CanInterrupt = openClawDetail.HasActiveRun, CanSend = canSend
+				});
+				RebuildOpenClawTimeline(openClawDetail);
+				PendingInteractions.Clear();
+				SetViewState("details");
+				return;
+			}
             var detailTask = _api.GetThreadAsync(threadId, cancellationToken);
             var interactionsTask = _api.GetInteractionsAsync("pending", cancellationToken);
             var detail = await detailTask;
@@ -371,12 +447,12 @@ public sealed class SessionsViewModel : ObservableObject
     private async Task RetryAsync()
     {
         if (SelectedThread is null) await RefreshAsync();
-        else BeginLoadDetail(SelectedThread.ThreadId);
+        else BeginLoadDetail(SelectedThread.ThreadId, SelectedThread.Backend);
     }
 
     private async Task VerifyPersistenceAsync()
     {
-        if (SelectedThread is null) return;
+        if (SelectedThread is null || SelectedThread.IsOpenClaw) return;
         ActionError = "";
         try
         {
@@ -438,6 +514,22 @@ public sealed class SessionsViewModel : ObservableObject
         try
         {
             var selectedThreadId = SelectedThread.ThreadId;
+			if (SelectedThread.IsOpenClaw)
+			{
+				var acceptedOpenClaw = await _api.SendOpenClawMessageAsync(SelectedThread.SessionKeyOrThreadId(), text);
+				Timeline.Add(new TimelineEntry
+				{
+					Key = $"pending-user-{acceptedOpenClaw.RunId}", TurnId = acceptedOpenClaw.RunId,
+					Kind = "user", Title = "用户", Text = text, Status = "已发送", IsTemporary = true
+				});
+				MessageText = "";
+				SetRuntime(new ThreadRuntime
+				{
+					ThreadId = selectedThreadId, TurnId = acceptedOpenClaw.RunId, State = string.IsNullOrWhiteSpace(acceptedOpenClaw.Status) ? "running" : acceptedOpenClaw.Status,
+					Origin = "openclaw", CanInterrupt = true, CanSend = false
+				});
+				return;
+			}
             var accepted = await _api.StartTurnAsync(selectedThreadId, new StartTurnRequest { Text = text, CollaborationMode = "default" });
             if (!string.Equals(accepted.ThreadId, selectedThreadId, StringComparison.Ordinal))
             {
@@ -485,6 +577,15 @@ public sealed class SessionsViewModel : ObservableObject
         ActionError = "";
         try
         {
+			if (SelectedThread.IsOpenClaw)
+			{
+				var abortResult = await _api.AbortOpenClawAsync(SelectedThread.SessionKeyOrThreadId(), _runtime.TurnId);
+				_runtime.State = string.IsNullOrWhiteSpace(abortResult.Status) ? "aborted" : abortResult.Status;
+				_runtime.CanInterrupt = false;
+				_runtime.CanSend = true;
+				SetRuntime(_runtime);
+				return;
+			}
             var result = await _api.InterruptTurnAsync(SelectedThread.ThreadId, _runtime.TurnId);
             _runtime.State = result.Status;
             _runtime.CanInterrupt = false;
@@ -569,6 +670,22 @@ public sealed class SessionsViewModel : ObservableObject
         foreach (var entry in temporary) Timeline.Add(entry);
     }
 
+	private void RebuildOpenClawTimeline(OpenClawSessionDetail detail)
+	{
+		Timeline.Clear();
+		foreach (var message in detail.Messages)
+		{
+			var role = string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase) ? "user" : "assistant";
+			Timeline.Add(new TimelineEntry
+			{
+				Key = string.IsNullOrWhiteSpace(message.Id) ? $"{message.RunId}:{message.Timestamp}" : message.Id,
+				TurnId = message.RunId, Timestamp = message.Timestamp, Kind = role,
+				Title = role == "user" ? "用户" : "OpenClaw", Text = message.Text,
+				Status = "消息", IsTemporary = false
+			});
+		}
+	}
+
     private void AppendAssistantDelta(BridgeEvent bridgeEvent, string delta)
     {
         if (string.IsNullOrEmpty(delta)) return;
@@ -576,6 +693,22 @@ public sealed class SessionsViewModel : ObservableObject
         entry.Text += delta;
         entry.Status = "待确认（正在回复）";
     }
+
+	private void AppendOpenClawDelta(BridgeEvent bridgeEvent, string delta)
+	{
+		if (string.IsNullOrEmpty(delta)) return;
+		var entry = FindTimeline(bridgeEvent) ?? CreateTimeline(bridgeEvent, "assistant", "OpenClaw", false);
+		entry.Text += delta;
+		entry.Status = "正在回复";
+	}
+
+	private void CompleteOpenClawMessage(BridgeEvent bridgeEvent)
+	{
+		var entry = FindTimeline(bridgeEvent) ?? CreateTimeline(bridgeEvent, "assistant", "OpenClaw", false);
+		var text = PayloadText(bridgeEvent.Payload, "text");
+		if (!string.IsNullOrWhiteSpace(text)) entry.Text = text;
+		entry.Status = "回复已完成";
+	}
 
     private void CompleteAssistant(BridgeEvent bridgeEvent)
     {
@@ -798,15 +931,20 @@ public sealed class SessionsViewModel : ObservableObject
         catch (Exception exception) { ActionError = $"复制失败：{exception.Message}"; }
     }
 
-	private void CopyThreadPrefix()
+    private void CopyThreadPrefix()
 	{
-		if (SelectedDetail is null || SelectedDetail.Number < 1) return;
+		if (SelectedDetail is null || SelectedDetail.IsOpenClaw || SelectedDetail.Number < 1) return;
 		try { Clipboard.SetText($"#{SelectedDetail.Number}"); }
 		catch (Exception exception) { ActionError = $"复制会话前缀失败：{exception.Message}"; }
 	}
 
     private void OpenDirectory()
     {
+		if (SelectedDetail?.IsOpenClaw == true)
+		{
+			ActionError = "OpenClaw Session 没有可在本机打开的 Codex 项目目录。";
+			return;
+		}
         var directory = SelectedDetail?.Cwd;
         if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
         {

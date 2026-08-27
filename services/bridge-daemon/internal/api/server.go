@@ -17,10 +17,12 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/bindings"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/mirror"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/openclaw"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/qqbot"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/telegram"
@@ -35,6 +37,7 @@ type Server struct {
 	logger   *bridgelog.SafeLogger
 	telegram *telegram.Service
 	qqbot    *qqbot.Service
+	openclaw *openclaw.Service
 	mirror   *mirror.Service
 	commands *commandregistry.Registry
 	http     *http.Server
@@ -61,6 +64,13 @@ func New(token string, runtimeManager *bridgeruntime.Manager, controlService *co
 	mux.HandleFunc("DELETE /api/v1/bindings/{bindingId}", server.authorized(server.deleteBinding))
 	mux.HandleFunc("PUT /api/v1/settings/security", server.authorized(server.updateSecurity))
 	mux.HandleFunc("PUT /api/v1/settings/codex", server.authorized(server.updateCodex))
+	mux.HandleFunc("PUT /api/v1/settings/openclaw", server.authorized(server.openclawConfigure))
+	mux.HandleFunc("GET /api/v1/openclaw/status", server.authorized(server.openclawStatus))
+	mux.HandleFunc("POST /api/v1/openclaw/test", server.authorized(server.openclawTest))
+	mux.HandleFunc("GET /api/v1/openclaw/sessions", server.authorized(server.openclawSessions))
+	mux.HandleFunc("GET /api/v1/openclaw/sessions/{sessionKey}", server.authorized(server.openclawSession))
+	mux.HandleFunc("POST /api/v1/openclaw/sessions/{sessionKey}/messages", server.authorized(server.openclawSend))
+	mux.HandleFunc("POST /api/v1/openclaw/sessions/{sessionKey}/abort", server.authorized(server.openclawAbort))
 	mux.HandleFunc("GET /api/v1/commands", server.authorized(server.commandList))
 	mux.HandleFunc("POST /api/v1/commands", server.authorized(server.commandCreate))
 	mux.HandleFunc("PUT /api/v1/commands/{id}", server.authorized(server.commandUpdate))
@@ -93,6 +103,13 @@ func New(token string, runtimeManager *bridgeruntime.Manager, controlService *co
 		ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	return server
+}
+
+// SetOpenClawBackend attaches the optional OpenClaw transport after all
+// existing Codex/channel services have been constructed. This keeps the
+// current api.New call shape and makes OpenClaw additive.
+func (s *Server) SetOpenClawBackend(backend *openclaw.Service) {
+	s.openclaw = backend
 }
 
 func (s *Server) commandList(response http.ResponseWriter, _ *http.Request) {
@@ -230,6 +247,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.qqbot != nil {
 		if err := s.qqbot.Stop(ctx); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if s.openclaw != nil {
+		if err := s.openclaw.Stop(ctx); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -414,14 +436,44 @@ func (s *Server) createBinding(response http.ResponseWriter, request *http.Reque
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
 	defer cancel()
-	thread, err := s.control.ReadThread(ctx, strings.TrimSpace(input.ThreadID), false)
-	if err != nil || thread.ThreadID == "" {
-		writeError(response, http.StatusBadRequest, "thread_not_found", "绑定目标 Thread 不存在")
+	backend := strings.ToLower(strings.TrimSpace(input.Backend))
+	if backend == "" {
+		backend = conversation.BackendCodex
+	}
+	if backend != conversation.BackendCodex && backend != conversation.BackendOpenClaw {
+		writeError(response, http.StatusBadRequest, "invalid_backend", "不支持的会话后端")
 		return
 	}
-	if thread.Archived != nil && *thread.Archived {
-		writeError(response, http.StatusConflict, "thread_archived", "绑定目标 Thread 已归档")
-		return
+	input.Backend = backend
+	if backend == conversation.BackendOpenClaw {
+		if s.openclaw == nil {
+			writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
+			return
+		}
+		target := strings.TrimSpace(input.SessionKey)
+		if target == "" {
+			target = strings.TrimSpace(input.ThreadID)
+		}
+		detail, err := s.openclaw.ReadSession(ctx, target)
+		if err != nil || detail.Key == "" {
+			writeError(response, http.StatusBadRequest, "session_not_found", "绑定目标 OpenClaw Session 不存在")
+			return
+		}
+		if detail.Archived != nil && *detail.Archived {
+			writeError(response, http.StatusConflict, "session_archived", "绑定目标 OpenClaw Session 已归档")
+			return
+		}
+		input.SessionKey, input.ThreadID = detail.Key, detail.Key
+	} else {
+		thread, err := s.control.ReadThread(ctx, strings.TrimSpace(input.ThreadID), false)
+		if err != nil || thread.ThreadID == "" {
+			writeError(response, http.StatusBadRequest, "thread_not_found", "绑定目标 Thread 不存在")
+			return
+		}
+		if thread.Archived != nil && *thread.Archived {
+			writeError(response, http.StatusConflict, "thread_archived", "绑定目标 Thread 已归档")
+			return
+		}
 	}
 	created, err := s.bindings.Create(input)
 	if errors.Is(err, bindings.ErrDuplicate) {
@@ -483,7 +535,7 @@ func (s *Server) deleteBinding(response http.ResponseWriter, request *http.Reque
 
 func safeAPIBindingPayload(binding bindings.Binding) map[string]any {
 	return map[string]any{
-		"bindingId": binding.ID, "channelType": binding.ChannelType,
+		"bindingId": binding.ID, "backend": binding.Backend, "sessionKey": shortAPIID(binding.SessionKey), "channelType": binding.ChannelType,
 		"conversationType": binding.ConversationType,
 		"account":          maskedAPIID(binding.AccountID), "chat": maskedAPIID(binding.ChatID),
 		"topic": maskedAPIID(binding.TopicID), "threadId": shortAPIID(binding.ThreadID),
@@ -542,6 +594,156 @@ func (s *Server) updateCodex(response http.ResponseWriter, request *http.Request
 		return
 	}
 	writeJSON(response, http.StatusOK, status)
+}
+
+func (s *Server) openclawStatus(response http.ResponseWriter, _ *http.Request) {
+	if s.openclaw == nil {
+		writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
+		return
+	}
+	writeJSON(response, http.StatusOK, s.openclaw.ConnectionStatus())
+}
+
+func (s *Server) openclawConfigure(response http.ResponseWriter, request *http.Request) {
+	if s.openclaw == nil {
+		writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
+		return
+	}
+	var input openclaw.ConfigureRequest
+	if !decodeBody(response, request, 32*1024, &input) {
+		return
+	}
+	status, err := s.openclaw.Configure(input)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "openclaw_configuration_invalid", bridgelog.Redact(err.Error()))
+		return
+	}
+	writeJSON(response, http.StatusOK, status)
+}
+
+func (s *Server) openclawTest(response http.ResponseWriter, request *http.Request) {
+	if s.openclaw == nil {
+		writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
+		return
+	}
+	var input openclaw.ConfigureRequest
+	if !decodeOptionalBody(response, request, 32*1024, &input) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+	defer cancel()
+	status, err := s.openclaw.Test(ctx, input)
+	if err != nil {
+		status.LastError = bridgelog.Redact(err.Error())
+		writeJSON(response, http.StatusOK, status)
+		return
+	}
+	writeJSON(response, http.StatusOK, status)
+}
+
+func (s *Server) openclawSessions(response http.ResponseWriter, request *http.Request) {
+	if s.openclaw == nil {
+		writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
+		return
+	}
+	limit := 100
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeError(response, http.StatusBadRequest, "invalid_limit", "limit 必须是 1 到 200 之间的整数")
+			return
+		}
+		limit = parsed
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
+	defer cancel()
+	sessions, err := s.openclaw.ListSessions(ctx, limit)
+	if err != nil {
+		s.writeOpenClawError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"sessions": sessions})
+}
+
+func (s *Server) openclawSession(response http.ResponseWriter, request *http.Request) {
+	if s.openclaw == nil {
+		writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
+		return
+	}
+	key, ok := pathID(response, request.PathValue("sessionKey"), "Session")
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+	defer cancel()
+	detail, err := s.openclaw.ReadSession(ctx, key)
+	if err != nil {
+		s.writeOpenClawError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, detail)
+}
+
+func (s *Server) openclawSend(response http.ResponseWriter, request *http.Request) {
+	if s.openclaw == nil {
+		writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
+		return
+	}
+	key, ok := pathID(response, request.PathValue("sessionKey"), "Session")
+	if !ok {
+		return
+	}
+	var input struct {
+		Message string `json:"message"`
+	}
+	if !decodeBody(response, request, 128*1024, &input) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	defer cancel()
+	result, err := s.openclaw.SendMessage(ctx, key, input.Message)
+	if err != nil {
+		s.writeOpenClawError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, result)
+}
+
+func (s *Server) openclawAbort(response http.ResponseWriter, request *http.Request) {
+	if s.openclaw == nil {
+		writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
+		return
+	}
+	key, ok := pathID(response, request.PathValue("sessionKey"), "Session")
+	if !ok {
+		return
+	}
+	var input struct {
+		RunID string `json:"runId"`
+	}
+	if !decodeOptionalBody(response, request, 16*1024, &input) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
+	defer cancel()
+	result, err := s.openclaw.Abort(ctx, key, input.RunID)
+	if err != nil {
+		s.writeOpenClawError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, result)
+}
+
+func (s *Server) writeOpenClawError(response http.ResponseWriter, err error) {
+	message := bridgelog.Redact(err.Error())
+	s.logger.Printf("local API OpenClaw request failed: %s", message)
+	status, code := http.StatusServiceUnavailable, "openclaw_unavailable"
+	if errors.Is(err, openclaw.ErrSessionNotFound) {
+		status, code = http.StatusNotFound, "session_not_found"
+	} else if errors.Is(err, openclaw.ErrNotConnected) {
+		status, code = http.StatusServiceUnavailable, "openclaw_disconnected"
+	}
+	writeError(response, status, code, message)
 }
 
 func (s *Server) channelList(response http.ResponseWriter, _ *http.Request) {

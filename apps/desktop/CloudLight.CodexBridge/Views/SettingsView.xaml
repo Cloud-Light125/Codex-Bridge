@@ -22,6 +22,21 @@
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
                 <StackPanel><TextBlock Text="Codex" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="当前运行状态" Style="{StaticResource FieldLabelStyle}" Margin="0,15,0,4"/><TextBox Text="{Binding CodexDetection, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" TextWrapping="Wrap"/><TextBlock Text="自定义 Codex 程序路径" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/><TextBox Text="{Binding CodexCustomPath, UpdateSourceTrigger=PropertyChanged}"/><TextBlock Text="留空时自动查找；保存有效路径后会立即应用并重新连接 Codex。" Style="{StaticResource SecondaryTextStyle}" Margin="0,7,0,0"/></StackPanel>
             </Border>
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel><TextBlock Text="OpenClaw" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="通过 OpenClaw Gateway 连接已有 Session；QQ 和 Telegram 仍只由 CloudLight Codex Bridge 接收消息。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,5,0,0"/></StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal"><Button Content="自动发现" Command="{Binding DiscoverOpenClawCommand}"/><Button Content="测试连接" Command="{Binding TestOpenClawCommand}" Margin="8,0,0,0"/></StackPanel>
+                    </Grid>
+                    <TextBlock Text="Gateway 地址" Style="{StaticResource FieldLabelStyle}" Margin="0,15,0,5"/><TextBox Text="{Binding OpenClawGatewayUrl, UpdateSourceTrigger=PropertyChanged}" ToolTip="例如 ws://127.0.0.1:18789"/>
+                    <TextBlock Text="连接状态" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,4"/><TextBox Text="{Binding OpenClawStatusText, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" TextWrapping="Wrap"/>
+                    <TextBlock Text="Token（与 Password 二选一；不会写入 settings.json）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/><PasswordBox x:Name="OpenClawTokenBox" PasswordChanged="OpenClawTokenBox_PasswordChanged" Padding="10,7"/>
+                    <TextBlock Text="Password（可选）" Style="{StaticResource FieldLabelStyle}" Margin="0,10,0,5"/><PasswordBox x:Name="OpenClawPasswordBox" PasswordChanged="OpenClawPasswordBox_PasswordChanged" Padding="10,7"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0"><TextBlock Text="{Binding OpenClawCredentialSummary}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/><Button Content="清除已保存凭据" Command="{Binding ClearOpenClawCredentialsCommand}" Margin="14,0,0,0"/></StackPanel>
+                    <CheckBox Content="自动发现本机 OpenClawTray Gateway" IsChecked="{Binding OpenClawAutoDiscover}" Margin="0,12,0,5"/><CheckBox Content="Gateway 断线后自动重连" IsChecked="{Binding OpenClawAutoReconnect}"/>
+                    <TextBlock Text="发现来源：" Foreground="{DynamicResource MutedBrush}" Margin="0,9,0,0"><Run Text="{Binding OpenClawDiscoverySource}"/></TextBlock>
+                </StackPanel>
+            </Border>
             <Expander Header="高级" IsExpanded="False" Margin="0,0,0,16">
                 <Border Style="{StaticResource CardStyle}" Margin="0,10,0,0"><StackPanel><TextBlock Text="新任务的文件访问范围" Style="{StaticResource FieldLabelStyle}"/><ComboBox SelectedValue="{Binding SandboxMode}" SelectedValuePath="Tag" Width="220" HorizontalAlignment="Left"><ComboBoxItem Content="可修改当前工作区" Tag="workspace-write"/><ComboBoxItem Content="仅查看文件" Tag="read-only"/></ComboBox><TextBlock Text="操作确认方式" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,4"/><TextBox Text="{Binding ApprovalPolicyDisplay, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}"/><TextBlock Text="这些设置只影响之后开始的新任务，不会改变正在运行的任务。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,10,0,0"/></StackPanel></Border>
             </Expander>

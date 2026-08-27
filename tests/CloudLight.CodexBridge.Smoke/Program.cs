@@ -144,6 +144,9 @@ if (args.Contains("--live-codex-discovery", StringComparer.OrdinalIgnoreCase))
 }
 
 var root = Path.Combine(Path.GetTempPath(), $"CloudLight-CodexBridge-Smoke-{Guid.NewGuid():N}");
+const string openClawPasswordProbe = "OpenClaw-password-must-not-appear";
+Assert(!LogService.Redact($"Gateway error password={openClawPasswordProbe}").Contains(openClawPasswordProbe, StringComparison.Ordinal),
+    "日志脱敏不得输出 OpenClaw Password");
 var codex = Path.Combine(root, "codex-current");
 var bridgeLocal = Path.Combine(root, "bridge-local");
 var bridgeRoaming = Path.Combine(root, "bridge-roaming");

@@ -21,12 +21,14 @@ var (
 
 type Binding struct {
 	ID               string `json:"id"`
+	Backend          string `json:"backend,omitempty"`
 	ChannelType      string `json:"channelType"`
 	AccountID        string `json:"accountId"`
 	ConversationType string `json:"conversationType"`
 	ChatID           string `json:"chatId"`
 	TopicID          string `json:"topicId,omitempty"`
 	ThreadID         string `json:"threadId"`
+	SessionKey       string `json:"sessionKey,omitempty"`
 	Enabled          bool   `json:"enabled"`
 	Legacy           bool   `json:"legacy,omitempty"`
 	CreatedAt        string `json:"createdAt"`
@@ -34,12 +36,14 @@ type Binding struct {
 }
 
 type CreateRequest struct {
+	Backend          string `json:"backend"`
 	ChannelType      string `json:"channelType"`
 	AccountID        string `json:"accountId"`
 	ConversationType string `json:"conversationType"`
 	ChatID           string `json:"chatId"`
 	TopicID          string `json:"topicId"`
 	ThreadID         string `json:"threadId"`
+	SessionKey       string `json:"sessionKey"`
 	Enabled          *bool  `json:"enabled"`
 }
 
@@ -92,8 +96,8 @@ func (r *Repository) Create(request CreateRequest) (Binding, error) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	binding := Binding{
-		ID: newID(), ChannelType: request.ChannelType, AccountID: request.AccountID, ConversationType: request.ConversationType,
-		ChatID: request.ChatID, TopicID: request.TopicID, ThreadID: request.ThreadID,
+		ID: newID(), Backend: request.Backend, ChannelType: request.ChannelType, AccountID: request.AccountID, ConversationType: request.ConversationType,
+		ChatID: request.ChatID, TopicID: request.TopicID, ThreadID: request.ThreadID, SessionKey: request.SessionKey,
 		Enabled: enabled, CreatedAt: now, UpdatedAt: now,
 	}
 	r.items[binding.ID] = binding
@@ -140,6 +144,8 @@ func (r *Repository) UpsertAddress(request CreateRequest) (Binding, *Binding, er
 		copy := existing
 		previous = &copy
 		existing.ThreadID = request.ThreadID
+		existing.Backend = request.Backend
+		existing.SessionKey = request.SessionKey
 		existing.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if request.Enabled != nil {
 			existing.Enabled = *request.Enabled
@@ -156,7 +162,7 @@ func (r *Repository) UpsertAddress(request CreateRequest) (Binding, *Binding, er
 		enabled = *request.Enabled
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	binding := Binding{ID: newID(), ChannelType: request.ChannelType, AccountID: request.AccountID, ConversationType: request.ConversationType, ChatID: request.ChatID, TopicID: request.TopicID, ThreadID: request.ThreadID, Enabled: enabled, CreatedAt: now, UpdatedAt: now}
+	binding := Binding{ID: newID(), Backend: request.Backend, ChannelType: request.ChannelType, AccountID: request.AccountID, ConversationType: request.ConversationType, ChatID: request.ChatID, TopicID: request.TopicID, ThreadID: request.ThreadID, SessionKey: request.SessionKey, Enabled: enabled, CreatedAt: now, UpdatedAt: now}
 	r.items[binding.ID] = binding
 	if err := r.saveLocked(); err != nil {
 		delete(r.items, binding.ID)
@@ -317,6 +323,7 @@ func bindingAddressKey(binding Binding) string {
 }
 
 func normalizeRequest(request CreateRequest) CreateRequest {
+	request.Backend = normalizeBackend(request.Backend)
 	request.ChannelType = strings.ToLower(strings.TrimSpace(request.ChannelType))
 	request.AccountID = strings.TrimSpace(request.AccountID)
 	request.ConversationType = strings.ToLower(strings.TrimSpace(request.ConversationType))
@@ -326,28 +333,54 @@ func normalizeRequest(request CreateRequest) CreateRequest {
 	request.ChatID = strings.TrimSpace(request.ChatID)
 	request.TopicID = strings.TrimSpace(request.TopicID)
 	request.ThreadID = strings.TrimSpace(request.ThreadID)
+	request.SessionKey = strings.TrimSpace(request.SessionKey)
+	if request.Backend == "openclaw" && request.SessionKey == "" {
+		request.SessionKey = request.ThreadID
+	}
+	if request.Backend == "openclaw" && request.ThreadID == "" {
+		request.ThreadID = request.SessionKey
+	}
 	return request
 }
 
 func normalizeBinding(binding Binding) Binding {
 	binding.ID = strings.TrimSpace(binding.ID)
 	binding.ChannelType = strings.ToLower(strings.TrimSpace(binding.ChannelType))
+	binding.Backend = normalizeBackend(binding.Backend)
 	binding.AccountID = strings.TrimSpace(binding.AccountID)
 	binding.ConversationType = strings.ToLower(strings.TrimSpace(binding.ConversationType))
 	binding.ChatID = strings.TrimSpace(binding.ChatID)
 	binding.TopicID = strings.TrimSpace(binding.TopicID)
 	binding.ThreadID = strings.TrimSpace(binding.ThreadID)
+	binding.SessionKey = strings.TrimSpace(binding.SessionKey)
+	if binding.Backend == "openclaw" && binding.SessionKey == "" {
+		binding.SessionKey = binding.ThreadID
+	}
+	if binding.Backend == "openclaw" && binding.ThreadID == "" {
+		binding.ThreadID = binding.SessionKey
+	}
 	binding.CreatedAt = strings.TrimSpace(binding.CreatedAt)
 	binding.UpdatedAt = strings.TrimSpace(binding.UpdatedAt)
 	return binding
 }
 
 func validateRequest(request CreateRequest) error {
-	if request.ChannelType != "telegram" && request.ChannelType != "qqbot" {
-		return errors.New("channelType must be telegram or qqbot; legacy qq bindings are read-only")
+	request.Backend = normalizeBackend(request.Backend)
+	if request.Backend != "codex" && request.Backend != "openclaw" {
+		return errors.New("backend must be codex or openclaw")
 	}
-	if request.AccountID == "" || request.ChatID == "" || request.ThreadID == "" {
-		return errors.New("accountId, chatId, and threadId are required")
+	if request.ChannelType != "telegram" && request.ChannelType != "qqbot" && request.ChannelType != "qq" {
+		return errors.New("channelType must be telegram, qqbot, or qq")
+	}
+	if request.AccountID == "" || request.ChatID == "" {
+		return errors.New("accountId and chatId are required")
+	}
+	if request.Backend == "openclaw" {
+		if request.SessionKey == "" && request.ThreadID == "" {
+			return errors.New("sessionKey or threadId is required for an OpenClaw binding")
+		}
+	} else if request.ThreadID == "" {
+		return errors.New("threadId is required for a Codex binding")
 	}
 	if request.ChannelType == "telegram" && request.ConversationType != "default" {
 		return errors.New("Telegram conversationType must be default")
@@ -360,7 +393,23 @@ func validateRequest(request CreateRequest) error {
 			return errors.New("QQ Official Bot bindings do not support topicId")
 		}
 	}
+	if request.ChannelType == "qq" {
+		if request.ConversationType != "private" && request.ConversationType != "group" && request.ConversationType != "legacy" {
+			return errors.New("legacy QQ conversationType must be private, group, or legacy")
+		}
+		if request.TopicID != "" {
+			return errors.New("legacy QQ bindings do not support topicId")
+		}
+	}
 	return nil
+}
+
+func normalizeBackend(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "codex"
+	}
+	return value
 }
 
 func validateStoredBinding(binding Binding, version int) error {
@@ -376,7 +425,7 @@ func validateStoredBinding(binding Binding, version int) error {
 	if binding.ChannelType == "qq" && binding.Legacy && !binding.Enabled {
 		return nil
 	}
-	request := CreateRequest{ChannelType: binding.ChannelType, AccountID: binding.AccountID, ConversationType: binding.ConversationType, ChatID: binding.ChatID, TopicID: binding.TopicID, ThreadID: binding.ThreadID}
+	request := CreateRequest{Backend: binding.Backend, ChannelType: binding.ChannelType, AccountID: binding.AccountID, ConversationType: binding.ConversationType, ChatID: binding.ChatID, TopicID: binding.TopicID, ThreadID: binding.ThreadID, SessionKey: binding.SessionKey}
 	return validateRequest(request)
 }
 

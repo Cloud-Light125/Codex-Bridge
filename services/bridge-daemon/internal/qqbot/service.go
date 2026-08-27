@@ -16,6 +16,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
@@ -62,11 +63,13 @@ type threadSelection struct {
 }
 
 type turnRoute struct {
-	Address  channels.ChannelAddress
-	UserID   string
-	ThreadID string
-	TurnID   string
-	Revoked  bool
+	Address    channels.ChannelAddress
+	UserID     string
+	Backend    string
+	SessionKey string
+	ThreadID   string
+	TurnID     string
+	Revoked    bool
 }
 
 type interactionFlow struct {
@@ -92,6 +95,7 @@ type Service struct {
 	registry  *threadregistry.Registry
 	commands  *commandregistry.Registry
 	queries   *bridgequery.Service
+	openclaw  conversation.IConversationBackend
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -139,6 +143,16 @@ func (s *Service) SetCommandRegistry(commands *commandregistry.Registry) {
 	s.mu.Lock()
 	s.commands = commands
 	s.queries = bridgequery.New(s.control, s.runtime, s.registry, commands)
+	s.queries.SetOpenClawBackend(s.openclaw)
+	s.mu.Unlock()
+}
+
+func (s *Service) SetOpenClawBackend(backend conversation.IConversationBackend) {
+	s.mu.Lock()
+	s.openclaw = backend
+	if s.queries != nil {
+		s.queries.SetOpenClawBackend(backend)
+	}
 	s.mu.Unlock()
 }
 
@@ -501,6 +515,40 @@ func (s *Service) cancelThreadInteraction(ctx context.Context, message channels.
 }
 
 func (s *Service) bind(ctx context.Context, message channels.InboundMessage, selector string) {
+	if sessionKey, ok := parseOpenClawSelector(selector); ok {
+		backend := s.openClawBackend()
+		if backend == nil {
+			s.send(ctx, message.Address, "OpenClaw 后端尚未配置，请先在设置页测试连接。")
+			return
+		}
+		detail, err := backend.ReadSession(ctx, sessionKey)
+		if err != nil || detail.Key == "" {
+			s.send(ctx, message.Address, "指定的 OpenClaw Session 不存在或当前不可用。请先发送 /threads 查看 Session。")
+			return
+		}
+		if detail.Archived != nil && *detail.Archived {
+			s.send(ctx, message.Address, "指定的 OpenClaw Session 已归档，不能绑定。")
+			return
+		}
+		s.clearAddress(message.Address)
+		created, previous, err := s.bindings.UpsertAddress(bindings.CreateRequest{
+			Backend: conversation.BackendOpenClaw, ChannelType: "qqbot", AccountID: message.Address.AccountID,
+			ConversationType: qqbotConversationType(message.Address.ConversationType), ChatID: message.Address.ChatID,
+			ThreadID: detail.Key, SessionKey: detail.Key,
+		})
+		if err != nil {
+			s.send(ctx, message.Address, "保存 OpenClaw 绑定失败。")
+			return
+		}
+		s.refreshBindingCount(created.AccountID)
+		payload := safeBindingPayload(created)
+		if previous != nil {
+			payload["replacedSessionKey"] = shortID(firstNonEmpty(previous.SessionKey, previous.ThreadID))
+		}
+		s.broker.Publish(events.BindingCreated, payload)
+		s.send(ctx, message.Address, fmt.Sprintf("已绑定到 [OpenClaw] %s（Session：%s）。", displayTitle(detail.Title), detail.Key))
+		return
+	}
 	threadID, errText := s.resolveThread(ctx, message.Address, selector)
 	if errText != "" {
 		s.send(ctx, message.Address, errText)
@@ -517,7 +565,7 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, sel
 	}
 	s.clearAddress(message.Address)
 	created, previous, err := s.bindings.UpsertAddress(bindings.CreateRequest{
-		ChannelType: "qqbot", AccountID: message.Address.AccountID, ConversationType: qqbotConversationType(message.Address.ConversationType),
+		Backend: conversation.BackendCodex, ChannelType: "qqbot", AccountID: message.Address.AccountID, ConversationType: qqbotConversationType(message.Address.ConversationType),
 		ChatID: message.Address.ChatID, TopicID: "", ThreadID: threadID,
 	})
 	if err != nil {
@@ -614,6 +662,20 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 		s.send(ctx, message.Address, "当前 QQ 会话尚未绑定。使用 /threads 或 /bind。")
 		return
 	}
+	if bindingBackend(binding) == conversation.BackendOpenClaw {
+		backend := s.openClawBackend()
+		if backend == nil {
+			s.send(ctx, message.Address, "OpenClaw 后端尚未配置。")
+			return
+		}
+		detail, err := backend.ReadSession(ctx, firstNonEmpty(binding.SessionKey, binding.ThreadID))
+		if err != nil || detail.Key == "" {
+			s.send(ctx, message.Address, "绑定的 OpenClaw Session 已不可用，请重新绑定。")
+			return
+		}
+		s.send(ctx, message.Address, fmt.Sprintf("当前绑定 [OpenClaw]\n标题：%s\nSession：%s\n更新：%s\n状态：%s", displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
+		return
+	}
 	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
 	if err != nil || thread.ThreadID == "" {
 		s.send(ctx, message.Address, "绑定的 Thread "+shortID(binding.ThreadID)+" 已不存在，请解除绑定或重新绑定。")
@@ -635,9 +697,33 @@ func (s *Service) status(ctx context.Context, message channels.InboundMessage) {
 	} else {
 		lines = append(lines, "Codex App Server：不可用")
 	}
+	if backend := s.openClawBackend(); backend != nil {
+		status := backend.ConnectionStatus()
+		state := status.State
+		if status.Connected {
+			state = "已连接"
+		}
+		lines = append(lines, "OpenClaw Gateway："+firstNonEmpty(state, "未配置"))
+	}
 	binding, ok := s.findBinding(message.Address)
 	if !ok {
 		lines = append(lines, "绑定：无")
+		s.send(ctx, message.Address, strings.Join(lines, "\n"))
+		return
+	}
+	if bindingBackend(binding) == conversation.BackendOpenClaw {
+		backend := s.openClawBackend()
+		if backend == nil {
+			lines = append(lines, "绑定：[OpenClaw] 后端未配置")
+			s.send(ctx, message.Address, strings.Join(lines, "\n"))
+			return
+		}
+		detail, err := backend.ReadSession(ctx, firstNonEmpty(binding.SessionKey, binding.ThreadID))
+		if err != nil || detail.Key == "" {
+			lines = append(lines, "绑定：[OpenClaw] "+shortID(firstNonEmpty(binding.SessionKey, binding.ThreadID)), "Session：不可用或已删除")
+		} else {
+			lines = append(lines, "Session：[OpenClaw] "+displayTitle(detail.Title)+" · "+shortID(detail.Key), "状态："+firstNonEmpty(detail.Status, "idle"))
+		}
 		s.send(ctx, message.Address, strings.Join(lines, "\n"))
 		return
 	}
@@ -658,6 +744,33 @@ func (s *Service) stopTurn(ctx context.Context, message channels.InboundMessage)
 	binding, ok := s.findBinding(message.Address)
 	if !ok {
 		s.send(ctx, message.Address, "当前 QQ 会话尚未绑定。")
+		return
+	}
+	if bindingBackend(binding) == conversation.BackendOpenClaw {
+		backend := s.openClawBackend()
+		if backend == nil {
+			s.send(ctx, message.Address, "OpenClaw 后端尚未连接。")
+			return
+		}
+		key := firstNonEmpty(binding.SessionKey, binding.ThreadID)
+		s.mu.Lock()
+		var route *turnRoute
+		for _, candidate := range s.routes {
+			if candidate.Backend == conversation.BackendOpenClaw && candidate.SessionKey == key && sameAddress(candidate.Address, message.Address) && candidate.UserID == message.UserID {
+				route = candidate
+				break
+			}
+		}
+		s.mu.Unlock()
+		if route == nil || route.TurnID == "" {
+			s.send(ctx, message.Address, "没有可由当前 QQ 会话停止的 OpenClaw 任务。")
+			return
+		}
+		if _, err := backend.Abort(ctx, key, route.TurnID); err != nil {
+			s.send(ctx, message.Address, "OpenClaw 停止请求失败；任务可能已经结束。")
+			return
+		}
+		s.send(ctx, message.Address, "已请求停止 OpenClaw 任务。")
 		return
 	}
 	state := s.runtime.RuntimeState(binding.ThreadID)
@@ -686,6 +799,10 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 		s.reject(ctx, message, "当前 QQ 会话尚未绑定。请使用 /threads 或 /bind。", "unbound")
 		return
 	}
+	if bindingBackend(binding) == conversation.BackendOpenClaw {
+		s.startOpenClawTurn(ctx, message, text, binding)
+		return
+	}
 	thread, err := s.control.ReadThread(ctx, binding.ThreadID, false)
 	if err != nil || thread.ThreadID == "" || thread.ThreadID != binding.ThreadID {
 		s.reject(ctx, message, "绑定的 Codex Thread 已不存在，请重新绑定。", "missing-thread")
@@ -705,7 +822,7 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 		s.reject(ctx, message, "无法启动任务；Thread 可能正忙、不可用或已归档。", "start-failed")
 		return
 	}
-	route := &turnRoute{Address: message.Address, UserID: message.UserID, ThreadID: accepted.ThreadID, TurnID: accepted.TurnID}
+	route := &turnRoute{Address: message.Address, UserID: message.UserID, Backend: conversation.BackendCodex, SessionKey: accepted.ThreadID, ThreadID: accepted.ThreadID, TurnID: accepted.TurnID}
 	s.mu.Lock()
 	s.routes[accepted.TurnID] = route
 	s.mu.Unlock()
@@ -715,6 +832,38 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 			s.handleInteractionEvent(events.Event{EventType: events.InteractionRequested, ThreadID: accepted.ThreadID, TurnID: accepted.TurnID, Payload: map[string]any{"interaction": interaction}})
 		}
 	}
+}
+
+func (s *Service) startOpenClawTurn(ctx context.Context, message channels.InboundMessage, text string, binding bindings.Binding) {
+	backend := s.openClawBackend()
+	if backend == nil {
+		s.reject(ctx, message, "OpenClaw 后端尚未配置，请先在设置页测试连接。", "openclaw-unavailable")
+		return
+	}
+	key := firstNonEmpty(binding.SessionKey, binding.ThreadID)
+	detail, err := backend.ReadSession(ctx, key)
+	if err != nil || detail.Key == "" {
+		s.reject(ctx, message, "绑定的 OpenClaw Session 不存在或当前不可用，请重新绑定。", "missing-session")
+		return
+	}
+	if detail.Archived != nil && *detail.Archived {
+		s.reject(ctx, message, "绑定的 OpenClaw Session 已归档，请重新绑定。", "archived")
+		return
+	}
+	if detail.HasActiveRun {
+		s.reject(ctx, message, "该 OpenClaw Session 当前正在执行任务，请先等待或使用 /stop。", "busy")
+		return
+	}
+	accepted, err := backend.SendMessage(ctx, key, text)
+	if err != nil {
+		s.reject(ctx, message, "OpenClaw 无法启动任务；Session 可能正忙或 Gateway 已断开。", "start-failed")
+		return
+	}
+	route := &turnRoute{Address: message.Address, UserID: message.UserID, Backend: conversation.BackendOpenClaw, SessionKey: key, ThreadID: key, TurnID: accepted.RunID}
+	s.mu.Lock()
+	s.routes[accepted.RunID] = route
+	s.mu.Unlock()
+	s.publishMessage(events.QQBotMessageRouted, message, "openclaw-turn-started")
 }
 
 func (s *Service) startTurnNumbered(ctx context.Context, message channels.InboundMessage, text, threadID string) {
@@ -737,7 +886,7 @@ func (s *Service) startTurnNumbered(ctx context.Context, message channels.Inboun
 		s.reject(ctx, message, "无法启动任务；会话可能忙碌或不可用。", "start-failed")
 		return
 	}
-	route := &turnRoute{Address: message.Address, UserID: message.UserID, ThreadID: accepted.ThreadID, TurnID: accepted.TurnID}
+	route := &turnRoute{Address: message.Address, UserID: message.UserID, Backend: conversation.BackendCodex, SessionKey: accepted.ThreadID, ThreadID: accepted.ThreadID, TurnID: accepted.TurnID}
 	s.mu.Lock()
 	s.routes[accepted.TurnID] = route
 	s.mu.Unlock()
@@ -916,7 +1065,9 @@ func (s *Service) eventLoop() {
 func qqbotRelevantEvent(eventType string) bool {
 	switch eventType {
 	case events.CodexDisconnected, events.InteractionRequested, events.InteractionResolved,
-		events.TurnCompleted, events.TurnFailed, events.TurnInterrupted:
+		events.TurnCompleted, events.TurnFailed, events.TurnInterrupted,
+		events.OpenClawDisconnected, events.OpenClawMessageDelta, events.OpenClawMessageCompleted,
+		events.OpenClawMessageAborted, events.OpenClawMessageFailed:
 		return true
 	default:
 		return false
@@ -925,7 +1076,12 @@ func qqbotRelevantEvent(eventType string) bool {
 
 func (s *Service) handleEvent(event events.Event) {
 	if event.EventType == events.CodexDisconnected {
-		s.finishAllRoutes("")
+		s.finishRoutesForBackend(conversation.BackendCodex)
+		return
+	}
+	if event.EventType == events.OpenClawDisconnected {
+		// A Gateway reconnect must not revoke the originating QQ route. The
+		// Gateway may finish the same run after transport recovery.
 		return
 	}
 	if event.EventType == events.InteractionRequested {
@@ -944,8 +1100,48 @@ func (s *Service) handleEvent(event events.Event) {
 	if route == nil || route.ThreadID != event.ThreadID {
 		return
 	}
+	if route.Backend == conversation.BackendOpenClaw {
+		s.handleOpenClawEvent(event, route)
+		return
+	}
 	switch event.EventType {
 	case events.TurnCompleted, events.TurnFailed, events.TurnInterrupted:
+		s.removeRoute(route.TurnID)
+	}
+}
+
+func (s *Service) handleOpenClawEvent(event events.Event, route *turnRoute) {
+	ctx, cancel := context.WithTimeout(s.ctx, 45*time.Second)
+	defer cancel()
+	switch event.EventType {
+	case events.OpenClawMessageCompleted:
+		text := payloadString(event.Payload, "text")
+		if text == "" {
+			if backend := s.openClawBackend(); backend != nil {
+				if detail, err := backend.ReadSession(ctx, route.SessionKey); err == nil {
+					for index := len(detail.Messages) - 1; index >= 0; index-- {
+						if detail.Messages[index].Role == "assistant" && strings.TrimSpace(detail.Messages[index].Text) != "" {
+							text = detail.Messages[index].Text
+							break
+						}
+					}
+				}
+			}
+		}
+		if text == "" {
+			text = "OpenClaw 任务已完成，但 Gateway 没有返回可显示的文本。"
+		}
+		s.send(ctx, route.Address, text)
+		s.removeRoute(route.TurnID)
+	case events.OpenClawMessageAborted:
+		s.send(ctx, route.Address, "OpenClaw 任务已停止。")
+		s.removeRoute(route.TurnID)
+	case events.OpenClawMessageFailed:
+		reason := payloadString(event.Payload, "error")
+		if reason == "" {
+			reason = "Gateway 返回了错误。"
+		}
+		s.send(ctx, route.Address, "OpenClaw 任务失败："+reason)
 		s.removeRoute(route.TurnID)
 	}
 }
@@ -1043,6 +1239,51 @@ func (s *Service) finishAllRoutes(_ string) {
 	s.routes = make(map[string]*turnRoute)
 	s.flows = make(map[string]*interactionFlow)
 	s.flowByInput = make(map[string]string)
+	s.interactionNotified = make(map[string]bool)
+	s.mu.Unlock()
+}
+
+func (s *Service) finishRoutesForBackend(backend string) {
+	s.mu.Lock()
+	removedTurns := make(map[string]struct{})
+	for turnID, route := range s.routes {
+		routeBackend := route.Backend
+		if routeBackend == "" {
+			routeBackend = conversation.BackendCodex
+		}
+		if routeBackend == backend {
+			removedTurns[turnID] = struct{}{}
+			if route.TurnID != "" {
+				removedTurns[route.TurnID] = struct{}{}
+			}
+			delete(s.routes, turnID)
+		}
+	}
+	if len(removedTurns) == 0 {
+		s.mu.Unlock()
+		return
+	}
+	wasRemoved := func(turnID string) bool {
+		_, ok := removedTurns[turnID]
+		return ok
+	}
+	for interactionID, flow := range s.flows {
+		if flow == nil || !wasRemoved(flow.TurnID) {
+			continue
+		}
+		key := inputKey(flow.Address, flow.UserID)
+		if s.flowByInput[key] == interactionID {
+			delete(s.flowByInput, key)
+		}
+		delete(s.flows, interactionID)
+		delete(s.interactionNotified, interactionID)
+	}
+	if backend == conversation.BackendCodex {
+		// This map only de-duplicates Codex interaction events. Clear any
+		// approval-only markers that have no input flow so a reconnect can
+		// notify the channel again.
+		s.interactionNotified = make(map[string]bool)
+	}
 	s.mu.Unlock()
 }
 
@@ -1170,6 +1411,7 @@ func (s *Service) queryService() *bridgequery.Service {
 	defer s.mu.Unlock()
 	if s.queries == nil {
 		s.queries = bridgequery.New(s.control, s.runtime, s.registry, s.commands)
+		s.queries.SetOpenClawBackend(s.openclaw)
 	}
 	return s.queries
 }
@@ -1463,10 +1705,53 @@ func cloneAnswers(source map[string][]string) map[string][]string {
 }
 
 func safeBindingPayload(binding bindings.Binding) map[string]any {
+	backend := bindingBackend(binding)
 	return map[string]any{
-		"bindingId": binding.ID, "channelType": "qqbot", "conversationType": binding.ConversationType,
+		"bindingId": binding.ID, "backend": backend, "sessionKey": shortID(firstNonEmpty(binding.SessionKey, binding.ThreadID)), "channelType": "qqbot", "conversationType": binding.ConversationType,
 		"account": maskID(binding.AccountID), "chat": maskID(binding.ChatID), "threadId": shortID(binding.ThreadID),
 	}
+}
+
+func (s *Service) openClawBackend() conversation.IConversationBackend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.openclaw
+}
+
+func bindingBackend(binding bindings.Binding) string {
+	if strings.TrimSpace(binding.Backend) == "" {
+		return conversation.BackendCodex
+	}
+	return strings.ToLower(strings.TrimSpace(binding.Backend))
+}
+
+func parseOpenClawSelector(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{"oc:", "openclaw:"} {
+		if strings.HasPrefix(lower, prefix) {
+			key := strings.TrimSpace(value[len(prefix):])
+			return key, key != ""
+		}
+	}
+	return "", false
+}
+
+func payloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, _ := payload[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func addressKey(address channels.ChannelAddress) string {

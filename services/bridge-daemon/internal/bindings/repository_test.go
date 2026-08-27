@@ -150,3 +150,29 @@ func TestRepositoryUpsertReplacesAddressAtomically(t *testing.T) {
 		t.Fatalf("unexpected address lookup: %#v ok=%t", found, ok)
 	}
 }
+
+func TestRepositoryPersistsOpenClawSessionBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	repository, err := NewRepository(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.Create(CreateRequest{
+		Backend: "openclaw", ChannelType: "telegram", AccountID: "bot-1", ConversationType: "default",
+		ChatID: "chat-1", ThreadID: "agent:main:main", SessionKey: "agent:main:main",
+	})
+	if err != nil {
+		t.Fatalf("create OpenClaw binding: %v", err)
+	}
+	if created.Backend != "openclaw" || created.SessionKey != "agent:main:main" || created.ThreadID != created.SessionKey {
+		t.Fatalf("unexpected OpenClaw binding: %#v", created)
+	}
+	reloaded, err := NewRepository(path)
+	if err != nil {
+		t.Fatalf("reload OpenClaw binding: %v", err)
+	}
+	found, ok := reloaded.FindAddress("telegram", "bot-1", "default", "chat-1", "")
+	if !ok || found.Backend != "openclaw" || found.SessionKey != "agent:main:main" {
+		t.Fatalf("OpenClaw binding was not persisted: %#v ok=%t", found, ok)
+	}
+}

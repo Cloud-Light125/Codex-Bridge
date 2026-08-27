@@ -307,7 +307,11 @@ func TestOfficialGatewayMessagesReconnectAndStop(t *testing.T) {
 	}
 	first := receiveInbound(t, inbound)
 	second := receiveInbound(t, inbound)
-	if first.Address.ConversationType != "c2c" || first.Text != "hello" || second.Address.ConversationType != "group" || second.Text != "group task" {
+	received := map[string]channels.InboundMessage{
+		first.Address.ConversationType:  first,
+		second.Address.ConversationType: second,
+	}
+	if received["c2c"].Text != "hello" || received["group"].Text != "group task" {
 		t.Fatalf("inbound messages=%#v %#v", first, second)
 	}
 	select {
@@ -318,7 +322,7 @@ func TestOfficialGatewayMessagesReconnectAndStop(t *testing.T) {
 	if identities := adapter.DiscoveredIdentities(); len(identities) != 3 {
 		t.Fatalf("discovered identities=%d; want 3", len(identities))
 	}
-	result, err := adapter.SendMessage(context.Background(), channels.OutboundMessage{Address: first.Address, Text: "accepted"})
+	result, err := adapter.SendMessage(context.Background(), channels.OutboundMessage{Address: received["c2c"].Address, Text: "accepted"})
 	if err != nil || result.MessageID != "reply-1" {
 		t.Fatalf("send result=%#v err=%v", result, err)
 	}

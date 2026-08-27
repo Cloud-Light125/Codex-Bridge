@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
@@ -357,6 +359,55 @@ func TestFreeTextRoutesToExactPendingInteraction(t *testing.T) {
 	}
 }
 
+func TestCodexDisconnectClearsOnlyCodexInteractionState(t *testing.T) {
+	repository, _ := bindings.NewRepository(filepath.Join(t.TempDir(), "bindings.json"))
+	service := NewService(&fakeControl{}, &fakeRuntime{}, repository, events.NewBroker(), nil)
+	defer service.Close(context.Background())
+	codexAddress := channels.ChannelAddress{ChannelType: "telegram", AccountID: "99", ChatID: "codex"}
+	openClawAddress := channels.ChannelAddress{ChannelType: "telegram", AccountID: "99", ChatID: "openclaw"}
+	service.routes["codex-turn"] = &turnRoute{Address: codexAddress, UserID: "42", ThreadID: "thread-codex", TurnID: "codex-turn"}
+	service.routes["openclaw-run"] = &turnRoute{Address: openClawAddress, UserID: "43", Backend: conversation.BackendOpenClaw, ThreadID: "agent:main:main", TurnID: "openclaw-run"}
+	service.waits[waitKey(codexAddress, "42")] = inputWait{Address: codexAddress, UserID: "42", TurnID: "codex-turn", InteractionID: "codex-interaction"}
+	service.waits[waitKey(openClawAddress, "43")] = inputWait{Address: openClawAddress, UserID: "43", TurnID: "openclaw-run", InteractionID: "openclaw-interaction"}
+	service.callbacks["codex-callback"] = callbackAction{TurnID: "codex-turn", InteractionID: "codex-interaction"}
+	service.callbacks["openclaw-callback"] = callbackAction{TurnID: "openclaw-run", InteractionID: "openclaw-interaction"}
+	service.sessions["codex-session"] = &multiSession{TurnID: "codex-turn", InteractionID: "codex-interaction"}
+	service.sessions["openclaw-session"] = &multiSession{TurnID: "openclaw-run", InteractionID: "openclaw-interaction"}
+	service.flows["codex-interaction"] = &interactionFlow{TurnID: "codex-turn", InteractionID: "codex-interaction"}
+	service.flows["openclaw-interaction"] = &interactionFlow{TurnID: "openclaw-run", InteractionID: "openclaw-interaction"}
+	service.interactionNotified["codex-interaction"] = true
+	service.interactionNotified["codex-approval"] = true
+
+	service.handleEvent(events.Event{EventType: events.CodexDisconnected})
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if _, ok := service.routes["codex-turn"]; ok {
+		t.Fatal("Codex route remained after Codex disconnect")
+	}
+	if _, ok := service.routes["openclaw-run"]; !ok {
+		t.Fatal("OpenClaw route was removed by Codex disconnect")
+	}
+	if len(service.waits) != 1 || service.waits[waitKey(openClawAddress, "43")].TurnID != "openclaw-run" {
+		t.Fatalf("waits after Codex disconnect = %#v", service.waits)
+	}
+	if _, ok := service.callbacks["codex-callback"]; ok {
+		t.Fatal("Codex callback remained after Codex disconnect")
+	}
+	if _, ok := service.sessions["codex-session"]; ok {
+		t.Fatal("Codex multi-session remained after Codex disconnect")
+	}
+	if _, ok := service.flows["codex-interaction"]; ok {
+		t.Fatal("Codex interaction flow remained after Codex disconnect")
+	}
+	if service.interactionNotified["codex-interaction"] {
+		t.Fatal("Codex interaction notification remained after Codex disconnect")
+	}
+	if len(service.interactionNotified) != 0 {
+		t.Fatalf("Codex interaction notifications remained after disconnect: %#v", service.interactionNotified)
+	}
+}
+
 func TestCallbackTokenIsRemovedOnFirstUse(t *testing.T) {
 	repository, _ := bindings.NewRepository(filepath.Join(t.TempDir(), "bindings.json"))
 	service := NewService(&fakeControl{}, &fakeRuntime{}, repository, events.NewBroker(), nil)
@@ -408,5 +459,97 @@ func TestStopRequiresOriginatingAllowedUser(t *testing.T) {
 	service.stopTurn(context.Background(), channels.InboundMessage{Address: address, UserID: "42"})
 	if runtime.interrupts != 1 {
 		t.Fatalf("originating user interrupts = %d, want 1", runtime.interrupts)
+	}
+}
+
+type fakeOpenClawBackend struct {
+	sends  []string
+	aborts []string
+}
+
+func (f *fakeOpenClawBackend) Backend() string { return conversation.BackendOpenClaw }
+func (f *fakeOpenClawBackend) ListSessions(context.Context, int) ([]conversation.Session, error) {
+	return []conversation.Session{{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Title: "Main", Status: "idle"}}, nil
+}
+func (f *fakeOpenClawBackend) ReadSession(context.Context, string) (conversation.Detail, error) {
+	return conversation.Detail{Session: conversation.Session{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Title: "Main", Status: "idle"}}, nil
+}
+func (f *fakeOpenClawBackend) SendMessage(_ context.Context, key, message string) (conversation.SendResult, error) {
+	f.sends = append(f.sends, key+":"+message)
+	return conversation.SendResult{Backend: conversation.BackendOpenClaw, SessionKey: key, RunID: "openclaw-run-" + strconv.Itoa(len(f.sends)), Status: "running"}, nil
+}
+func (f *fakeOpenClawBackend) Abort(_ context.Context, key, runID string) (conversation.AbortResult, error) {
+	f.aborts = append(f.aborts, key+":"+runID)
+	return conversation.AbortResult{Backend: conversation.BackendOpenClaw, SessionKey: key, RunID: runID, Status: "aborted"}, nil
+}
+func (f *fakeOpenClawBackend) SubscribeEvents(func(conversation.Event)) func() { return func() {} }
+func (f *fakeOpenClawBackend) ConnectionStatus() conversation.ConnectionStatus {
+	return conversation.ConnectionStatus{Backend: conversation.BackendOpenClaw, Configured: true, Running: true, Connected: true, State: "connected"}
+}
+
+func TestTelegramRoutesBoundOpenClawSessionAndFinalOrAbort(t *testing.T) {
+	repository, err := bindings.NewRepository(filepath.Join(t.TempDir(), "bindings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := events.NewBroker()
+	service := NewService(&fakeControl{}, &fakeRuntime{}, repository, broker, nil)
+	defer service.Close(context.Background())
+	backend := &fakeOpenClawBackend{}
+	service.SetOpenClawBackend(backend)
+
+	sent := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if !strings.HasSuffix(request.URL.Path, "/sendMessage") {
+			response.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var payload map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		if text, ok := payload["text"].(string); ok {
+			sent <- text
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 1}})
+	}))
+	defer server.Close()
+	service.adapter.mu.Lock()
+	service.adapter.client = newClientForTest("telegram-test-token", server.URL, server.Client())
+	service.adapter.mu.Unlock()
+
+	address := channels.ChannelAddress{ChannelType: "telegram", AccountID: "bot-1", ConversationType: "default", ChatID: "chat-1"}
+	if _, _, err := repository.UpsertAddress(bindings.CreateRequest{
+		Backend: conversation.BackendOpenClaw, ChannelType: "telegram", AccountID: "bot-1", ConversationType: "default",
+		ChatID: "chat-1", ThreadID: "agent:main:main", SessionKey: "agent:main:main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := channels.InboundMessage{Address: address, UserID: "user-1", Text: "hello OpenClaw"}
+	service.startTurn(context.Background(), message, message.Text)
+	if len(backend.sends) != 1 || !strings.HasSuffix(backend.sends[0], ":hello OpenClaw") {
+		t.Fatalf("OpenClaw send was not routed from Telegram: %#v", backend.sends)
+	}
+	service.handleEvent(events.Event{EventType: events.OpenClawMessageCompleted, ThreadID: "agent:main:main", TurnID: "openclaw-run-1", Payload: map[string]any{"text": "final answer"}})
+	select {
+	case text := <-sent:
+		if text != "final answer" {
+			t.Fatalf("Telegram received unexpected OpenClaw final: %q", text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Telegram did not receive the OpenClaw final answer")
+	}
+
+	service.startTurn(context.Background(), message, "second task")
+	service.stopTurn(context.Background(), message)
+	if len(backend.aborts) != 1 || backend.aborts[0] != "agent:main:main:openclaw-run-2" {
+		t.Fatalf("OpenClaw abort was not routed from Telegram: %#v", backend.aborts)
+	}
+	select {
+	case text := <-sent:
+		if !strings.Contains(text, "已请求停止 OpenClaw") {
+			t.Fatalf("Telegram received unexpected stop acknowledgement: %q", text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Telegram did not acknowledge OpenClaw stop")
 	}
 }
