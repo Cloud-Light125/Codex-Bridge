@@ -62,7 +62,7 @@
                 <Grid Visibility="{Binding LoadingVisibility}" Background="{DynamicResource CardBrush}">
                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                         <ProgressBar Width="180" Height="4" IsIndeterminate="True" />
-                        <TextBlock Text="正在读取 Codex 会话…" Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,0" />
+                        <TextBlock Text="正在读取会话…" Foreground="{DynamicResource MutedBrush}" Margin="0,14,0,0" />
                     </StackPanel>
                 </Grid>
 

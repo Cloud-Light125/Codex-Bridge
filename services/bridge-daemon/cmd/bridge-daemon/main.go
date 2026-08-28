@@ -14,6 +14,7 @@ import (
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/api"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/bindings"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/channelprofiles"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/config"
@@ -21,9 +22,8 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/mirror"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/qqbot"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/openclaw"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/telegram"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
@@ -82,22 +82,18 @@ func main() {
 		os.Exit(1)
 	}
 	controlService := control.NewService(manager, manager, threadRegistry)
-	telegramService := telegram.NewService(controlService, manager, bindingRepository, broker, logger, threadRegistry)
-	qqbotService := qqbot.NewService(controlService, manager, bindingRepository, broker, logger, threadRegistry)
-	telegramService.SetCommandRegistry(commandRegistry)
-	qqbotService.SetCommandRegistry(commandRegistry)
+	openClawService := openclaw.NewService(logger, broker)
+	profileManager := channelprofiles.NewManager(controlService, manager, bindingRepository, broker, logger, threadRegistry, commandRegistry, openClawService)
 	mirrorService, err := mirror.New(paths.MirrorFile, controlService, manager, threadRegistry, broker, logger,
 		mirror.Target{Status: func() (string, bool) {
-			status := telegramService.Adapter().TelegramStatus()
-			return status.BotID, status.Running && status.Connected
+			return profileManager.TelegramMirrorTarget()
 		}, Send: func(ctx context.Context, message channels.OutboundMessage) (channels.OutboundResult, error) {
-			return telegramService.Adapter().SendMessage(ctx, message)
+			return profileManager.SendTelegramMirror(ctx, message)
 		}},
 		mirror.Target{Status: func() (string, bool) {
-			status := qqbotService.Adapter().QQBotStatus()
-			return status.AppID, status.Running && status.Connected
+			return profileManager.QQMirrorTarget()
 		}, Send: func(ctx context.Context, message channels.OutboundMessage) (channels.OutboundResult, error) {
-			return qqbotService.Adapter().SendMessage(ctx, message)
+			return profileManager.SendQQMirror(ctx, message)
 		}},
 	)
 	if err != nil {
@@ -105,7 +101,8 @@ func main() {
 		_ = listener.Close()
 		os.Exit(1)
 	}
-	server := api.New(options.Token, manager, controlService, bindingRepository, broker, logger, telegramService, qqbotService, mirrorService, commandRegistry)
+	server := api.New(options.Token, manager, controlService, bindingRepository, broker, logger, profileManager, mirrorService, commandRegistry)
+	server.SetOpenClawBackend(openClawService)
 
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.Serve(listener) }()
@@ -147,16 +144,14 @@ func main() {
 
 	broker.Publish(events.DaemonStopped, map[string]any{"pid": os.Getpid()})
 	mirrorService.Close()
-	telegramContext, cancelTelegram := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := telegramService.Close(telegramContext); err != nil {
-		logger.Printf("Telegram shutdown: %v", err)
+	profilesContext, cancelProfiles := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := profileManager.Close(profilesContext); err != nil {
+		logger.Printf("channel profiles shutdown: %v", err)
 	}
-	cancelTelegram()
-	qqContext, cancelQQ := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := qqbotService.Close(qqContext); err != nil {
-		logger.Printf("QQ Official Bot shutdown: %v", err)
+	cancelProfiles()
+	if err := openClawService.Close(); err != nil {
+		logger.Printf("OpenClaw shutdown: %v", err)
 	}
-	cancelQQ()
 	if err := manager.Close(); err != nil {
 		logger.Printf("runtime shutdown: %v", err)
 	}

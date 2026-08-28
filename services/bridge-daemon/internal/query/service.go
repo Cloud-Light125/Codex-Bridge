@@ -12,6 +12,7 @@ import (
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
@@ -45,7 +46,14 @@ type Service struct {
 	runtime  Runtime
 	registry *threadregistry.Registry
 	commands *commandregistry.Registry
+	openclaw conversation.IConversationBackend
 	now      func() time.Time
+}
+
+// SetOpenClawBackend adds OpenClaw to read-only remote queries while leaving
+// all existing Codex query and numbered-thread behavior unchanged.
+func (s *Service) SetOpenClawBackend(backend conversation.IConversationBackend) {
+	s.openclaw = backend
 }
 
 func New(controlService Control, runtime Runtime, registry *threadregistry.Registry, commandRegistries ...*commandregistry.Registry) *Service {
@@ -116,7 +124,7 @@ func (s *Service) threads(ctx context.Context, arguments []string) string {
 	var err error
 	for current := 1; current <= page; current++ {
 		list, err = s.control.ListThreads(ctx, 20, cursor)
-		if err != nil {
+		if err != nil && s.openclaw == nil {
 			return "无法读取 Codex 会话，请确认 Codex 已连接。"
 		}
 		if current < page {
@@ -126,21 +134,23 @@ func (s *Service) threads(ctx context.Context, arguments []string) string {
 			cursor = list.NextCursor
 		}
 	}
-	if len(list.Threads) == 0 {
-		if page == 1 {
-			return "当前没有可用的 Codex 会话。"
-		}
-		return "该页没有会话。"
-	}
-	s.hydrateActivities(ctx, list.Threads)
 	var output strings.Builder
-	fmt.Fprintf(&output, "Codex 会话 · 第 %d 页\n\n", page)
+	if len(list.Threads) > 0 {
+		s.hydrateActivities(ctx, list.Threads)
+		fmt.Fprintf(&output, "[Codex] 会话 · 第 %d 页\n\n", page)
+	}
 	for _, thread := range list.Threads {
 		state := s.runtime.RuntimeState(thread.ThreadID).State
 		if state == "" {
 			state = thread.Status
 		}
 		fmt.Fprintf(&output, "#%d %s · %s\n", thread.Number, displayTitle(thread.Title), statusChinese(state))
+	}
+	if output.Len() == 0 {
+		if page == 1 {
+			return "当前没有可用的 Codex 会话。"
+		}
+		return "该页没有会话。"
 	}
 	output.WriteString("\n回复：\n#编号 你的消息")
 	return output.String()
@@ -494,7 +504,16 @@ func (s *Service) connectionStatus() string {
 	if status.AppServerRunning {
 		server = "已连接"
 	}
-	return fmt.Sprintf("Codex Bridge 状态\nBridge：运行中\nCodex CLI：%s\nApp Server：%s", cli, server)
+	lines := []string{fmt.Sprintf("Codex Bridge 状态\nBridge：运行中\nCodex CLI：%s\nApp Server：%s", cli, server)}
+	if s.openclaw != nil {
+		openclawStatus := s.openclaw.ConnectionStatus()
+		state := firstNonEmpty(openclawStatus.State, "未配置")
+		if openclawStatus.Connected {
+			state = "已连接"
+		}
+		lines = append(lines, "OpenClaw Gateway："+state)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *Service) recentThreads(ctx context.Context, limit int) ([]control.ThreadSummary, error) {

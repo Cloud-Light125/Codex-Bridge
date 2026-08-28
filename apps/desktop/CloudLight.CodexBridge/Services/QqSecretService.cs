@@ -3,12 +3,21 @@ namespace CloudLight.CodexBridge.Services;
 /// <summary>Stores the QQ Official Bot AppSecret independently from Telegram.</summary>
 public sealed class QqSecretService
 {
-    private readonly DpapiSecretStore _store = new(
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-			"CloudLight", "CodexBridge", "secrets", "qqbot-app-secret.dat"),
-		"CloudLight.CodexBridge/qqbot-app-secret/v1",
-		"QQ Bot AppSecret");
+	private readonly DpapiSecretStore _store;
+
+	public QqSecretService(string profileId = "qq-default")
+	{
+		var defaultProfile = string.Equals(profileId?.Trim(), "qq-default", StringComparison.OrdinalIgnoreCase);
+		var profilePart = ChannelProfileSecretPaths.SafePart(profileId, "qq-default");
+		var fileName = defaultProfile ? "qqbot-app-secret.dat" : $"qqbot-app-secret-{profilePart}.dat";
+		var entropy = defaultProfile
+			? "CloudLight.CodexBridge/qqbot-app-secret/v1"
+			: $"CloudLight.CodexBridge/qqbot-app-secret/{profilePart}/v1";
+		_store = new DpapiSecretStore(
+			Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CloudLight", "CodexBridge", "secrets", fileName),
+			entropy,
+			"QQ Bot AppSecret");
+	}
 
     public string SecretFile => _store.SecretFile;
 

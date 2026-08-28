@@ -14,7 +14,7 @@ var credentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(/bot)[0-9]+:[A-Za-z0-9_-]+`),
 	regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[^\s,;]+`),
 	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+`),
-	regexp.MustCompile(`(?i)((?:api[_-]?key|bot[_-]?token|access[_-]?token|refresh[_-]?token|token)["']?\s*[=:]\s*["']?)[^\s,;"']+`),
+	regexp.MustCompile(`(?i)((?:api[_-]?key|bot[_-]?token|access[_-]?token|refresh[_-]?token|token|password)["']?\s*[=:]\s*["']?)[^\s,;"']+`),
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{12,}\b`),
 }
 

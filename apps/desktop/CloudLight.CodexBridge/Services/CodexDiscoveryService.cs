@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace CloudLight.CodexBridge.Services;
@@ -5,6 +6,7 @@ namespace CloudLight.CodexBridge.Services;
 public enum CodexDiscoverySource
 {
     None,
+    Manual,
     SavedPath,
     PATH,
     CodexProcess,
@@ -21,6 +23,7 @@ public sealed record CodexDiscoveryResult(
     {
         CodexDiscoverySource.CodexProcess => "RunningCodex",
         CodexDiscoverySource.ChatGPTProcess => "RunningChatGPT",
+        CodexDiscoverySource.Manual => "Manual",
         CodexDiscoverySource.PATH => "PATH",
         CodexDiscoverySource.SavedPath => "SavedPath",
         _ => ""
@@ -31,48 +34,85 @@ public sealed class CodexDiscoveryService(LogService logs)
 {
     private static readonly string[] CodexFileNames = ["codex.exe", "codex", "codex.cmd", "codex.bat"];
     private static readonly string[] CommonChatGPTRelativeDirectories = ["", "resources", "bin", "cli", "tools"];
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _recentDiagnostics = new(StringComparer.Ordinal);
     private const int MaximumSearchDepth = 6;
     private const int MaximumSearchedDirectories = 1024;
 
-    public async Task<CodexDiscoveryResult> DiscoverAsync(
+    public Task<CodexDiscoveryResult> DiscoverAsync(
         string? savedPath,
+        CancellationToken cancellationToken = default) =>
+        DiscoverAsync(savedPath, null, cancellationToken);
+
+    public async Task<CodexDiscoveryResult> DiscoverAsync(
+        string? customPath,
+        string? detectedPath,
         CancellationToken cancellationToken = default)
     {
         var attempted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        if (!string.IsNullOrWhiteSpace(savedPath))
+        if (!string.IsNullOrWhiteSpace(customPath))
         {
-            var saved = await ValidateFirstAsync(
-                [savedPath], CodexDiscoverySource.SavedPath, attempted, cancellationToken).ConfigureAwait(false);
-            if (saved.Found) return LogSuccess(saved);
-            logs.Add("desktop", "Codex 自动发现：SavedPath 无效，继续尝试其他发现方式。");
+            var manual = await ValidateFirstAsync(
+                [customPath], CodexDiscoverySource.Manual, attempted, logMissingCandidates: true, cancellationToken).ConfigureAwait(false);
+            if (manual.Found) return LogSuccess(manual);
+            LogThrottled("manual-path-summary", "[codex-discovery] Manual candidates=1 valid=0; continuing");
         }
 
+        if (!string.IsNullOrWhiteSpace(detectedPath))
+        {
+            var saved = await ValidateFirstAsync(
+                [detectedPath], CodexDiscoverySource.SavedPath, attempted, logMissingCandidates: true, cancellationToken).ConfigureAwait(false);
+            if (saved.Found) return LogSuccess(saved);
+            LogThrottled("saved-path-summary", "[codex-discovery] SavedPath candidates=1 valid=0; continuing");
+        }
+
+        var preferredCandidates = EnumeratePreferredLaunchCandidates().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var fromPreferredEntry = await ValidateFirstAsync(
+            preferredCandidates, CodexDiscoverySource.PATH, attempted, logMissingCandidates: false, cancellationToken).ConfigureAwait(false);
+        if (fromPreferredEntry.Found) return LogSuccess(fromPreferredEntry);
+
+        var pathCandidates = EnumeratePathCandidates().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        LogThrottled("path-summary:" + string.Join("|", pathCandidates), $"[codex-discovery] PATH candidates={pathCandidates.Length}" +
+            (pathCandidates.Length == 0 ? "" : $" paths={FormatPaths(pathCandidates)}"));
         var fromPath = await ValidateFirstAsync(
-            EnumeratePathCandidates(), CodexDiscoverySource.PATH, attempted, cancellationToken).ConfigureAwait(false);
+            pathCandidates, CodexDiscoverySource.PATH, attempted, logMissingCandidates: false, cancellationToken).ConfigureAwait(false);
         if (fromPath.Found) return LogSuccess(fromPath);
 
-        var codexProcessPaths = EnumerateProcessPaths(IsCodexProcessName).ToArray();
+        var codexProcessScan = ScanProcessPaths(IsCodexProcessName, "Codex");
         var fromCodexProcess = await ValidateFirstAsync(
-            EnumerateCodexProcessCandidates(codexProcessPaths),
+            EnumerateCodexProcessCandidates(codexProcessScan.Paths),
             CodexDiscoverySource.CodexProcess,
             attempted,
+            logMissingCandidates: false,
             cancellationToken).ConfigureAwait(false);
         if (fromCodexProcess.Found) return LogSuccess(fromCodexProcess);
 
-        var chatGPTPaths = EnumerateProcessPaths(IsChatGPTProcessName).ToArray();
-        if (chatGPTPaths.Length > 0)
-        {
-            var fromChatGPT = await ValidateFirstAsync(
-                EnumerateChatGPTCandidates(chatGPTPaths),
-                CodexDiscoverySource.ChatGPTProcess,
-                attempted,
-                cancellationToken).ConfigureAwait(false);
-            if (fromChatGPT.Found) return LogSuccess(fromChatGPT);
-        }
+        var chatGPTProcessScan = ScanProcessPaths(IsChatGPTProcessName, "ChatGPT");
+        var fromChatGPT = await ValidateFirstAsync(
+            EnumerateChatGPTCandidates(chatGPTProcessScan.Paths),
+            CodexDiscoverySource.ChatGPTProcess,
+            attempted,
+            logMissingCandidates: false,
+            cancellationToken).ConfigureAwait(false);
+        if (fromChatGPT.Found) return LogSuccess(fromChatGPT);
 
-        logs.Add("desktop", "Codex 自动发现失败：SavedPath、PATH、CodexProcess 和 ChatGPTProcess 均未找到有效的 Codex。");
+        LogThrottled("discovery-failed", "[codex-discovery] failed sources=SavedPath,PATH,RunningCodex,RunningChatGPT");
         return new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None);
+    }
+
+    public Task<CodexDiscoveryResult> ValidateManualPathAsync(
+        string? path,
+        CancellationToken cancellationToken = default) =>
+        DiscoverCandidatesAsync(path is null ? [] : [path], CodexDiscoverySource.Manual, cancellationToken);
+
+    public async Task<CodexDiscoveryResult> DiscoverCandidatesAsync(
+        IEnumerable<string> candidates,
+        CodexDiscoverySource source,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await ValidateFirstAsync(
+            candidates, source, new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            logMissingCandidates: true, cancellationToken).ConfigureAwait(false);
+        return result.Found ? LogSuccess(result) : result;
     }
 
     private CodexDiscoveryResult LogSuccess(CodexDiscoveryResult result)
@@ -82,19 +122,28 @@ public sealed class CodexDiscoveryService(LogService logs)
         return result;
     }
 
-    private static async Task<CodexDiscoveryResult> ValidateFirstAsync(
+    private async Task<CodexDiscoveryResult> ValidateFirstAsync(
         IEnumerable<string> candidates,
         CodexDiscoverySource source,
         HashSet<string> attempted,
+        bool logMissingCandidates,
         CancellationToken cancellationToken)
     {
         foreach (var candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var normalized = NormalizeCandidate(candidate);
-            if (normalized is null || !attempted.Add(normalized)) continue;
+            var normalized = NormalizeCandidate(candidate, out var normalizationFailure);
+            if (normalized is null)
+            {
+                if (logMissingCandidates)
+                    LogThrottled($"candidate-rejected:{source}:{candidate}:{normalizationFailure}",
+                        $"[codex-discovery] candidate rejected source={SourceName(source)} path={LogService.Redact(candidate)} reason={normalizationFailure}");
+                continue;
+            }
+            if (!attempted.Add(normalized)) continue;
 
-            var version = await ValidateCandidateAsync(normalized, cancellationToken).ConfigureAwait(false);
+            logs.Add("codex-discovery", $"[codex-discovery] candidate found source={SourceName(source)} path={normalized}");
+            var version = await ValidateCandidateAsync(normalized, source, cancellationToken).ConfigureAwait(false);
             if (version is not null)
                 return new CodexDiscoveryResult(true, normalized, version, source);
         }
@@ -102,27 +151,47 @@ public sealed class CodexDiscoveryService(LogService logs)
         return new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None);
     }
 
-    private static string? NormalizeCandidate(string? candidate)
+    private static string? NormalizeCandidate(string? candidate, out string failure)
     {
-        if (string.IsNullOrWhiteSpace(candidate)) return null;
+        failure = "";
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            failure = "empty";
+            return null;
+        }
         try
         {
             var expanded = Environment.ExpandEnvironmentVariables(candidate.Trim().Trim('"'));
             var fullPath = Path.GetFullPath(expanded);
-            return File.Exists(fullPath) ? fullPath : null;
+            if (IsPackagedAppInternalPath(fullPath))
+            {
+                failure = "packaged-app-internal-path";
+                return null;
+            }
+            if (File.Exists(fullPath)) return fullPath;
+            failure = "file-not-found";
+            return null;
         }
         catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
         {
+            failure = exception.GetType().Name;
             return null;
         }
     }
 
-    private static async Task<string?> ValidateCandidateAsync(string path, CancellationToken cancellationToken)
+    private async Task<string?> ValidateCandidateAsync(
+        string path,
+        CodexDiscoverySource source,
+        CancellationToken cancellationToken)
     {
         using var process = new Process { StartInfo = CreateVersionStartInfo(path) };
         try
         {
-            if (!process.Start()) return null;
+            if (!process.Start())
+            {
+                LogValidationFailure(path, source, "process-start-returned-false");
+                return null;
+            }
             var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
             var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -130,24 +199,39 @@ public sealed class CodexDiscoveryService(LogService logs)
             await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
             var output = await standardOutput.ConfigureAwait(false);
             var error = await standardError.ConfigureAwait(false);
-            if (process.ExitCode != 0) return null;
+            if (process.ExitCode != 0)
+            {
+                var detail = FirstNonEmptyLine(error) ?? FirstNonEmptyLine(output) ?? "no-output";
+                LogValidationFailure(path, source, $"exit-code-{process.ExitCode} detail={LogService.Redact(detail)}");
+                return null;
+            }
 
             var version = FirstNonEmptyLine(output) ?? FirstNonEmptyLine(error);
-            if (string.IsNullOrWhiteSpace(version)) return null;
+            if (string.IsNullOrWhiteSpace(version))
+            {
+                LogValidationFailure(path, source, "empty-version-output");
+                return null;
+            }
             return LogService.Redact(version.Length <= 128 ? version : version[..128]);
         }
         catch (OperationCanceledException)
         {
             TryKill(process);
             if (cancellationToken.IsCancellationRequested) throw;
+            LogValidationFailure(path, source, "validation-timeout");
             return null;
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException)
         {
             TryKill(process);
+            LogValidationFailure(path, source, $"{exception.GetType().Name}: {LogService.Redact(exception.Message)}");
             return null;
         }
     }
+
+    private void LogValidationFailure(string path, CodexDiscoverySource source, string reason) =>
+        LogThrottled($"validation-failed:{source}:{path}:{reason}",
+            $"[codex-discovery] validation failed source={SourceName(source)} path={path} reason={reason}");
 
     private static ProcessStartInfo CreateVersionStartInfo(string path)
     {
@@ -207,12 +291,32 @@ public sealed class CodexDiscoveryService(LogService logs)
         }
     }
 
-    private static IEnumerable<string> EnumerateProcessPaths(Func<string, bool> matches)
+    private static IEnumerable<string> EnumeratePreferredLaunchCandidates()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData)) yield break;
+
+        var win32Directory = Path.Combine(localAppData, "Programs", "OpenAI", "Codex", "bin");
+        foreach (var name in CodexFileNames)
+            yield return Path.Combine(win32Directory, name);
+
+        var aliasDirectory = Path.Combine(localAppData, "Microsoft", "WindowsApps");
+        foreach (var name in CodexFileNames)
+            yield return Path.Combine(aliasDirectory, name);
+    }
+
+    private ProcessScanResult ScanProcessPaths(Func<string, bool> matches, string label)
     {
         Process[] processes;
         try { processes = Process.GetProcesses(); }
-        catch { yield break; }
+        catch (Exception exception)
+        {
+            logs.Add("codex-discovery", $"[codex-discovery] {label} process enumeration failed type={exception.GetType().Name}");
+            return new ProcessScanResult([]);
+        }
 
+        var matched = 0;
+        var paths = new List<string>();
         foreach (var process in processes)
         {
             using (process)
@@ -221,13 +325,25 @@ public sealed class CodexDiscoveryService(LogService logs)
                 try { processName = process.ProcessName; }
                 catch { continue; }
                 if (!matches(processName)) continue;
+                matched++;
 
-                string? executablePath;
-                try { executablePath = process.MainModule?.FileName; }
-                catch { continue; }
-                if (!string.IsNullOrWhiteSpace(executablePath)) yield return executablePath;
+                try
+                {
+                    var executablePath = process.MainModule?.FileName;
+                    if (!string.IsNullOrWhiteSpace(executablePath)) paths.Add(executablePath);
+                }
+                catch (Exception exception)
+                {
+                    LogThrottled($"main-module:{label}:{process.Id}:{exception.GetType().Name}",
+                        $"[codex-discovery] MainModule unavailable process={label} pid={process.Id} type={exception.GetType().Name}");
+                }
             }
         }
+
+        var distinctPaths = paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        LogThrottled($"process-summary:{label}:{matched}:{string.Join("|", distinctPaths)}",
+            $"[codex-discovery] {label} processes={matched} executablePaths={distinctPaths.Length}");
+        return new ProcessScanResult(distinctPaths);
     }
 
     private static bool IsCodexProcessName(string processName) =>
@@ -237,10 +353,17 @@ public sealed class CodexDiscoveryService(LogService logs)
     private static bool IsChatGPTProcessName(string processName) =>
         processName.Equals("ChatGPT", StringComparison.OrdinalIgnoreCase);
 
-    private static IEnumerable<string> EnumerateCodexProcessCandidates(IEnumerable<string> processPaths)
+    private IEnumerable<string> EnumerateCodexProcessCandidates(IEnumerable<string> processPaths)
     {
         foreach (var processPath in processPaths)
         {
+            if (IsPackagedAppInternalPath(processPath))
+            {
+                LogThrottled($"package-clue:Codex:{processPath}",
+                    $"[codex-discovery] RunningCodex package path retained as installation clue only path={LogService.Redact(processPath)}");
+                foreach (var launchEntry in EnumeratePreferredLaunchCandidates()) yield return launchEntry;
+                continue;
+            }
             var fileName = Path.GetFileNameWithoutExtension(processPath);
             if (fileName.Equals("codex", StringComparison.OrdinalIgnoreCase)) yield return processPath;
             var directory = Path.GetDirectoryName(processPath);
@@ -249,20 +372,32 @@ public sealed class CodexDiscoveryService(LogService logs)
         }
     }
 
-    private static IEnumerable<string> EnumerateChatGPTCandidates(IEnumerable<string> chatGPTPaths)
+    private IEnumerable<string> EnumerateChatGPTCandidates(IEnumerable<string> chatGPTPaths)
     {
         foreach (var chatGPTPath in chatGPTPaths.Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            if (IsPackagedAppInternalPath(chatGPTPath))
+            {
+                LogThrottled($"package-clue:ChatGPT:{chatGPTPath}",
+                    $"[codex-discovery] RunningChatGPT package path retained as installation clue only path={LogService.Redact(chatGPTPath)}");
+                foreach (var launchEntry in EnumeratePreferredLaunchCandidates()) yield return launchEntry;
+                continue;
+            }
             var installationDirectory = Path.GetDirectoryName(chatGPTPath);
             if (installationDirectory is null) continue;
+            LogThrottled($"chatgpt-directory:{installationDirectory}",
+                $"[codex-discovery] scanning ChatGPT installation directory={installationDirectory}");
             foreach (var candidate in EnumerateInstallationCandidates(installationDirectory)) yield return candidate;
         }
 
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (!string.IsNullOrWhiteSpace(localAppData))
         {
+            var fallbackDirectory = Path.Combine(localAppData, "Programs", "OpenAI", "Codex", "bin");
+            LogThrottled($"chatgpt-fallback:{fallbackDirectory}",
+                $"[codex-discovery] scanning ChatGPT fallback directory={fallbackDirectory}");
             foreach (var name in CodexFileNames)
-                yield return Path.Combine(localAppData, "Programs", "OpenAI", "Codex", "bin", name);
+                yield return Path.Combine(fallbackDirectory, name);
         }
     }
 
@@ -310,4 +445,49 @@ public sealed class CodexDiscoveryService(LogService logs)
             }
         }
     }
+
+    public static bool IsPackagedAppInternalPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        try
+        {
+            var normalized = Path.GetFullPath(Environment.ExpandEnvironmentVariables(path.Trim().Trim('"')))
+                .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+            var programFilesRoots = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetEnvironmentVariable("ProgramW6432") ?? ""
+            };
+            return programFilesRoots
+                .Where(root => !string.IsNullOrWhiteSpace(root))
+                .Select(root => Path.Combine(Path.GetFullPath(root), "WindowsApps") + Path.DirectorySeparatorChar)
+                .Any(root => normalized.StartsWith(root, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private void LogThrottled(string key, string message)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_recentDiagnostics.TryGetValue(key, out var previous) && now - previous < TimeSpan.FromSeconds(30)) return;
+        _recentDiagnostics[key] = now;
+        logs.Add("codex-discovery", message);
+    }
+
+    private static string SourceName(CodexDiscoverySource source) => source switch
+    {
+        CodexDiscoverySource.CodexProcess => "RunningCodex",
+        CodexDiscoverySource.ChatGPTProcess => "RunningChatGPT",
+        CodexDiscoverySource.Manual => "Manual",
+        _ => source.ToString()
+    };
+
+    private static string FormatPaths(IEnumerable<string> paths) =>
+        string.Join(";", paths.Select(LogService.Redact));
+
+    private sealed record ProcessScanResult(IReadOnlyList<string> Paths);
 }

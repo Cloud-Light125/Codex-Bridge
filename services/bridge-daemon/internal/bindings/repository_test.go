@@ -50,7 +50,9 @@ func TestRepositoryMigratesV1TelegramWithoutLosingFields(t *testing.T) {
 	if err := json.Unmarshal(data, &migrated); err != nil {
 		t.Fatal(err)
 	}
-	if migrated.Version != 3 || len(migrated.Bindings) != 1 || migrated.Bindings[0].ConversationType != "default" {
+	if migrated.Version != 4 || len(migrated.Bindings) != 1 || migrated.Bindings[0].ConversationType != "default" ||
+		migrated.Bindings[0].ChannelProfileID != "telegram-default" || migrated.Bindings[0].ResourceID != "telegram-default" ||
+		migrated.Bindings[0].ConversationID != "chat-1" || migrated.Bindings[0].TargetID != "thread-1" {
 		t.Fatalf("unexpected migrated disk model: %#v", migrated)
 	}
 }
@@ -148,5 +150,72 @@ func TestRepositoryUpsertReplacesAddressAtomically(t *testing.T) {
 	}
 	if found, ok := repository.FindAddress("telegram", "bot-1", "chat-1", "topic-1"); !ok || found.ThreadID != "thread-2" {
 		t.Fatalf("unexpected address lookup: %#v ok=%t", found, ok)
+	}
+}
+
+func TestRepositoryPersistsOpenClawSessionBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	repository, err := NewRepository(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := repository.Create(CreateRequest{
+		Backend: "openclaw", ChannelType: "telegram", AccountID: "bot-1", ConversationType: "default",
+		ChatID: "chat-1", ThreadID: "agent:main:main", SessionKey: "agent:main:main",
+	})
+	if err != nil {
+		t.Fatalf("create OpenClaw binding: %v", err)
+	}
+	if created.Backend != "openclaw" || created.SessionKey != "agent:main:main" || created.ThreadID != created.SessionKey {
+		t.Fatalf("unexpected OpenClaw binding: %#v", created)
+	}
+	reloaded, err := NewRepository(path)
+	if err != nil {
+		t.Fatalf("reload OpenClaw binding: %v", err)
+	}
+	found, ok := reloaded.FindAddress("telegram", "bot-1", "default", "chat-1", "")
+	if !ok || found.Backend != "openclaw" || found.SessionKey != "agent:main:main" {
+		t.Fatalf("OpenClaw binding was not persisted: %#v ok=%t", found, ok)
+	}
+}
+
+func TestRepositoryKeepsBackendAndTargetExplicitAcrossProfiles(t *testing.T) {
+	repository, err := NewRepository(filepath.Join(t.TempDir(), "bindings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two physical bot resources may legitimately receive the same platform
+	// conversation ID.  Each binding keeps the backend and target explicit;
+	// no caller needs to infer a backend from a target string.
+	codex, err := repository.Create(CreateRequest{
+		Backend: "codex", TargetID: "thread-codex", ChannelType: "telegram", ChannelProfileID: "telegram-1", ResourceID: "telegram-resource-1",
+		AccountID: "bot-a", ConversationType: "default", ConversationID: "chat-1", ChatID: "chat-1", ThreadID: "thread-codex",
+	})
+	if err != nil {
+		t.Fatalf("create Codex binding: %v", err)
+	}
+	openClaw, err := repository.Create(CreateRequest{
+		Backend: "openclaw", TargetID: "agent:main:session-1", ChannelType: "telegram", ChannelProfileID: "telegram-2", ResourceID: "telegram-resource-2",
+		AccountID: "bot-b", ConversationType: "default", ConversationID: "chat-1", ChatID: "chat-1", ThreadID: "agent:main:session-1", SessionKey: "agent:main:session-1",
+	})
+	if err != nil {
+		t.Fatalf("create OpenClaw binding: %v", err)
+	}
+
+	if found, ok := repository.FindProfileAddress("telegram", "telegram-resource-1", "default", "chat-1", ""); !ok || found.ID != codex.ID || found.Backend != "codex" || found.TargetID != "thread-codex" {
+		t.Fatalf("Codex lookup crossed into another profile/backend: %#v ok=%t", found, ok)
+	}
+	if found, ok := repository.FindProfileAddress("telegram", "telegram-resource-2", "default", "chat-1", ""); !ok || found.ID != openClaw.ID || found.Backend != "openclaw" || found.TargetID != "agent:main:session-1" {
+		t.Fatalf("OpenClaw lookup crossed into another profile/backend: %#v ok=%t", found, ok)
+	}
+
+	// A shared physical bot has one current binding for a conversation.  This
+	// prevents a message from being delivered to both backends.
+	if _, err := repository.Create(CreateRequest{
+		Backend: "openclaw", TargetID: "agent:main:other", ChannelType: "telegram", ChannelProfileID: "telegram-alias", ResourceID: "telegram-resource-1",
+		AccountID: "bot-a", ConversationType: "default", ConversationID: "chat-1", ChatID: "chat-1", ThreadID: "agent:main:other", SessionKey: "agent:main:other",
+	}); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("shared resource must reject a second backend binding for one chat, got %v", err)
 	}
 }

@@ -108,7 +108,10 @@ public sealed class SessionsViewModel : ObservableObject
     public ThreadDetail? SelectedDetail
     {
         get => _selectedDetail;
-        private set => SetProperty(ref _selectedDetail, value);
+        private set
+        {
+            if (!SetProperty(ref _selectedDetail, value)) return;
+        }
     }
 
     public Visibility EmptyVisibility => _viewState == "empty" ? Visibility.Visible : Visibility.Collapsed;
@@ -168,7 +171,14 @@ public sealed class SessionsViewModel : ObservableObject
             try
             {
                 Threads.Clear();
-                foreach (var thread in response.Threads) Threads.Add(thread);
+                foreach (var thread in BackendListProjection.CodexThreads(response.Threads))
+                {
+                    // The Codex endpoint is deliberately the only source for
+                    // this page.  OpenClaw sessions have their own view model
+                    // and page, never a synthetic ThreadSummary here.
+                    thread.Backend = "codex";
+                    Threads.Add(thread);
+                }
                 SelectedThread = string.IsNullOrWhiteSpace(selectedId)
                     ? null
                     : Threads.FirstOrDefault(thread => thread.ThreadId == selectedId);
@@ -204,6 +214,7 @@ public sealed class SessionsViewModel : ObservableObject
 
     public void ApplyEvent(BridgeEvent bridgeEvent)
     {
+        if (bridgeEvent.EventType.StartsWith("openclaw.", StringComparison.OrdinalIgnoreCase)) return;
         if (SelectedThread?.ThreadId != bridgeEvent.ThreadId) return;
 
         if (TryPayload<ThreadRuntime>(bridgeEvent.Payload, "runtime", out var runtime))
@@ -798,7 +809,7 @@ public sealed class SessionsViewModel : ObservableObject
         catch (Exception exception) { ActionError = $"复制失败：{exception.Message}"; }
     }
 
-	private void CopyThreadPrefix()
+    private void CopyThreadPrefix()
 	{
 		if (SelectedDetail is null || SelectedDetail.Number < 1) return;
 		try { Clipboard.SetText($"#{SelectedDetail.Number}"); }

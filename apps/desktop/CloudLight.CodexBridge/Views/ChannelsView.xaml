@@ -25,7 +25,7 @@
                 <Border Style="{StaticResource CardStyle}">
                     <StackPanel>
                         <TextBlock Text="远程查询命令" FontSize="18" FontWeight="SemiBold"/>
-                        <TextBlock Text="QQ 与 Telegram 均可直接查询；Bridge 在本地读取现有 Codex 数据，不会提交新任务，也不要求先关联会话。" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,5,0,10"/>
+                        <TextBlock Text="QQ 与 Telegram 均可直接查询 Codex 和 OpenClaw 会话；Bridge 统一接收消息并转发，不要求先关联会话。" Foreground="{DynamicResource MutedBrush}" TextWrapping="Wrap" Margin="0,5,0,10"/>
                         <TextBlock Text="/threads   /thread &lt;编号&gt;   /history &lt;编号&gt; [数量]   /running   /waiting   /recent   /failed   /quota" FontFamily="Consolas" TextWrapping="Wrap"/>
                     </StackPanel>
                 </Border>
@@ -94,7 +94,7 @@
                                 <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="4,10">
                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="2*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                         <TextBlock Text="{Binding ChatId}" TextWrapping="Wrap"/>
-                                        <TextBlock Grid.Column="1" Text="{Binding DisplayThreadTitle}" FontWeight="SemiBold"/>
+                                        <StackPanel Grid.Column="1"><TextBlock Text="{Binding BackendLabel}" Foreground="{DynamicResource AccentBrush}"/><TextBlock Text="{Binding DisplayThreadTitle}" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock Text="{Binding TargetId}" Foreground="{DynamicResource MutedBrush}" FontFamily="Consolas" TextWrapping="Wrap"/></StackPanel>
                                         <TextBlock Grid.Column="2" Text="{Binding CreatedAtDisplay}" TextWrapping="Wrap"/>
                                         <Button Grid.Column="3" Content="删除" Tag="{Binding Id}" Click="DeleteBinding_Click"/>
                                     </Grid>
@@ -212,7 +212,7 @@
                                 <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="1.5*"/><ColumnDefinition Width="2*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                     <StackPanel><TextBlock Text="{Binding ConversationTypeDisplay}"/><TextBlock Text="{Binding ChannelTypeDisplay}" Foreground="{DynamicResource MutedBrush}"/></StackPanel>
                                     <TextBlock Grid.Column="1" Text="{Binding SafeChatSummary}" TextWrapping="Wrap"/>
-                                    <TextBlock Grid.Column="2" Text="{Binding DisplayThreadTitle}" FontWeight="SemiBold"/>
+                                    <StackPanel Grid.Column="2"><TextBlock Text="{Binding BackendLabel}" Foreground="{DynamicResource AccentBrush}"/><TextBlock Text="{Binding DisplayThreadTitle}" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock Text="{Binding TargetId}" Foreground="{DynamicResource MutedBrush}" FontFamily="Consolas" TextWrapping="Wrap"/></StackPanel>
                                     <StackPanel Grid.Column="3"><TextBlock Text="{Binding CreatedAtDisplay}" TextWrapping="Wrap"/><TextBlock Text="{Binding LegacyLabel}" Foreground="{DynamicResource WarningBrush}"/></StackPanel>
                                     <Button Grid.Column="4" Content="删除" Tag="{Binding Id}" Click="DeleteQqBinding_Click"/>
                                 </Grid>

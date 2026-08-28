@@ -5,6 +5,153 @@ using CloudLight.CodexBridge.Services;
 using CloudLight.CodexBridge.Models;
 using Microsoft.Win32;
 
+if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreCase))
+{
+    var logs = new LogService();
+    var retrySettings = new UserSettings
+    {
+        CodexCustomPath = @"C:\Users\test\manual-codex.exe",
+        DetectedCodexPath = @"C:\Users\test\previous-detected-codex.exe"
+    };
+    var failed = new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None);
+    Assert(!CodexPathSettings.RememberAutomaticDiscovery(retrySettings, failed),
+        "失败的瞬时 discovery 不得修改路径设置");
+    Assert(retrySettings.CodexCustomPath == @"C:\Users\test\manual-codex.exe",
+        "失败的瞬时 discovery 不得清空用户手动路径");
+
+    var attemptCount = 0;
+    var applyCount = 0;
+    var refreshCount = 0;
+    var recoveredPath = @"C:\Program Files\OpenAI\codex.exe";
+    var runner = new CodexDiscoveryRetryRunner(logs,
+        [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
+    var recovered = await runner.RunAsync(
+        _ => Task.FromResult(++attemptCount < 3
+            ? failed
+            : new CodexDiscoveryResult(true, recoveredPath, "codex-cli test", CodexDiscoverySource.ChatGPTProcess)),
+        (discovery, _) =>
+        {
+            applyCount++;
+            Assert(discovery.Path == recoveredPath, "重试成功后必须应用本次发现的路径");
+            refreshCount++;
+            return Task.CompletedTask;
+        },
+        CancellationToken.None);
+    Assert(recovered && attemptCount == 3, "前两次失败、第三次成功时必须在当前进程恢复");
+    Assert(applyCount == 1 && refreshCount == 1, "恢复后必须且只能调用一次 ApplyCodexPath 和 UI 刷新");
+
+    var periodicAttempts = 0;
+    var periodicRunner = new CodexDiscoveryRetryRunner(logs, [TimeSpan.Zero, TimeSpan.Zero]);
+    Assert(await periodicRunner.RunAsync(
+            _ => Task.FromResult(++periodicAttempts < 5
+                ? failed
+                : new CodexDiscoveryResult(true, recoveredPath, "codex-cli test", CodexDiscoverySource.PATH)),
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None) && periodicAttempts == 5,
+        "退避级别用尽后必须按最大间隔继续检测，而不是停止 retry");
+
+    var automatic = new CodexDiscoveryResult(true, recoveredPath, "codex-cli test", CodexDiscoverySource.ChatGPTProcess);
+    Assert(CodexPathSettings.RememberAutomaticDiscovery(retrySettings, automatic), "自动发现路径必须单独保存");
+    Assert(retrySettings.CodexCustomPath == @"C:\Users\test\manual-codex.exe" && retrySettings.DetectedCodexPath == recoveredPath,
+        "自动发现结果不得覆盖用户手动路径");
+
+    var testRoot = Path.Combine(Path.GetTempPath(), $"CodexDiscovery-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(testRoot);
+    var executableEntry = Path.Combine(testRoot, "codex.cmd");
+    await File.WriteAllTextAsync(executableEntry, "@echo off\r\necho codex-cli test\r\n");
+    try
+    {
+        var packagedInternal = @"C:\Program Files\WindowsApps\OpenAI.Codex_test\app\resources\codex.exe";
+        var continued = await new CodexDiscoveryService(logs).DiscoverCandidatesAsync(
+            [packagedInternal, executableEntry], CodexDiscoverySource.PATH);
+        Assert(continued.Found && continued.Path == executableEntry,
+            "WindowsApps 包内部 exe 必须被拒绝，并继续验证普通可执行入口");
+    }
+    finally
+    {
+        Directory.Delete(testRoot, true);
+    }
+
+    var invalidManualSettings = new UserSettings { CodexCustomPath = @"C:\previous-valid-codex.exe" };
+    var invalidManualValidation = await new CodexDiscoveryService(logs)
+        .ValidateManualPathAsync(@"C:\missing-codex.exe");
+    Assert(!CodexPathSettings.TryPrepareManualSave(
+            invalidManualSettings, @"C:\missing-codex.exe", invalidManualValidation, out var invalidApplyPath) &&
+           invalidManualSettings.CodexCustomPath == @"C:\previous-valid-codex.exe" && invalidApplyPath == "",
+        "无效手动路径不得修改持久化值或产生 Apply 路径");
+
+    var manualDiscovery = new CodexDiscoveryResult(
+        true, executableEntry, "codex-cli test", CodexDiscoverySource.Manual);
+    Assert(!CodexPathSettings.RememberAutomaticDiscovery(retrySettings, manualDiscovery),
+        "手动验证结果不得写入自动发现路径");
+
+    var automaticSettings = new UserSettings { CodexCustomPath = @"C:\stale-manual-codex.exe", DetectedCodexPath = recoveredPath };
+    Assert(CodexPathSettings.TryPrepareManualSave(
+            automaticSettings, "", failed, out var automaticApplyPath) &&
+           automaticSettings.CodexCustomPath == "" && automaticSettings.DetectedCodexPath == recoveredPath && automaticApplyPath == "",
+        "自动模式保存必须清除旧手动路径，且不得覆盖自动路径或提交 Manual Apply");
+
+    var legacyAutomaticSettings = new UserSettings
+    {
+        CodexCustomPath = @"C:\Users\test\manual-codex.exe",
+        DetectedCodexPath = @"C:\Program Files\WindowsApps\OpenAI.Codex_test\app\resources\codex.exe"
+    };
+    CodexPathSettings.RemoveUnsafeAutomaticPath(legacyAutomaticSettings);
+    Assert(legacyAutomaticSettings.CodexCustomPath == @"C:\Users\test\manual-codex.exe" && legacyAutomaticSettings.DetectedCodexPath == "",
+        "清理旧的包内自动路径时不得修改手动路径");
+
+    using var cancellation = new CancellationTokenSource();
+    var cancellationRunner = new CodexDiscoveryRetryRunner(logs, [TimeSpan.FromMinutes(1)]);
+    var cancellationTask = cancellationRunner.RunAsync(_ => Task.FromResult(failed), (_, _) => Task.CompletedTask, cancellation.Token);
+    cancellation.Cancel();
+    var cancelled = false;
+    try { await cancellationTask; }
+    catch (OperationCanceledException) { cancelled = true; }
+    Assert(cancelled, "应用退出取消令牌必须立即终止 retry");
+
+    Console.WriteLine("PASS Codex discovery retry, WindowsApps filtering, manual/automatic save isolation, cancellation");
+    return;
+}
+
+if (args.Contains("--channel-profile-migration-tests", StringComparer.OrdinalIgnoreCase))
+{
+    var legacySettings = new UserSettings
+    {
+        TelegramAllowedUserIds = [42, 42], TelegramPollingTimeoutSeconds = 30,
+        TelegramSendProgressUpdates = true, TelegramAutoStart = true, TelegramProxyMode = "direct",
+        QqAppId = "10001", QqAutoStart = true, QqReconnectEnabled = true,
+        QqAllowedUserOpenIds = ["user-a", "user-a"], QqGroupTriggerMode = "official-at", QqCommandPrefix = "/codex"
+    };
+    var migrated = SettingsService.NormalizeForMigration(legacySettings);
+    var telegram = migrated.ChannelProfiles.SingleOrDefault(profile => profile.Id == "telegram-default");
+    var qq = migrated.ChannelProfiles.SingleOrDefault(profile => profile.Id == "qq-default");
+    Assert(telegram is not null && telegram.Platform == "telegram" && telegram.Telegram.AllowedUserIds.SequenceEqual([42]) && telegram.Telegram.AutoStart,
+        "旧 Telegram 设置必须迁移到 telegram-default Profile");
+    Assert(qq is not null && qq.Platform == "qqbot" && qq.Qq.AppId == "10001" && qq.Qq.AllowedUserOpenIds.SequenceEqual(["user-a"]) && qq.Qq.AutoStart,
+        "旧 QQ 设置必须迁移到 qq-default Profile");
+    Assert(migrated.ChannelRouting.Codex.TelegramProfileIds.SequenceEqual(["telegram-default"]) &&
+           migrated.ChannelRouting.OpenClaw.TelegramProfileIds.SequenceEqual(["telegram-default"]) &&
+           migrated.ChannelRouting.Codex.QqProfileIds.SequenceEqual(["qq-default"]) &&
+           migrated.ChannelRouting.OpenClaw.QqProfileIds.SequenceEqual(["qq-default"]),
+        "旧单渠道设置必须默认分配给 Codex 与 OpenClaw");
+	Assert(migrated.ChannelProfilesMigrated, "迁移标记必须被保存，避免用户主动删除全部 Profile 后被反复恢复");
+	var intentionallyEmpty = SettingsService.NormalizeForMigration(new UserSettings { ChannelProfilesMigrated = true, ChannelProfiles = [] });
+	Assert(intentionallyEmpty.ChannelProfiles.Count == 0, "已迁移配置允许用户主动移除全部 Channel Profile");
+    Assert(new TelegramSecretService("telegram-default").SecretFile.EndsWith("telegram-token.dat", StringComparison.OrdinalIgnoreCase) &&
+           new QqSecretService("qq-default").SecretFile.EndsWith("qqbot-app-secret.dat", StringComparison.OrdinalIgnoreCase) &&
+           !new TelegramSecretService("telegram-2").SecretFile.EndsWith("telegram-token.dat", StringComparison.OrdinalIgnoreCase),
+        "默认 Profile 必须复用旧 DPAPI 凭据路径，额外 Profile 必须使用独立安全存储");
+	var codexOnly = BackendListProjection.CodexThreads([
+		new ThreadSummary { Backend = "codex", ThreadId = "thread-1" },
+		new ThreadSummary { Backend = "openclaw", ThreadId = "agent:main:should-not-render" },
+		new ThreadSummary { Backend = "unexpected", ThreadId = "must-not-render" }
+	]).ToList();
+	Assert(codexOnly.Count == 1 && codexOnly[0].ThreadId == "thread-1",
+		"Codex 列表不得渲染 OpenClaw Session");
+    Console.WriteLine("PASS channel profile migration, default routing, DPAPI secret-path compatibility, Codex/OpenClaw list separation");
+    return;
+}
+
 if (args.Length == 2 && args[0].Equals("--validate-backup", StringComparison.OrdinalIgnoreCase))
 {
     var manifest = await new BackupService(new SettingsService()).ReadAndValidateAsync(args[1]);
@@ -24,8 +171,8 @@ if (args.Contains("--live-codex-discovery", StringComparer.OrdinalIgnoreCase))
         Environment.SetEnvironmentVariable("PATH", "");
         var liveDiscovery = await new CodexDiscoveryService(new LogService())
             .DiscoverAsync(@"Z:\missing-codex.exe");
-        Assert(liveDiscovery.Found && liveDiscovery.Source is CodexDiscoverySource.CodexProcess or CodexDiscoverySource.ChatGPTProcess,
-            "清空 PATH 后必须能从当前 Codex/ChatGPT 进程发现有效 Codex");
+        Assert(liveDiscovery.Found && !CodexDiscoveryService.IsPackagedAppInternalPath(liveDiscovery.Path),
+            "清空 PATH 后必须能根据普通入口或当前 Codex/ChatGPT 安装线索发现有效 Codex，且不得返回包内部路径");
         Console.WriteLine($"PASS live Codex discovery: {liveDiscovery.Source} {liveDiscovery.Path} {liveDiscovery.Version}");
         return;
     }
@@ -36,6 +183,9 @@ if (args.Contains("--live-codex-discovery", StringComparer.OrdinalIgnoreCase))
 }
 
 var root = Path.Combine(Path.GetTempPath(), $"CloudLight-CodexBridge-Smoke-{Guid.NewGuid():N}");
+const string openClawPasswordProbe = "OpenClaw-password-must-not-appear";
+Assert(!LogService.Redact($"Gateway error password={openClawPasswordProbe}").Contains(openClawPasswordProbe, StringComparison.Ordinal),
+    "日志脱敏不得输出 OpenClaw Password");
 var codex = Path.Combine(root, "codex-current");
 var bridgeLocal = Path.Combine(root, "bridge-local");
 var bridgeRoaming = Path.Combine(root, "bridge-roaming");

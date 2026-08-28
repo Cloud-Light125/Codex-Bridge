@@ -33,7 +33,9 @@ public sealed class ThreadListResponse
 
 public class ThreadSummary
 {
+	public string Backend { get; set; } = "codex";
     public string ThreadId { get; set; } = "";
+	public string SessionKey { get; set; } = "";
 	public int Number { get; set; }
     public string Title { get; set; } = "";
     public string Summary { get; set; } = "";
@@ -43,7 +45,7 @@ public class ThreadSummary
     public string UpdatedAt { get; set; } = "";
     public bool? Archived { get; set; }
     public string Status { get; set; } = "";
-	public string NumberPrefix => Number > 0 ? $"#{Number}" : "#?";
+	public string NumberPrefix => Number > 0 ? $"[Codex] #{Number}" : "[Codex] #?";
 	public string NumberedTitle => $"{NumberPrefix}  {Title}";
     public string CreatedAtDisplay => UiText.LocalDateTime(CreatedAt);
     public string UpdatedAtDisplay => UiText.LocalDateTime(UpdatedAt);
@@ -55,6 +57,101 @@ public sealed class ThreadDetail : ThreadSummary
 {
     public List<TurnDetail> Turns { get; set; } = [];
     public ThreadRuntime Runtime { get; set; } = new();
+}
+
+public sealed class OpenClawConnectionStatus
+{
+    public string Backend { get; set; } = "openclaw";
+    public bool Configured { get; set; }
+    public bool Running { get; set; }
+    public bool Connected { get; set; }
+    public string State { get; set; } = "not-configured";
+    public string GatewayUrl { get; set; } = "";
+    public int Protocol { get; set; }
+    public string ServerVersion { get; set; } = "";
+    public string AuthMode { get; set; } = "";
+    public int SessionCount { get; set; }
+    public bool AutoReconnect { get; set; }
+    public int ReconnectCount { get; set; }
+    public string LastConnectedAt { get; set; } = "";
+    public string LastDisconnectedAt { get; set; } = "";
+    public string LastTickAt { get; set; } = "";
+    public string LastError { get; set; } = "";
+}
+
+public sealed class OpenClawConfigureRequest
+{
+    public string GatewayUrl { get; set; } = "";
+    public string Token { get; set; } = "";
+    public string Password { get; set; } = "";
+    public bool AutoReconnect { get; set; } = true;
+    public bool? Start { get; set; } = true;
+}
+
+public sealed class OpenClawSessionListResponse
+{
+    public List<OpenClawSessionSummary> Sessions { get; set; } = [];
+}
+
+public static class BackendListProjection
+{
+    // Retain an explicit boundary even if an older daemon or test double ever
+    // returns a mixed value: a Codex view never renders an OpenClaw session.
+    public static IEnumerable<ThreadSummary> CodexThreads(IEnumerable<ThreadSummary>? threads) =>
+        (threads ?? []).Where(thread => string.IsNullOrWhiteSpace(thread.Backend) || string.Equals(thread.Backend, "codex", StringComparison.OrdinalIgnoreCase));
+
+    public static IEnumerable<OpenClawSessionSummary> OpenClawSessions(IEnumerable<OpenClawSessionSummary>? sessions) =>
+        sessions ?? [];
+}
+
+public class OpenClawSessionSummary
+{
+    public string Backend { get; set; } = "openclaw";
+    public string Key { get; set; } = "";
+    public string SessionId { get; set; } = "";
+    public string AgentId { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Summary { get; set; } = "";
+    public string Cwd { get; set; } = "";
+    public string Model { get; set; } = "";
+    public string CreatedAt { get; set; } = "";
+    public string UpdatedAt { get; set; } = "";
+    public string Status { get; set; } = "idle";
+    public bool? Archived { get; set; }
+    public bool HasActiveRun { get; set; }
+    public List<string> ActiveRunIds { get; set; } = [];
+
+}
+
+public sealed class OpenClawSessionDetail : OpenClawSessionSummary
+{
+    public List<OpenClawMessage> Messages { get; set; } = [];
+}
+
+public sealed class OpenClawMessage
+{
+    public string Id { get; set; } = "";
+    public string Role { get; set; } = "assistant";
+    public string Text { get; set; } = "";
+    public string Timestamp { get; set; } = "";
+    public string RunId { get; set; } = "";
+}
+
+public sealed class OpenClawSendResult
+{
+    public string Backend { get; set; } = "openclaw";
+    public string SessionKey { get; set; } = "";
+    public string RunId { get; set; } = "";
+    public string Status { get; set; } = "";
+    public string AcceptedAt { get; set; } = "";
+}
+
+public sealed class OpenClawAbortResult
+{
+    public string Backend { get; set; } = "openclaw";
+    public string SessionKey { get; set; } = "";
+    public string RunId { get; set; } = "";
+    public string Status { get; set; } = "";
 }
 
 public sealed class ThreadRuntime
@@ -340,6 +437,10 @@ public sealed class MirrorStatus
 public sealed class UserSettings
 {
     public string CodexCustomPath { get; set; } = "";
+    public string DetectedCodexPath { get; set; } = "";
+	public string OpenClawGatewayUrl { get; set; } = "ws://127.0.0.1:18789";
+	public bool OpenClawAutoDiscover { get; set; } = true;
+	public bool OpenClawAutoReconnect { get; set; } = true;
     public string Language { get; set; } = "zh-CN";
     public string SandboxMode { get; set; } = "workspace-write";
     public List<long> TelegramAllowedUserIds { get; set; } = [];
@@ -360,6 +461,13 @@ public sealed class UserSettings
 	public string QqCommandPrefix { get; set; } = "/codex";
 	public string QqProxyMode { get; set; } = "environment";
 	public string QqProxyUrl { get; set; } = "";
+	// Channel profiles intentionally hold only non-sensitive configuration.
+	// Bot tokens and QQ AppSecrets remain in profile-scoped DPAPI stores.
+	public List<ChannelProfileSettings> ChannelProfiles { get; set; } = [];
+	public BackendChannelRoutingSettings ChannelRouting { get; set; } = new();
+	// Prevent a user who deliberately removed every profile from being treated
+	// as an un-migrated pre-Profile configuration on the next launch.
+	public bool ChannelProfilesMigrated { get; set; }
 	public bool StartWithWindows { get; set; }
 	public bool SilentStartup { get; set; } = true;
 	public bool MirrorAutoStart { get; set; }
@@ -374,6 +482,127 @@ public sealed class UserSettings
 	public double WindowTop { get; set; } = double.NaN;
 	public bool WindowMaximized { get; set; }
 	public string LastPage { get; set; } = "overview";
+}
+
+public sealed class ChannelProfileSettings
+{
+	public string Id { get; set; } = "";
+	public string Name { get; set; } = "";
+	public string Platform { get; set; } = "telegram";
+	public bool Enabled { get; set; } = true;
+	public TelegramProfileSettings Telegram { get; set; } = new();
+	public QqProfileSettings Qq { get; set; } = new();
+}
+
+public sealed class TelegramProfileSettings
+{
+	public List<long> AllowedUserIds { get; set; } = [];
+	public int PollingTimeoutSeconds { get; set; } = 30;
+	public bool SendProgressUpdates { get; set; } = true;
+	public bool AutoStart { get; set; }
+	public string ProxyMode { get; set; } = "environment";
+	public string ProxyUrl { get; set; } = "";
+}
+
+public sealed class QqProfileSettings
+{
+	public string AppId { get; set; } = "";
+	public bool AutoStart { get; set; }
+	public bool ReconnectEnabled { get; set; } = true;
+	public bool SendProgressUpdates { get; set; } = true;
+	public List<string> AllowedUserOpenIds { get; set; } = [];
+	public List<string> AllowedGroupOpenIds { get; set; } = [];
+	public List<string> AllowedGroupMemberOpenIds { get; set; } = [];
+	public string GroupTriggerMode { get; set; } = "official-at";
+	public string CommandPrefix { get; set; } = "/codex";
+	public string ProxyMode { get; set; } = "environment";
+	public string ProxyUrl { get; set; } = "";
+}
+
+public sealed class BackendChannelRouteSettings
+{
+	public List<string> TelegramProfileIds { get; set; } = [];
+	public List<string> QqProfileIds { get; set; } = [];
+}
+
+public sealed class BackendChannelRoutingSettings
+{
+	public BackendChannelRouteSettings Codex { get; set; } = new();
+	public BackendChannelRouteSettings OpenClaw { get; set; } = new();
+}
+
+public sealed class ChannelProfilesResponse
+{
+	public List<ChannelProfileStatus> Profiles { get; set; } = [];
+	public BackendChannelRoutingSettings Routing { get; set; } = new();
+}
+
+// These are display-safe daemon responses.  They never contain a Telegram
+// token or QQ AppSecret.
+public sealed class ChannelProfileStatus
+{
+	public string Id { get; set; } = "";
+	public string Name { get; set; } = "";
+	public string Platform { get; set; } = "";
+	public bool Enabled { get; set; }
+	public string ResourceId { get; set; } = "";
+	public string SharedWithProfileId { get; set; } = "";
+	public List<string> AssignedBackends { get; set; } = [];
+	public bool Configured { get; set; }
+	public bool Running { get; set; }
+	public bool Connected { get; set; }
+	public string State { get; set; } = "";
+	public bool TokenSet { get; set; }
+	public bool SecretConfigured { get; set; }
+	public string AccountId { get; set; } = "";
+	public string BotUsername { get; set; } = "";
+	public string LastConnectedAt { get; set; } = "";
+	public string LastUpdateAt { get; set; } = "";
+	public int ReconnectCount { get; set; }
+	public string LastError { get; set; } = "";
+	public string ProxyMode { get; set; } = "";
+	public string MaskedProxyAddress { get; set; } = "";
+	public int BindingCount { get; set; }
+}
+
+public sealed class ChannelProfileConfigureRequest
+{
+	public string Name { get; set; } = "";
+	public string Platform { get; set; } = "";
+	public bool Enabled { get; set; } = true;
+	public TelegramProfileConfigureRequest? Telegram { get; set; }
+	public QqProfileConfigureRequest? Qq { get; set; }
+}
+
+public sealed class TelegramProfileConfigureRequest
+{
+	[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+	public string? Token { get; set; }
+	public List<long> AllowedUserIds { get; set; } = [];
+	public int PollingTimeoutSeconds { get; set; } = 30;
+	public bool SendProgressUpdates { get; set; } = true;
+	public bool AutoStart { get; set; }
+	public string ProxyMode { get; set; } = "environment";
+	public string ProxyUrl { get; set; } = "";
+}
+
+public sealed class QqProfileConfigureRequest
+{
+	[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+	public string? AppSecret { get; set; }
+	public bool Enabled { get; set; } = true;
+	public bool AutoStart { get; set; }
+	public string AppId { get; set; } = "";
+	public string Environment { get; set; } = "production";
+	public List<string> AllowedUserOpenIds { get; set; } = [];
+	public List<string> AllowedGroupOpenIds { get; set; } = [];
+	public List<string> AllowedGroupMemberOpenIds { get; set; } = [];
+	public string GroupTriggerMode { get; set; } = "official-at";
+	public string CommandPrefix { get; set; } = "/codex";
+	public bool SendProgressUpdates { get; set; } = true;
+	public bool GatewayReconnectEnabled { get; set; } = true;
+	public string ProxyMode { get; set; } = "environment";
+	public string ProxyUrl { get; set; } = "";
 }
 
 public sealed class ChannelListResponse
@@ -558,15 +787,37 @@ public sealed class BindingListResponse
     public List<ChannelBinding>? Bindings { get; set; } = [];
 }
 
+public sealed class CreateBindingRequest
+{
+	public string Backend { get; set; } = "codex";
+	public string TargetId { get; set; } = "";
+	public string ChannelType { get; set; } = "";
+	public string ChannelProfileId { get; set; } = "";
+	public string ConversationId { get; set; } = "";
+	public string AccountId { get; set; } = "";
+	public string ConversationType { get; set; } = "default";
+	public string ChatId { get; set; } = "";
+	public string TopicId { get; set; } = "";
+	public string ThreadId { get; set; } = "";
+	public string SessionKey { get; set; } = "";
+	public bool? Enabled { get; set; }
+}
+
 public sealed class ChannelBinding
 {
     public string Id { get; set; } = "";
+	public string Backend { get; set; } = "codex";
+	public string TargetId { get; set; } = "";
     public string ChannelType { get; set; } = "";
+	public string ChannelProfileId { get; set; } = "";
+	public string ResourceId { get; set; } = "";
     public string ConversationType { get; set; } = "";
+	public string ConversationId { get; set; } = "";
     public string AccountId { get; set; } = "";
     public string ChatId { get; set; } = "";
     public string TopicId { get; set; } = "";
     public string ThreadId { get; set; } = "";
+	public string SessionKey { get; set; } = "";
     public string ThreadTitle { get; set; } = "";
 	public bool Enabled { get; set; }
 	public bool Legacy { get; set; }
@@ -578,6 +829,9 @@ public sealed class ChannelBinding
         ? "已失效的旧版绑定"
         : string.Empty;
     public string ShortThreadId => Abbreviate(ThreadId);
+	public bool IsOpenClaw => string.Equals(Backend, "openclaw", StringComparison.OrdinalIgnoreCase);
+	public string BackendLabel => IsOpenClaw ? "[OpenClaw]" : "[Codex]";
+	public string BoundTargetId => !string.IsNullOrWhiteSpace(TargetId) ? TargetId : IsOpenClaw && !string.IsNullOrWhiteSpace(SessionKey) ? SessionKey : ThreadId;
     public string SafeChatSummary => SafeSummary(ChatId);
     public string DisplayThreadTitle => string.IsNullOrWhiteSpace(ThreadTitle) ? "未提供标题" : ThreadTitle;
     public string CreatedAtDisplay => UiText.LocalDateTime(CreatedAt);

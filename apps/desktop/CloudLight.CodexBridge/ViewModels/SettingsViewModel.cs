@@ -13,6 +13,9 @@ public sealed class SettingsViewModel : ObservableObject
     private readonly UserSettings _settings;
     private readonly LogService _logs;
     private readonly StartupService _startup;
+    private readonly CodexDiscoveryService _codexDiscoveryService;
+	private readonly OpenClawSecretService _openClawSecrets;
+	private readonly OpenClawDiscoveryService _openClawDiscoveryService;
 	private readonly SemaphoreSlim _mirrorOperationLock = new(1, 1);
     private string _codexCustomPath;
     private string _sandboxMode;
@@ -24,7 +27,16 @@ public sealed class SettingsViewModel : ObservableObject
     private string _backendStatus = "正在启动";
     private string _saveResult = "";
     private string _approvalPolicy = "on-request";
+	private string _openClawGatewayUrl;
+	private string _openClawToken = "";
+	private string _openClawPassword = "";
+	private string _openClawStatusText = "未配置";
+	private string _openClawDiscoverySource = "";
+	private bool _openClawCredentialsConfigured;
+	private bool _openClawAutoDiscover;
+	private bool _openClawAutoReconnect;
 	private bool _mirrorEnabled;
+	private ChannelProfilesViewModel? _channelProfiles;
 	private bool _telegramMirrorEnabled;
 	private string _telegramMirrorChatId = "";
 	private bool _qqMirrorEnabled;
@@ -38,13 +50,18 @@ public sealed class SettingsViewModel : ObservableObject
     private int _threadRefreshIntervalSeconds;
     private string _theme;
 
-    public SettingsViewModel(SettingsService service, BridgeApiClient api, UserSettings settings, LogService logs, StartupService startup)
+    public SettingsViewModel(SettingsService service, BridgeApiClient api, UserSettings settings, LogService logs,
+        StartupService startup, CodexDiscoveryService codexDiscoveryService,
+		OpenClawSecretService? openClawSecrets = null, OpenClawDiscoveryService? openClawDiscoveryService = null)
     {
         _service = service;
         _api = api;
         _settings = settings;
         _logs = logs;
         _startup = startup;
+        _codexDiscoveryService = codexDiscoveryService;
+		_openClawSecrets = openClawSecrets ?? new OpenClawSecretService();
+		_openClawDiscoveryService = openClawDiscoveryService ?? new OpenClawDiscoveryService(logs);
         _codexCustomPath = settings.CodexCustomPath;
         _sandboxMode = settings.SandboxMode is "read-only" ? "read-only" : "workspace-write";
         _startWithWindows = startup.IsEnabled;
@@ -55,14 +72,23 @@ public sealed class SettingsViewModel : ObservableObject
         _threadRefreshIntervalSeconds = settings.ThreadRefreshIntervalSeconds;
         _theme = settings.Theme;
         _mirrorAutoStart = settings.MirrorAutoStart;
+		_openClawGatewayUrl = settings.OpenClawGatewayUrl;
+		_openClawAutoDiscover = settings.OpenClawAutoDiscover;
+		_openClawAutoReconnect = settings.OpenClawAutoReconnect;
         SaveCommand = new AsyncRelayCommand(SaveAsync);
         OpenDataDirectoryCommand = new RelayCommand(_ => OpenDirectory(DataDirectory));
         OpenLogDirectoryCommand = new RelayCommand(_ => OpenDirectory(LogDirectory));
+		DiscoverOpenClawCommand = new AsyncRelayCommand(DiscoverOpenClawAsync);
+		TestOpenClawCommand = new AsyncRelayCommand(TestOpenClawAsync);
+		ClearOpenClawCredentialsCommand = new AsyncRelayCommand(ClearOpenClawCredentialsAsync);
     }
 
     public ICommand SaveCommand { get; }
     public ICommand OpenDataDirectoryCommand { get; }
     public ICommand OpenLogDirectoryCommand { get; }
+	public ICommand DiscoverOpenClawCommand { get; }
+	public ICommand TestOpenClawCommand { get; }
+	public ICommand ClearOpenClawCredentialsCommand { get; }
     public IReadOnlyList<string> SandboxModes { get; } = ["workspace-write", "read-only"];
     public string DataDirectory => _service.DataDirectory;
     public string LogDirectory => _service.LogDirectory;
@@ -75,9 +101,30 @@ public sealed class SettingsViewModel : ObservableObject
     public bool AutoRefreshThreads { get => _autoRefreshThreads; set => SetProperty(ref _autoRefreshThreads, value); }
     public int ThreadRefreshIntervalSeconds { get => _threadRefreshIntervalSeconds; set => SetProperty(ref _threadRefreshIntervalSeconds, value); }
     public string Theme { get => _theme; set { if (SetProperty(ref _theme, value)) App.ApplyTheme(value); } }
-    public bool MirrorAutoStart { get => _mirrorAutoStart; set => SetProperty(ref _mirrorAutoStart, value); }
+	public bool MirrorAutoStart { get => _mirrorAutoStart; set => SetProperty(ref _mirrorAutoStart, value); }
+	public ChannelProfilesViewModel? ChannelProfiles { get => _channelProfiles; set => SetProperty(ref _channelProfiles, value); }
     public bool TelegramAutoStart { get => _settings.TelegramAutoStart; set { _settings.TelegramAutoStart = value; OnPropertyChanged(); } }
     public bool QqAutoStart { get => _settings.QqAutoStart; set { _settings.QqAutoStart = value; OnPropertyChanged(); } }
+	public string OpenClawGatewayUrl { get => _openClawGatewayUrl; set => SetProperty(ref _openClawGatewayUrl, value); }
+	public bool OpenClawAutoDiscover { get => _openClawAutoDiscover; set => SetProperty(ref _openClawAutoDiscover, value); }
+	public bool OpenClawAutoReconnect { get => _openClawAutoReconnect; set => SetProperty(ref _openClawAutoReconnect, value); }
+	public string OpenClawStatusText { get => _openClawStatusText; private set => SetProperty(ref _openClawStatusText, value); }
+	public string OpenClawDiscoverySource { get => _openClawDiscoverySource; private set => SetProperty(ref _openClawDiscoverySource, value); }
+	public string OpenClawCredentialSummary => _openClawCredentialsConfigured || !string.IsNullOrWhiteSpace(_openClawToken) || !string.IsNullOrWhiteSpace(_openClawPassword) ? "已配置（Bridge 使用 DPAPI 保存）" : "未配置 Token/Password";
+
+	public void SetOpenClawToken(string value)
+	{
+		_openClawToken = value?.Trim() ?? "";
+		_openClawCredentialsConfigured = _openClawToken.Length > 0 || _openClawPassword.Length > 0;
+		OnPropertyChanged(nameof(OpenClawCredentialSummary));
+	}
+
+	public void SetOpenClawPassword(string value)
+	{
+		_openClawPassword = value?.Trim() ?? "";
+		_openClawCredentialsConfigured = _openClawToken.Length > 0 || _openClawPassword.Length > 0;
+		OnPropertyChanged(nameof(OpenClawCredentialSummary));
+	}
 
     public void ReloadUserPreferences(UserSettings settings)
     {
@@ -91,6 +138,9 @@ public sealed class SettingsViewModel : ObservableObject
         ThreadRefreshIntervalSeconds = settings.ThreadRefreshIntervalSeconds;
         Theme = settings.Theme;
         MirrorAutoStart = settings.MirrorAutoStart;
+		OpenClawGatewayUrl = settings.OpenClawGatewayUrl;
+		OpenClawAutoDiscover = settings.OpenClawAutoDiscover;
+		OpenClawAutoReconnect = settings.OpenClawAutoReconnect;
         OnPropertyChanged(nameof(TelegramAutoStart));
         OnPropertyChanged(nameof(QqAutoStart));
     }
@@ -122,8 +172,6 @@ public sealed class SettingsViewModel : ObservableObject
     {
         if (discovery.Found)
         {
-            _settings.CodexCustomPath = discovery.Path;
-            CodexCustomPath = discovery.Path;
             CodexCliPath = discovery.Path;
             CodexPathSource = discovery.RuntimeSource;
             CodexValidationStatus = "succeeded";
@@ -138,6 +186,135 @@ public sealed class SettingsViewModel : ObservableObject
         }
         RebuildCodexDetection();
     }
+
+    public void UpdateDiscoveryRetrying(bool retrying)
+    {
+        if (!retrying || !string.IsNullOrWhiteSpace(CodexCliPath)) return;
+        CodexValidationStatus = "pending";
+        CodexConnectionStatus = "reconnecting";
+        CodexDetection = "暂未找到 Codex，正在后台重新检测。";
+    }
+
+	public async Task InitializeOpenClawAsync(CancellationToken cancellationToken = default)
+	{
+		try
+		{
+			var credentials = await _openClawSecrets.LoadAsync(cancellationToken).ConfigureAwait(false);
+			_openClawToken = credentials.Token;
+			_openClawPassword = credentials.Password;
+			_openClawCredentialsConfigured = _openClawToken.Length > 0 || _openClawPassword.Length > 0;
+			await DiscoverOpenClawCoreAsync(onlyIfNeeded: true, cancellationToken).ConfigureAwait(false);
+			if (!_openClawCredentialsConfigured)
+			{
+				await RunOnUiAsync(() => { OpenClawStatusText = "未配置 Token/Password"; OnPropertyChanged(nameof(OpenClawCredentialSummary)); }).ConfigureAwait(false);
+				return;
+			}
+			var status = await _api.ConfigureOpenClawAsync(new OpenClawConfigureRequest
+			{
+				GatewayUrl = OpenClawGatewayUrl, Token = _openClawToken, Password = _openClawPassword,
+				AutoReconnect = OpenClawAutoReconnect, Start = true
+			}, cancellationToken).ConfigureAwait(false);
+			await RunOnUiAsync(() => ApplyOpenClawStatus(status)).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+		catch (Exception exception)
+		{
+			_logs.AddException("openclaw", "初始化 OpenClaw Gateway 失败。", exception);
+			await RunOnUiAsync(() => OpenClawStatusText = UiText.UserError(exception, "OpenClaw 连接")).ConfigureAwait(false);
+		}
+	}
+
+	public async Task RefreshOpenClawAsync(CancellationToken cancellationToken = default)
+	{
+		try
+		{
+			var status = await _api.GetOpenClawStatusAsync(cancellationToken).ConfigureAwait(false);
+			await RunOnUiAsync(() => ApplyOpenClawStatus(status)).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+		catch (Exception exception)
+		{
+			_logs.Add("openclaw", $"读取 OpenClaw 状态失败：{exception.Message}");
+		}
+	}
+
+	private async Task DiscoverOpenClawAsync()
+	{
+		try
+		{
+			await DiscoverOpenClawCoreAsync(onlyIfNeeded: false, CancellationToken.None).ConfigureAwait(false);
+			SaveResult = OpenClawDiscoverySource.Length == 0 ? "未发现 OpenClawTray Gateway。" : $"已发现 {OpenClawGatewayUrl}（{OpenClawDiscoverySource}）。";
+		}
+		catch (Exception exception)
+		{
+			SaveResult = UiText.UserError(exception, "自动发现 OpenClaw");
+			_logs.AddException("openclaw", "自动发现 OpenClaw Gateway 失败。", exception);
+		}
+	}
+
+	private async Task DiscoverOpenClawCoreAsync(bool onlyIfNeeded, CancellationToken cancellationToken)
+	{
+		if (onlyIfNeeded && !OpenClawAutoDiscover && !string.IsNullOrWhiteSpace(OpenClawGatewayUrl)) return;
+		var discovery = await _openClawDiscoveryService.DiscoverAsync(cancellationToken).ConfigureAwait(false);
+		if (!discovery.Found) return;
+		await RunOnUiAsync(() =>
+		{
+			if (!onlyIfNeeded || string.IsNullOrWhiteSpace(OpenClawGatewayUrl) || OpenClawGatewayUrl == "ws://127.0.0.1:18789")
+				OpenClawGatewayUrl = discovery.GatewayUrl;
+			if (string.IsNullOrWhiteSpace(_openClawToken) && string.IsNullOrWhiteSpace(_openClawPassword))
+			{
+				_openClawToken = discovery.Token;
+				_openClawCredentialsConfigured = true;
+			}
+			OpenClawDiscoverySource = string.IsNullOrWhiteSpace(discovery.FriendlyName) ? discovery.Source : $"{discovery.Source} · {discovery.FriendlyName}";
+			OnPropertyChanged(nameof(OpenClawCredentialSummary));
+		}).ConfigureAwait(false);
+	}
+
+	private async Task TestOpenClawAsync()
+	{
+		try
+		{
+			await DiscoverOpenClawCoreAsync(onlyIfNeeded: true, CancellationToken.None).ConfigureAwait(false);
+			var status = await _api.TestOpenClawAsync(new OpenClawConfigureRequest
+			{
+				GatewayUrl = OpenClawGatewayUrl, Token = _openClawToken, Password = _openClawPassword,
+				AutoReconnect = false, Start = true
+			}).ConfigureAwait(false);
+			ApplyOpenClawStatus(status);
+			SaveResult = status.Connected ? "OpenClaw Gateway 测试连接成功。" : "OpenClaw Gateway 测试未连接，请查看状态和日志。";
+		}
+		catch (Exception exception)
+		{
+			OpenClawStatusText = UiText.UserError(exception, "测试 OpenClaw 连接");
+			SaveResult = OpenClawStatusText;
+			_logs.AddException("openclaw", "测试 OpenClaw Gateway 失败。", exception);
+		}
+	}
+
+	private async Task ClearOpenClawCredentialsAsync()
+	{
+		try
+		{
+			await _openClawSecrets.DeleteAsync();
+			_openClawToken = "";
+			_openClawPassword = "";
+			_openClawCredentialsConfigured = false;
+			OnPropertyChanged(nameof(OpenClawCredentialSummary));
+			SaveResult = "已清除 Bridge 保存的 OpenClaw 凭据。";
+		}
+		catch (Exception exception) { SaveResult = UiText.UserError(exception, "清除 OpenClaw 凭据"); }
+	}
+
+	private void ApplyOpenClawStatus(OpenClawConnectionStatus status)
+	{
+		if (!string.IsNullOrWhiteSpace(status.GatewayUrl)) OpenClawGatewayUrl = status.GatewayUrl;
+		var connection = status.Connected ? "已连接" : status.Running ? "正在连接/重连" : status.Configured ? "已停止" : "未配置";
+		OpenClawStatusText = $"{connection} · {OpenClawGatewayUrl}" +
+			(string.IsNullOrWhiteSpace(status.ServerVersion) ? "" : $" · Gateway {status.ServerVersion}") +
+			(string.IsNullOrWhiteSpace(status.LastError) ? "" : $"\n{UiText.UserError(status.LastError, "OpenClaw")}");
+		OnPropertyChanged(nameof(OpenClawCredentialSummary));
+	}
 
     public string BackendStatus
     {
@@ -288,7 +465,19 @@ public sealed class SettingsViewModel : ObservableObject
 
     private async Task SaveAsync()
     {
-        _settings.CodexCustomPath = CodexCustomPath.Trim();
+        var requestedManualPath = CodexCustomPath.Trim();
+        var manualValidation = string.IsNullOrWhiteSpace(requestedManualPath)
+            ? new CodexDiscoveryResult(false, "", "", CodexDiscoverySource.None)
+            : await _codexDiscoveryService.ValidateManualPathAsync(requestedManualPath);
+        if (!CodexPathSettings.TryPrepareManualSave(
+                _settings, requestedManualPath, manualValidation, out var manualPathToApply))
+        {
+            SaveResult = "自定义 Codex 路径不存在、不可执行或不是可直接启动的 CLI；设置未保存。请留空使用自动检测。";
+            _logs.Add("codex-config", $"[codex-config] manual path rejected before save path={LogService.Redact(requestedManualPath)}");
+            return;
+        }
+
+        CodexCustomPath = _settings.CodexCustomPath;
         _settings.SandboxMode = SandboxMode is "read-only" ? "read-only" : "workspace-write";
         _settings.StartWithWindows = StartWithWindows;
         _settings.SilentStartup = SilentStartup;
@@ -298,23 +487,42 @@ public sealed class SettingsViewModel : ObservableObject
         _settings.ThreadRefreshIntervalSeconds = ThreadRefreshIntervalSeconds;
         _settings.Theme = Theme;
         _settings.MirrorAutoStart = MirrorAutoStart;
+		_settings.OpenClawGatewayUrl = OpenClawGatewayUrl.Trim();
+		_settings.OpenClawAutoDiscover = OpenClawAutoDiscover;
+		_settings.OpenClawAutoReconnect = OpenClawAutoReconnect;
         try { _startup.Configure(StartWithWindows, SilentStartup); }
         catch (Exception exception) { SaveResult = $"启动项更新失败：{exception.Message}"; return; }
         await _service.SaveAsync(_settings);
+		if (!string.IsNullOrWhiteSpace(_openClawToken) || !string.IsNullOrWhiteSpace(_openClawPassword))
+		{
+			await _openClawSecrets.SaveAsync(_openClawToken, _openClawPassword);
+			_openClawCredentialsConfigured = true;
+		}
         _logs.Add("codex-config", $"[codex-config] persisted path={_settings.CodexCustomPath}");
         try
         {
-            if (!string.IsNullOrWhiteSpace(_settings.CodexCustomPath))
+            if (!string.IsNullOrWhiteSpace(manualPathToApply))
             {
-                var codexStatus = await _api.ApplyCodexPathAsync(_settings.CodexCustomPath, "Manual");
+                var codexStatus = await _api.ApplyCodexPathAsync(manualPathToApply, "Manual");
                 UpdateRuntimeStatus(codexStatus, BackendStatus);
                 _logs.Add("codex-config", $"[codex-config] runtime path updated path={codexStatus.CodexCliPath} target=daemon");
             }
 			var mirror = await _api.ConfigureMirrorAsync(new MirrorConfig { Enabled=MirrorEnabled,RequireThreadNumber=RequireThreadNumber,Telegram=new TelegramMirrorConfig{Enabled=TelegramMirrorEnabled,ChatId=TelegramMirrorChatId.Trim()},Qq=new QqMirrorConfig{Enabled=QqMirrorEnabled,ConversationType=QqMirrorConversationType,OpenId=QqMirrorOpenId.Trim()},Messages=new MirrorMessageTypes{User=false,Assistant=MirrorAssistant,Status=false,RequestUserInput=MirrorInput,Error=MirrorError} });
 			ApplyMirrorStatus(mirror);
-            var status = await _api.UpdateSecurityAsync(_settings.SandboxMode);
-            ApprovalPolicy = status.ApprovalPolicy;
-            SaveResult = "设置已保存，Codex 程序路径已立即应用到当前运行时。";
+			var status = await _api.UpdateSecurityAsync(_settings.SandboxMode);
+			ApprovalPolicy = status.ApprovalPolicy;
+			if (_openClawCredentialsConfigured)
+			{
+				var openClawStatus = await _api.ConfigureOpenClawAsync(new OpenClawConfigureRequest
+				{
+					GatewayUrl = _settings.OpenClawGatewayUrl, Token = _openClawToken, Password = _openClawPassword,
+					AutoReconnect = _settings.OpenClawAutoReconnect, Start = true
+				});
+				ApplyOpenClawStatus(openClawStatus);
+			}
+            SaveResult = string.IsNullOrWhiteSpace(manualPathToApply)
+                ? "设置已保存；Codex 路径保持自动检测，不会提交旧的手动路径。"
+                : "设置已保存，Codex 程序路径已立即应用到当前运行时。";
         }
         catch (Exception exception)
         {

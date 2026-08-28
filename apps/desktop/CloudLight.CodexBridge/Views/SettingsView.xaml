@@ -8,7 +8,7 @@
                     <StackPanel><TextBlock Text="常规" Style="{StaticResource SectionTitleStyle}"/><CheckBox Content="关闭窗口时最小化到系统托盘" IsChecked="{Binding CloseToTray}" Margin="0,15,0,0"/><CheckBox Content="恢复上次打开的页面" IsChecked="{Binding RestoreLastPage}" Margin="0,10,0,0"/><CheckBox Content="自动刷新会话" IsChecked="{Binding AutoRefreshThreads}" Margin="0,10,0,0"/><TextBlock Text="会话刷新间隔（秒）" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/><ComboBox ItemsSource="{Binding ThreadRefreshIntervals}" SelectedItem="{Binding ThreadRefreshIntervalSeconds}" Width="150" HorizontalAlignment="Left"/></StackPanel>
                 </Border>
                 <Border Grid.Column="2" Style="{StaticResource CardStyle}">
-                    <StackPanel><TextBlock Text="启动" Style="{StaticResource SectionTitleStyle}"/><CheckBox Content="登录 Windows 后自动启动软件" IsChecked="{Binding StartWithWindows}" Margin="0,15,0,0"/><CheckBox Content="静默启动" IsChecked="{Binding SilentStartup}" Margin="0,10,0,0"/><CheckBox Content="启动软件时自动连接 QQ" IsChecked="{Binding QqAutoStart}" Margin="0,10,0,0"/><CheckBox Content="启动软件时自动连接 Telegram" IsChecked="{Binding TelegramAutoStart}" Margin="0,10,0,0"/><CheckBox Content="启动软件时自动开启消息同步" IsChecked="{Binding MirrorAutoStart}" Margin="0,10,0,0"/><TextBlock Text="自动启动无需管理员权限。" Style="{StaticResource SecondaryTextStyle}" Margin="0,14,0,0"/></StackPanel>
+                    <StackPanel><TextBlock Text="启动" Style="{StaticResource SectionTitleStyle}"/><CheckBox Content="登录 Windows 后自动启动软件" IsChecked="{Binding StartWithWindows}" Margin="0,15,0,0"/><CheckBox Content="静默启动" IsChecked="{Binding SilentStartup}" Margin="0,10,0,0"/><CheckBox Content="启动软件时自动开启消息同步" IsChecked="{Binding MirrorAutoStart}" Margin="0,10,0,0"/><TextBlock Text="QQ / Telegram 是否自动连接由各自的 Channel Profile 决定。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,14,0,0"/></StackPanel>
                 </Border>
             </Grid>
             <Grid Margin="0,0,0,16"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -21,6 +21,39 @@
             </Grid>
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
                 <StackPanel><TextBlock Text="Codex" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="当前运行状态" Style="{StaticResource FieldLabelStyle}" Margin="0,15,0,4"/><TextBox Text="{Binding CodexDetection, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" TextWrapping="Wrap"/><TextBlock Text="自定义 Codex 程序路径" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/><TextBox Text="{Binding CodexCustomPath, UpdateSourceTrigger=PropertyChanged}"/><TextBlock Text="留空时自动查找；保存有效路径后会立即应用并重新连接 Codex。" Style="{StaticResource SecondaryTextStyle}" Margin="0,7,0,0"/></StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="消息渠道" Style="{StaticResource SectionTitleStyle}"/>
+                    <TextBlock Text="Channel Profile 只保存名称、路由和连接选项；Telegram Token 与 QQ AppSecret 始终保存在本机 DPAPI 安全存储，不会写入 settings.json 或日志。请在侧边栏 QQ / Telegram 页面编辑并保存 Profile。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,0,10"/>
+                    <ItemsControl ItemsSource="{Binding ChannelProfiles.Profiles}">
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="2,10">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="1.1*"/><ColumnDefinition Width="1.3*"/><ColumnDefinition Width="1.1*"/><ColumnDefinition Width="1.2*"/></Grid.ColumnDefinitions>
+                                    <StackPanel><TextBlock Text="{Binding Name}" FontWeight="SemiBold"/><TextBlock Text="{Binding PlatformLabel}" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
+                                    <StackPanel Grid.Column="1"><TextBlock Text="账户 / 凭据" Style="{StaticResource FieldLabelStyle}"/><TextBlock Text="{Binding AccountText}" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding CredentialSummary}" Style="{StaticResource SecondaryTextStyle}" TextTrimming="CharacterEllipsis"/></StackPanel>
+                                    <StackPanel Grid.Column="2"><TextBlock Text="连接" Style="{StaticResource FieldLabelStyle}"/><TextBlock Text="{Binding ConnectionText}"/><TextBlock Text="{Binding StatusText}" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
+                                    <StackPanel Grid.Column="3"><TextBlock Text="分配" Style="{StaticResource FieldLabelStyle}"/><TextBlock Text="Codex" Visibility="{Binding CodexAssigned, Converter={StaticResource BooleanToVisibilityConverter}}"/><TextBlock Text="OpenClaw" Visibility="{Binding OpenClawAssigned, Converter={StaticResource BooleanToVisibilityConverter}}"/></StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel><TextBlock Text="OpenClaw" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="通过 OpenClaw Gateway 连接已有 Session；QQ 和 Telegram 仍只由 CloudLight Codex Bridge 接收消息。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,5,0,0"/></StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal"><Button Content="自动发现" Command="{Binding DiscoverOpenClawCommand}"/><Button Content="测试连接" Command="{Binding TestOpenClawCommand}" Margin="8,0,0,0"/></StackPanel>
+                    </Grid>
+                    <TextBlock Text="Gateway 地址" Style="{StaticResource FieldLabelStyle}" Margin="0,15,0,5"/><TextBox Text="{Binding OpenClawGatewayUrl, UpdateSourceTrigger=PropertyChanged}" ToolTip="例如 ws://127.0.0.1:18789"/>
+                    <TextBlock Text="连接状态" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,4"/><TextBox Text="{Binding OpenClawStatusText, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" TextWrapping="Wrap"/>
+                    <TextBlock Text="Token（与 Password 二选一；不会写入 settings.json）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/><PasswordBox x:Name="OpenClawTokenBox" PasswordChanged="OpenClawTokenBox_PasswordChanged" Padding="10,7"/>
+                    <TextBlock Text="Password（可选）" Style="{StaticResource FieldLabelStyle}" Margin="0,10,0,5"/><PasswordBox x:Name="OpenClawPasswordBox" PasswordChanged="OpenClawPasswordBox_PasswordChanged" Padding="10,7"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0"><TextBlock Text="{Binding OpenClawCredentialSummary}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/><Button Content="清除已保存凭据" Command="{Binding ClearOpenClawCredentialsCommand}" Margin="14,0,0,0"/></StackPanel>
+                    <CheckBox Content="自动发现本机 OpenClawTray Gateway" IsChecked="{Binding OpenClawAutoDiscover}" Margin="0,12,0,5"/><CheckBox Content="Gateway 断线后自动重连" IsChecked="{Binding OpenClawAutoReconnect}"/>
+                    <TextBlock Text="发现来源：" Foreground="{DynamicResource MutedBrush}" Margin="0,9,0,0"><Run Text="{Binding OpenClawDiscoverySource}"/></TextBlock>
+                </StackPanel>
             </Border>
             <Expander Header="高级" IsExpanded="False" Margin="0,0,0,16">
                 <Border Style="{StaticResource CardStyle}" Margin="0,10,0,0"><StackPanel><TextBlock Text="新任务的文件访问范围" Style="{StaticResource FieldLabelStyle}"/><ComboBox SelectedValue="{Binding SandboxMode}" SelectedValuePath="Tag" Width="220" HorizontalAlignment="Left"><ComboBoxItem Content="可修改当前工作区" Tag="workspace-write"/><ComboBoxItem Content="仅查看文件" Tag="read-only"/></ComboBox><TextBlock Text="操作确认方式" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,4"/><TextBox Text="{Binding ApprovalPolicyDisplay, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}"/><TextBlock Text="这些设置只影响之后开始的新任务，不会改变正在运行的任务。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,10,0,0"/></StackPanel></Border>

@@ -6,12 +6,22 @@ CloudLight Codex Bridge 1.0.1 由 WPF、仅监听回环地址的 Go daemon、Cod
 flowchart LR
   WPF["WPF desktop"] -->|"loopback HTTP + SSE"| Daemon["bridge-daemon"]
   Daemon --> Runtime["Codex Runtime / App Server"]
+  Daemon --> OpenClaw["OpenClaw Gateway / WebSocket"]
   Daemon --> Telegram["Telegram Long Polling"]
   Daemon --> QQ["QQ Official API + Gateway"]
   Telegram --> Bindings["Binding Repository"]
   QQ --> Bindings
   Bindings --> Runtime
+  Bindings --> OpenClaw
 ```
+
+## OpenClaw Backend MVP
+
+OpenClaw 是可选的第二个会话后端。`internal/conversation` 定义后端无关的会话、发送、停止、事件订阅和连接状态接口；现有 Codex runtime 通过薄适配器暴露该接口，OpenClaw 则由 `internal/openclaw` 独立维护 WebSocket 生命周期。Codex 的 App Server、持久化验证和审批流程不经过 OpenClaw 分支。
+
+OpenClaw 连接行为根据本机 OpenClaw Gateway 当前运行时和 OpenClawTray 实际配置核对得到：Gateway 使用 loopback `ws://`，先发送 `connect.challenge`，Bridge 再以 protocol 4 发送 `connect` request，认证使用配置中的 shared token（也兼容 password 字段），请求 operator read/write/admin scopes。连接成功后 Bridge 订阅 `sessions.subscribe`，读取 `sessions.list`，用 `chat.history` 展示历史；新消息使用 `chat.send`，停止使用 `chat.abort`，最终回答和增量来自 `chat` event 的 `delta` / `final` / `aborted` / `error` 状态。
+
+Bridge 记录 Gateway `tick` 作为健康信号，用 watchdog 关闭无 tick 的连接，断线按 1 秒起步、指数退避至 30 秒重连，并在重连后重新订阅和刷新 Session。事件按 Gateway sequence/run/session 去重。应用退出会取消本地连接、挂起请求和 watchdog，不会让 OpenClawTray 参与 QQ 或 Telegram 的 Bot 消费。
 
 ## QQ Official Bot 边界
 
