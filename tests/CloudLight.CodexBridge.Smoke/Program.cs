@@ -113,6 +113,45 @@ if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreC
     return;
 }
 
+if (args.Contains("--channel-profile-migration-tests", StringComparer.OrdinalIgnoreCase))
+{
+    var legacySettings = new UserSettings
+    {
+        TelegramAllowedUserIds = [42, 42], TelegramPollingTimeoutSeconds = 30,
+        TelegramSendProgressUpdates = true, TelegramAutoStart = true, TelegramProxyMode = "direct",
+        QqAppId = "10001", QqAutoStart = true, QqReconnectEnabled = true,
+        QqAllowedUserOpenIds = ["user-a", "user-a"], QqGroupTriggerMode = "official-at", QqCommandPrefix = "/codex"
+    };
+    var migrated = SettingsService.NormalizeForMigration(legacySettings);
+    var telegram = migrated.ChannelProfiles.SingleOrDefault(profile => profile.Id == "telegram-default");
+    var qq = migrated.ChannelProfiles.SingleOrDefault(profile => profile.Id == "qq-default");
+    Assert(telegram is not null && telegram.Platform == "telegram" && telegram.Telegram.AllowedUserIds.SequenceEqual([42]) && telegram.Telegram.AutoStart,
+        "旧 Telegram 设置必须迁移到 telegram-default Profile");
+    Assert(qq is not null && qq.Platform == "qqbot" && qq.Qq.AppId == "10001" && qq.Qq.AllowedUserOpenIds.SequenceEqual(["user-a"]) && qq.Qq.AutoStart,
+        "旧 QQ 设置必须迁移到 qq-default Profile");
+    Assert(migrated.ChannelRouting.Codex.TelegramProfileIds.SequenceEqual(["telegram-default"]) &&
+           migrated.ChannelRouting.OpenClaw.TelegramProfileIds.SequenceEqual(["telegram-default"]) &&
+           migrated.ChannelRouting.Codex.QqProfileIds.SequenceEqual(["qq-default"]) &&
+           migrated.ChannelRouting.OpenClaw.QqProfileIds.SequenceEqual(["qq-default"]),
+        "旧单渠道设置必须默认分配给 Codex 与 OpenClaw");
+	Assert(migrated.ChannelProfilesMigrated, "迁移标记必须被保存，避免用户主动删除全部 Profile 后被反复恢复");
+	var intentionallyEmpty = SettingsService.NormalizeForMigration(new UserSettings { ChannelProfilesMigrated = true, ChannelProfiles = [] });
+	Assert(intentionallyEmpty.ChannelProfiles.Count == 0, "已迁移配置允许用户主动移除全部 Channel Profile");
+    Assert(new TelegramSecretService("telegram-default").SecretFile.EndsWith("telegram-token.dat", StringComparison.OrdinalIgnoreCase) &&
+           new QqSecretService("qq-default").SecretFile.EndsWith("qqbot-app-secret.dat", StringComparison.OrdinalIgnoreCase) &&
+           !new TelegramSecretService("telegram-2").SecretFile.EndsWith("telegram-token.dat", StringComparison.OrdinalIgnoreCase),
+        "默认 Profile 必须复用旧 DPAPI 凭据路径，额外 Profile 必须使用独立安全存储");
+	var codexOnly = BackendListProjection.CodexThreads([
+		new ThreadSummary { Backend = "codex", ThreadId = "thread-1" },
+		new ThreadSummary { Backend = "openclaw", ThreadId = "agent:main:should-not-render" },
+		new ThreadSummary { Backend = "unexpected", ThreadId = "must-not-render" }
+	]).ToList();
+	Assert(codexOnly.Count == 1 && codexOnly[0].ThreadId == "thread-1",
+		"Codex 列表不得渲染 OpenClaw Session");
+    Console.WriteLine("PASS channel profile migration, default routing, DPAPI secret-path compatibility, Codex/OpenClaw list separation");
+    return;
+}
+
 if (args.Length == 2 && args[0].Equals("--validate-backup", StringComparison.OrdinalIgnoreCase))
 {
     var manifest = await new BackupService(new SettingsService()).ReadAndValidateAsync(args[1]);

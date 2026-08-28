@@ -8,7 +8,12 @@ import (
 // ChannelAddress is a platform-neutral destination. TopicID is empty for
 // channels which do not support topics/forums.
 type ChannelAddress struct {
-	ChannelType      string `json:"channelType"`
+	ChannelType string `json:"channelType"`
+	// ChannelProfileID identifies the Bridge profile which owns this
+	// transport.  AccountID is still the provider's bot/App ID; it cannot be
+	// used as a profile key because several logical backends may share one
+	// Telegram token or QQ application.
+	ChannelProfileID string `json:"channelProfileId,omitempty"`
 	AccountID        string `json:"accountId"`
 	ConversationType string `json:"conversationType"`
 	ChatID           string `json:"chatId"`

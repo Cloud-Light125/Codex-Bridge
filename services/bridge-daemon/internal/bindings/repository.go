@@ -20,11 +20,21 @@ var (
 )
 
 type Binding struct {
-	ID               string `json:"id"`
-	Backend          string `json:"backend,omitempty"`
+	ID string `json:"id"`
+	// Backend and TargetID are deliberately explicit.  A target value alone
+	// must never be used to infer whether it is a Codex Thread or an OpenClaw
+	// Session.
+	Backend          string `json:"backend"`
+	TargetID         string `json:"targetId"`
 	ChannelType      string `json:"channelType"`
+	ChannelProfileID string `json:"channelProfileId,omitempty"`
+	// ResourceID is the canonical physical channel resource.  It is not a
+	// credential and lets several logical profiles share exactly one poller or
+	// gateway without making an inbound message ambiguous.
+	ResourceID       string `json:"resourceId,omitempty"`
 	AccountID        string `json:"accountId"`
 	ConversationType string `json:"conversationType"`
+	ConversationID   string `json:"conversationId,omitempty"`
 	ChatID           string `json:"chatId"`
 	TopicID          string `json:"topicId,omitempty"`
 	ThreadID         string `json:"threadId"`
@@ -37,9 +47,13 @@ type Binding struct {
 
 type CreateRequest struct {
 	Backend          string `json:"backend"`
+	TargetID         string `json:"targetId"`
 	ChannelType      string `json:"channelType"`
+	ChannelProfileID string `json:"channelProfileId"`
+	ResourceID       string `json:"resourceId,omitempty"`
 	AccountID        string `json:"accountId"`
 	ConversationType string `json:"conversationType"`
+	ConversationID   string `json:"conversationId"`
 	ChatID           string `json:"chatId"`
 	TopicID          string `json:"topicId"`
 	ThreadID         string `json:"threadId"`
@@ -84,7 +98,7 @@ func (r *Repository) Create(request CreateRequest) (Binding, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	address := addressKey(request.ChannelType, request.AccountID, request.ConversationType, request.ChatID, request.TopicID)
+	address := addressKey(request.ChannelType, requestAddressOwner(request), request.ConversationType, request.ChatID, request.TopicID)
 	for _, existing := range r.items {
 		if bindingAddressKey(existing) == address {
 			return Binding{}, ErrDuplicate
@@ -96,7 +110,9 @@ func (r *Repository) Create(request CreateRequest) (Binding, error) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	binding := Binding{
-		ID: newID(), Backend: request.Backend, ChannelType: request.ChannelType, AccountID: request.AccountID, ConversationType: request.ConversationType,
+		ID: newID(), Backend: request.Backend, TargetID: request.TargetID, ChannelType: request.ChannelType,
+		ChannelProfileID: request.ChannelProfileID, ResourceID: request.ResourceID, AccountID: request.AccountID,
+		ConversationType: request.ConversationType, ConversationID: request.ConversationID,
 		ChatID: request.ChatID, TopicID: request.TopicID, ThreadID: request.ThreadID, SessionKey: request.SessionKey,
 		Enabled: enabled, CreatedAt: now, UpdatedAt: now,
 	}
@@ -120,7 +136,7 @@ func (r *Repository) FindAddress(channelType, accountID string, address ...strin
 	defer r.mu.RUnlock()
 	key := addressKey(channelType, strings.TrimSpace(accountID), conversationType, chatID, topicID)
 	for _, binding := range r.items {
-		if bindingAddressKey(binding) == key {
+		if bindingAddressKey(binding) == key || legacyAccountAddressKey(binding) == key {
 			return binding, true
 		}
 	}
@@ -135,7 +151,7 @@ func (r *Repository) UpsertAddress(request CreateRequest) (Binding, *Binding, er
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := addressKey(request.ChannelType, request.AccountID, request.ConversationType, request.ChatID, request.TopicID)
+	key := addressKey(request.ChannelType, requestAddressOwner(request), request.ConversationType, request.ChatID, request.TopicID)
 	var previous *Binding
 	for id, existing := range r.items {
 		if bindingAddressKey(existing) != key {
@@ -145,6 +161,10 @@ func (r *Repository) UpsertAddress(request CreateRequest) (Binding, *Binding, er
 		previous = &copy
 		existing.ThreadID = request.ThreadID
 		existing.Backend = request.Backend
+		existing.TargetID = request.TargetID
+		existing.ChannelProfileID = request.ChannelProfileID
+		existing.ResourceID = request.ResourceID
+		existing.ConversationID = request.ConversationID
 		existing.SessionKey = request.SessionKey
 		existing.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if request.Enabled != nil {
@@ -162,7 +182,7 @@ func (r *Repository) UpsertAddress(request CreateRequest) (Binding, *Binding, er
 		enabled = *request.Enabled
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	binding := Binding{ID: newID(), Backend: request.Backend, ChannelType: request.ChannelType, AccountID: request.AccountID, ConversationType: request.ConversationType, ChatID: request.ChatID, TopicID: request.TopicID, ThreadID: request.ThreadID, SessionKey: request.SessionKey, Enabled: enabled, CreatedAt: now, UpdatedAt: now}
+	binding := Binding{ID: newID(), Backend: request.Backend, TargetID: request.TargetID, ChannelType: request.ChannelType, ChannelProfileID: request.ChannelProfileID, ResourceID: request.ResourceID, AccountID: request.AccountID, ConversationType: request.ConversationType, ConversationID: request.ConversationID, ChatID: request.ChatID, TopicID: request.TopicID, ThreadID: request.ThreadID, SessionKey: request.SessionKey, Enabled: enabled, CreatedAt: now, UpdatedAt: now}
 	r.items[binding.ID] = binding
 	if err := r.saveLocked(); err != nil {
 		delete(r.items, binding.ID)
@@ -200,7 +220,7 @@ func (r *Repository) DeleteAddress(channelType, accountID string, address ...str
 	defer r.mu.Unlock()
 	key := addressKey(channelType, strings.TrimSpace(accountID), conversationType, chatID, topicID)
 	for id, binding := range r.items {
-		if bindingAddressKey(binding) != key {
+		if bindingAddressKey(binding) != key && legacyAccountAddressKey(binding) != key {
 			continue
 		}
 		delete(r.items, id)
@@ -241,7 +261,7 @@ func (r *Repository) load() error {
 	if err := json.Unmarshal(data, &model); err != nil {
 		return fmt.Errorf("decode bindings: %w", err)
 	}
-	if model.Version != 1 && model.Version != 2 && model.Version != 3 {
+	if model.Version != 1 && model.Version != 2 && model.Version != 3 && model.Version != 4 {
 		return fmt.Errorf("decode bindings: unsupported version %d", model.Version)
 	}
 	addresses := make(map[string]string, len(model.Bindings))
@@ -259,6 +279,28 @@ func (r *Repository) load() error {
 				binding.ConversationType = "legacy"
 			}
 		}
+		if model.Version <= 3 {
+			// Prior files had a single physical bot per platform.  Preserve that
+			// behavior by assigning a stable default profile/resource during the
+			// upgrade; the desktop then configures that profile from the existing
+			// DPAPI secret.
+			if binding.ChannelProfileID == "" {
+				binding.ChannelProfileID = defaultProfileID(binding.ChannelType)
+			}
+			if binding.ResourceID == "" {
+				binding.ResourceID = binding.ChannelProfileID
+			}
+			if binding.ConversationID == "" {
+				binding.ConversationID = binding.ChatID
+			}
+			if binding.TargetID == "" {
+				if strings.EqualFold(binding.Backend, "openclaw") {
+					binding.TargetID = firstNonEmpty(binding.SessionKey, binding.ThreadID)
+				} else {
+					binding.TargetID = binding.ThreadID
+				}
+			}
+		}
 		binding = normalizeBinding(binding)
 		if err := validateStoredBinding(binding, model.Version); err != nil {
 			return fmt.Errorf("decode bindings: item %d: %w", index, err)
@@ -273,9 +315,9 @@ func (r *Repository) load() error {
 		addresses[key] = binding.ID
 		r.items[binding.ID] = binding
 	}
-	if model.Version <= 2 {
+	if model.Version <= 3 {
 		if err := r.saveLocked(); err != nil {
-			return fmt.Errorf("migrate bindings to version 3: %w", err)
+			return fmt.Errorf("migrate bindings to version 4: %w", err)
 		}
 	}
 	return nil
@@ -285,7 +327,7 @@ func (r *Repository) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
 		return err
 	}
-	model := diskModel{Version: 3, Bindings: make([]Binding, 0, len(r.items))}
+	model := diskModel{Version: 4, Bindings: make([]Binding, 0, len(r.items))}
 	for _, binding := range r.items {
 		model.Bindings = append(model.Bindings, binding)
 	}
@@ -319,18 +361,52 @@ func addressKey(channelType, accountID, conversationType, chatID, topicID string
 }
 
 func bindingAddressKey(binding Binding) string {
+	return addressKey(binding.ChannelType, bindingAddressOwner(binding), binding.ConversationType, binding.ChatID, binding.TopicID)
+}
+
+func legacyAccountAddressKey(binding Binding) string {
 	return addressKey(binding.ChannelType, binding.AccountID, binding.ConversationType, binding.ChatID, binding.TopicID)
+}
+
+func bindingAddressOwner(binding Binding) string {
+	if value := strings.TrimSpace(binding.ResourceID); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(binding.ChannelProfileID); value != "" {
+		return value
+	}
+	return binding.AccountID
+}
+
+func requestAddressOwner(request CreateRequest) string {
+	if value := strings.TrimSpace(request.ResourceID); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(request.ChannelProfileID); value != "" {
+		return value
+	}
+	return request.AccountID
 }
 
 func normalizeRequest(request CreateRequest) CreateRequest {
 	request.Backend = normalizeBackend(request.Backend)
+	request.TargetID = strings.TrimSpace(request.TargetID)
 	request.ChannelType = strings.ToLower(strings.TrimSpace(request.ChannelType))
+	request.ChannelProfileID = strings.TrimSpace(request.ChannelProfileID)
+	request.ResourceID = strings.TrimSpace(request.ResourceID)
 	request.AccountID = strings.TrimSpace(request.AccountID)
 	request.ConversationType = strings.ToLower(strings.TrimSpace(request.ConversationType))
 	if request.ChannelType == "telegram" && request.ConversationType == "" {
 		request.ConversationType = "default"
 	}
+	request.ConversationID = strings.TrimSpace(request.ConversationID)
 	request.ChatID = strings.TrimSpace(request.ChatID)
+	if request.ChatID == "" {
+		request.ChatID = request.ConversationID
+	}
+	if request.ConversationID == "" {
+		request.ConversationID = request.ChatID
+	}
 	request.TopicID = strings.TrimSpace(request.TopicID)
 	request.ThreadID = strings.TrimSpace(request.ThreadID)
 	request.SessionKey = strings.TrimSpace(request.SessionKey)
@@ -340,6 +416,13 @@ func normalizeRequest(request CreateRequest) CreateRequest {
 	if request.Backend == "openclaw" && request.ThreadID == "" {
 		request.ThreadID = request.SessionKey
 	}
+	if request.TargetID == "" {
+		if request.Backend == "openclaw" {
+			request.TargetID = firstNonEmpty(request.SessionKey, request.ThreadID)
+		} else {
+			request.TargetID = request.ThreadID
+		}
+	}
 	return request
 }
 
@@ -347,9 +430,19 @@ func normalizeBinding(binding Binding) Binding {
 	binding.ID = strings.TrimSpace(binding.ID)
 	binding.ChannelType = strings.ToLower(strings.TrimSpace(binding.ChannelType))
 	binding.Backend = normalizeBackend(binding.Backend)
+	binding.TargetID = strings.TrimSpace(binding.TargetID)
+	binding.ChannelProfileID = strings.TrimSpace(binding.ChannelProfileID)
+	binding.ResourceID = strings.TrimSpace(binding.ResourceID)
 	binding.AccountID = strings.TrimSpace(binding.AccountID)
 	binding.ConversationType = strings.ToLower(strings.TrimSpace(binding.ConversationType))
+	binding.ConversationID = strings.TrimSpace(binding.ConversationID)
 	binding.ChatID = strings.TrimSpace(binding.ChatID)
+	if binding.ChatID == "" {
+		binding.ChatID = binding.ConversationID
+	}
+	if binding.ConversationID == "" {
+		binding.ConversationID = binding.ChatID
+	}
 	binding.TopicID = strings.TrimSpace(binding.TopicID)
 	binding.ThreadID = strings.TrimSpace(binding.ThreadID)
 	binding.SessionKey = strings.TrimSpace(binding.SessionKey)
@@ -358,6 +451,13 @@ func normalizeBinding(binding Binding) Binding {
 	}
 	if binding.Backend == "openclaw" && binding.ThreadID == "" {
 		binding.ThreadID = binding.SessionKey
+	}
+	if binding.TargetID == "" {
+		if binding.Backend == "openclaw" {
+			binding.TargetID = firstNonEmpty(binding.SessionKey, binding.ThreadID)
+		} else {
+			binding.TargetID = binding.ThreadID
+		}
 	}
 	binding.CreatedAt = strings.TrimSpace(binding.CreatedAt)
 	binding.UpdatedAt = strings.TrimSpace(binding.UpdatedAt)
@@ -373,7 +473,7 @@ func validateRequest(request CreateRequest) error {
 		return errors.New("channelType must be telegram, qqbot, or qq")
 	}
 	if request.AccountID == "" || request.ChatID == "" {
-		return errors.New("accountId and chatId are required")
+		return errors.New("accountId and conversationId are required")
 	}
 	if request.Backend == "openclaw" {
 		if request.SessionKey == "" && request.ThreadID == "" {
@@ -425,8 +525,67 @@ func validateStoredBinding(binding Binding, version int) error {
 	if binding.ChannelType == "qq" && binding.Legacy && !binding.Enabled {
 		return nil
 	}
-	request := CreateRequest{Backend: binding.Backend, ChannelType: binding.ChannelType, AccountID: binding.AccountID, ConversationType: binding.ConversationType, ChatID: binding.ChatID, TopicID: binding.TopicID, ThreadID: binding.ThreadID, SessionKey: binding.SessionKey}
+	request := CreateRequest{Backend: binding.Backend, TargetID: binding.TargetID, ChannelType: binding.ChannelType, ChannelProfileID: binding.ChannelProfileID, ResourceID: binding.ResourceID, AccountID: binding.AccountID, ConversationType: binding.ConversationType, ConversationID: binding.ConversationID, ChatID: binding.ChatID, TopicID: binding.TopicID, ThreadID: binding.ThreadID, SessionKey: binding.SessionKey}
 	return validateRequest(request)
+}
+
+// FindProfileAddress resolves a binding against the canonical physical
+// resource.  Unlike FindAddress, it intentionally does not use a provider
+// bot ID, because one physical bot can serve both Codex and OpenClaw.
+func (r *Repository) FindProfileAddress(channelType, resourceID string, address ...string) (Binding, bool) {
+	conversationType, chatID, topicID, ok := addressParts(channelType, address)
+	if !ok {
+		return Binding{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	key := addressKey(channelType, strings.TrimSpace(resourceID), conversationType, chatID, topicID)
+	for _, binding := range r.items {
+		if bindingAddressKey(binding) == key {
+			return binding, true
+		}
+	}
+	return Binding{}, false
+}
+
+func (r *Repository) DeleteProfileAddress(channelType, resourceID string, address ...string) (Binding, error) {
+	conversationType, chatID, topicID, ok := addressParts(channelType, address)
+	if !ok {
+		return Binding{}, ErrNotFound
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := addressKey(channelType, strings.TrimSpace(resourceID), conversationType, chatID, topicID)
+	for id, binding := range r.items {
+		if bindingAddressKey(binding) != key {
+			continue
+		}
+		delete(r.items, id)
+		if err := r.saveLocked(); err != nil {
+			r.items[id] = binding
+			return Binding{}, err
+		}
+		return binding, nil
+	}
+	return Binding{}, ErrNotFound
+}
+
+func (r *Repository) ListChannelProfile(channelType, resourceID string) []Binding {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	channelType, resourceID = strings.ToLower(strings.TrimSpace(channelType)), strings.TrimSpace(resourceID)
+	result := []Binding{}
+	for _, binding := range r.items {
+		if strings.EqualFold(binding.ChannelType, channelType) && bindingAddressOwner(binding) == resourceID {
+			result = append(result, binding)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt < result[j].CreatedAt })
+	return result
+}
+
+func (r *Repository) CountChannelProfile(channelType, resourceID string) int {
+	return len(r.ListChannelProfile(channelType, resourceID))
 }
 
 func addressParts(channelType string, address []string) (conversationType, chatID, topicID string, ok bool) {
@@ -451,4 +610,24 @@ func newID() string {
 		return fmt.Sprintf("binding-%d", time.Now().UnixNano())
 	}
 	return "binding-" + hex.EncodeToString(buffer)
+}
+
+func defaultProfileID(channelType string) string {
+	switch strings.ToLower(strings.TrimSpace(channelType)) {
+	case "telegram":
+		return "telegram-default"
+	case "qqbot", "qq":
+		return "qq-default"
+	default:
+		return "channel-default"
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }

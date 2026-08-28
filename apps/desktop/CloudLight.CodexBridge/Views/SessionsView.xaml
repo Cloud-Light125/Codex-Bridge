@@ -95,8 +95,8 @@
                                 </StackPanel>
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                <Button Content="打开" Command="{Binding OpenDirectoryCommand}" Visibility="{Binding OpenDirectoryVisibility}" Margin="0,0,7,0"/>
-                                <Button Content="复制 #N" Command="{Binding CopyThreadPrefixCommand}" Visibility="{Binding CodexOnlyVisibility}" Margin="0,0,7,0"/>
+                                <Button Content="打开" Command="{Binding OpenDirectoryCommand}" Margin="0,0,7,0"/>
+                                <Button Content="复制 #N" Command="{Binding CopyThreadPrefixCommand}" Margin="0,0,7,0"/>
                                 <Button Content="停止" Command="{Binding StopCommand}" IsEnabled="{Binding CanStop}" Foreground="{DynamicResource ErrorBrush}" Margin="0,0,7,0"/>
                                 <Button Content="•••" Click="MoreMenu_Click" MinWidth="44" Padding="10,7">
                                     <Button.ContextMenu>

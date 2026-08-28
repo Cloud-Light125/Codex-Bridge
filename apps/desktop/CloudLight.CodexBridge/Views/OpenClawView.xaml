@@ -1,0 +1,83 @@
+<UserControl x:Class="CloudLight.CodexBridge.Views.OpenClawView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="330" />
+            <ColumnDefinition Width="10" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="0">
+            <Grid>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                <Grid Margin="14">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="OpenClaw Sessions" FontSize="20" FontWeight="SemiBold"/>
+                        <TextBlock Text="独立于 Codex Thread" Style="{StaticResource SecondaryTextStyle}" Margin="0,3,0,0"/>
+                        <TextBlock Text="{Binding GatewayStatusText}" Foreground="{DynamicResource AccentBrush}" FontSize="12" Margin="0,8,0,0"/>
+                        <TextBlock Text="{Binding GatewayDetailText}" Style="{StaticResource SecondaryTextStyle}" FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                        <TextBlock Text="{Binding GatewayError}" Foreground="{DynamicResource ErrorBrush}" FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Button Grid.Column="1" Content="刷新" Command="{Binding RefreshCommand}" VerticalAlignment="Center"/>
+                </Grid>
+                <TextBox Grid.Row="1" Margin="14,0,14,12" Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" ToolTip="按标题、Session Key 或目录搜索"/>
+                <ListBox Grid.Row="2" ItemsSource="{Binding SessionsView}" SelectedItem="{Binding SelectedSession, Mode=TwoWay}" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="12">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Text="{Binding Key}" FontFamily="Consolas" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
+                                    <Grid Margin="0,6,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding UpdatedAt}" Foreground="{DynamicResource MutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{DynamicResource AccentBrush}" FontSize="11" Margin="8,0,0,0"/>
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Grid>
+        </Border>
+
+        <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Center" Background="{DynamicResource BorderBrush}"/>
+
+        <Border Grid.Column="2" Style="{StaticResource CardStyle}" Padding="0">
+            <Grid>
+                <Grid Visibility="{Binding EmptyVisibility}" Background="{DynamicResource CardBrush}">
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
+                        <TextBlock Text="选择一个 OpenClaw Session" FontSize="17" FontWeight="SemiBold" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Gateway 状态、Session 消息和运行控制都与 Codex 页面独立。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" TextAlignment="Center" Margin="0,8,0,0"/>
+                    </StackPanel>
+                </Grid>
+                <Grid Visibility="{Binding BusyVisibility}" Background="{DynamicResource CardBrush}">
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"><ProgressBar Width="180" Height="4" IsIndeterminate="True"/><TextBlock Text="正在读取 OpenClaw Gateway…" Style="{StaticResource SecondaryTextStyle}" Margin="0,14,0,0"/></StackPanel>
+                </Grid>
+                <Grid Visibility="{Binding ErrorVisibility}" Background="{DynamicResource CardBrush}">
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="560"><TextBlock Text="OpenClaw 暂不可用" FontSize="18" FontWeight="SemiBold"/><TextBlock Text="{Binding ErrorText}" Foreground="{DynamicResource ErrorBrush}" TextWrapping="Wrap" TextAlignment="Center" Margin="0,10,0,14"/><Button Content="重试" Command="{Binding RefreshCommand}" HorizontalAlignment="Center"/></StackPanel>
+                </Grid>
+                <Grid Visibility="{Binding DetailsVisibility}" Background="{DynamicResource CardBrush}">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="20,14">
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal"><TextBlock Text="OpenClaw" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold" FontSize="18" Margin="0,0,10,0"/><TextBlock Text="{Binding SelectedDetail.Title}" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/></StackPanel>
+                                <TextBlock Text="{Binding SelectedDetail.Key}" FontFamily="Consolas" Style="{StaticResource SecondaryTextStyle}" Margin="0,5,0,0" TextTrimming="CharacterEllipsis"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,7,0,0"><TextBlock Text="{Binding GatewayStatusText}" Foreground="{DynamicResource AccentBrush}"/><TextBlock Text="{Binding CurrentRunText}" Style="{StaticResource SecondaryTextStyle}" Margin="10,0,0,0"/></StackPanel>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top"><Button Content="复制 Key" Command="{Binding CopySessionKeyCommand}"/><Button Content="停止任务" Command="{Binding StopCommand}" IsEnabled="{Binding CanStop}" Foreground="{DynamicResource ErrorBrush}" Margin="8,0,0,0"/></StackPanel>
+                        </Grid>
+                    </Border>
+                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"><StackPanel Margin="20">
+                        <Border Background="{DynamicResource CodeBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,14"><StackPanel><TextBlock Text="Gateway" FontWeight="SemiBold"/><TextBlock Text="{Binding GatewayDetailText}" Style="{StaticResource SecondaryTextStyle}" Margin="0,5,0,0" TextWrapping="Wrap"/><TextBlock Text="{Binding GatewayError}" Foreground="{DynamicResource ErrorBrush}" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+                        <TextBlock Text="消息历史" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                        <ItemsControl ItemsSource="{Binding Messages}"><ItemsControl.ItemTemplate><DataTemplate><Border BorderBrush="{Binding StatusBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,9"><StackPanel><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{Binding StatusBrush}" FontSize="11"/><TextBlock Text="{Binding TimestampDisplay}" Style="{StaticResource SecondaryTextStyle}" FontSize="11" Margin="0,4,0,0"/></Grid><TextBox Text="{Binding Text, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" Margin="0,8,0,0"/></StackPanel></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+                    </StackPanel></ScrollViewer>
+                    <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox Text="{Binding MessageText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="160" VerticalScrollBarVisibility="Auto" ToolTip="Ctrl+Enter 发送到当前 OpenClaw Session"><TextBox.InputBindings><KeyBinding Key="Enter" Modifiers="Control" Command="{Binding SendCommand}"/></TextBox.InputBindings></TextBox><StackPanel Grid.Column="1" Margin="10,0,0,0"><Button Content="发送" Command="{Binding SendCommand}" IsEnabled="{Binding CanSend}" MinWidth="88" Style="{StaticResource PrimaryButtonStyle}"/><TextBlock Text="Ctrl+Enter" Style="{StaticResource SecondaryTextStyle}" FontSize="11" HorizontalAlignment="Center" Margin="0,4,0,0"/></StackPanel></Grid></Border>
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

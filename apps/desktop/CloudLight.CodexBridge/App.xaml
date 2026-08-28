@@ -38,6 +38,7 @@
             <Thickness x:Key="CardPadding">20</Thickness>
             <CornerRadius x:Key="CardCornerRadius">10</CornerRadius>
             <sys:Double x:Key="ControlHeight">36</sys:Double>
+			<BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
 
             <Style x:Key="ControlFocusStyle">
                 <Setter Property="Control.Template">
@@ -190,6 +191,8 @@
 
             <DataTemplate DataType="{x:Type viewModels:OverviewViewModel}"><views:OverviewView /></DataTemplate>
             <DataTemplate DataType="{x:Type viewModels:SessionsViewModel}"><views:SessionsView /></DataTemplate>
+			<DataTemplate DataType="{x:Type viewModels:OpenClawViewModel}"><views:OpenClawView /></DataTemplate>
+			<DataTemplate DataType="{x:Type viewModels:ChannelProfilesViewModel}"><views:ChannelProfilesView /></DataTemplate>
             <DataTemplate DataType="{x:Type viewModels:ChannelsViewModel}"><views:ChannelsView /></DataTemplate>
             <DataTemplate DataType="{x:Type viewModels:CommandsViewModel}"><views:CommandsView /></DataTemplate>
             <DataTemplate DataType="{x:Type viewModels:MirrorViewModel}"><views:MirrorView /></DataTemplate>

@@ -58,17 +58,19 @@ public partial class App : Application
         var daemon = new DaemonProcessManager(logs);
         var api = new BridgeApiClient(logs);
         var sessions = new SessionsViewModel(api, logs);
+		var openClaw = new OpenClawViewModel(api, logs);
         var commands = new CommandsViewModel(api, logs);
-        var channels = new ChannelsViewModel(api, settingsService, new TelegramSecretService(), new QqSecretService(), settings, logs);
+		var channelProfiles = new ChannelProfilesViewModel(api, settingsService, settings, logs);
         var startup = new StartupService();
         var settingsViewModel = new SettingsViewModel(settingsService, api, settings, logs, startup, codexDiscoveryService,
             new OpenClawSecretService(), new OpenClawDiscoveryService(logs));
+		settingsViewModel.ChannelProfiles = channelProfiles;
         settingsViewModel.UpdateDiscovery(codexDiscovery);
         var logsViewModel = new LogsViewModel(logs, settingsService.LogDirectory);
-        var overview = new OverviewViewModel(sessions, channels, settingsViewModel);
+        var overview = new OverviewViewModel(sessions, openClaw, channelProfiles, settingsViewModel);
         var mirror = new MirrorViewModel(settingsViewModel);
         var backup = new BackupViewModel(new BackupService(settingsService, logs: logs), logs);
-        _mainViewModel = new MainViewModel(daemon, api, sessions, channels, commands, overview, mirror, backup,
+		_mainViewModel = new MainViewModel(daemon, api, sessions, openClaw, channelProfiles, commands, overview, mirror, backup,
             settingsViewModel, logsViewModel, settings, settingsService, logs, codexDiscoveryService, codexDiscovery);
         backup.StopRuntimeAsync = _mainViewModel.PauseRuntimeAsync;
         backup.RestartRuntimeAsync = _mainViewModel.ResumeRuntimeAsync;

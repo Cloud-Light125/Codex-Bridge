@@ -2,6 +2,7 @@ package qqbot
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -271,6 +272,54 @@ func TestThreadsCacheAndBindAreConversationScoped(t *testing.T) {
 	service.bind(context.Background(), group, "1")
 	if _, ok := repository.FindAddress("qqbot", "100", "group", "200", ""); !ok {
 		t.Fatal("group binding was not created from its own selection cache")
+	}
+}
+
+func TestQQCurrentAndThreadsFollowExplicitOpenClawBinding(t *testing.T) {
+	service, adapter, repository := newServiceFixture(t, &fakeControl{threads: []control.ThreadSummary{{ThreadID: "codex-thread", Title: "Codex only"}}}, &fakeRuntime{})
+	service.SetOpenClawBackend(&fakeOpenClawBackend{})
+	address := channels.ChannelAddress{ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c", ChatID: "200"}
+	if _, _, err := repository.UpsertAddress(bindings.CreateRequest{
+		Backend: conversation.BackendOpenClaw, TargetID: "agent:main:main", ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c",
+		ConversationID: "200", ChatID: "200", ThreadID: "agent:main:main", SessionKey: "agent:main:main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := channels.InboundMessage{Address: address, UserID: "200"}
+	service.listThreads(context.Background(), message)
+	if len(adapter.sent) != 1 || !strings.Contains(adapter.sent[0].Text, "[OpenClaw]") || !strings.Contains(adapter.sent[0].Text, "agent:main:main") {
+		t.Fatalf("/threads did not list the current OpenClaw backend sessions: %#v", adapter.sent)
+	}
+	service.current(context.Background(), message)
+	if len(adapter.sent) != 2 || !strings.Contains(adapter.sent[1].Text, "后端：OpenClaw") || !strings.Contains(adapter.sent[1].Text, "agent:main:main") {
+		t.Fatalf("/current did not report explicit backend and target: %#v", adapter.sent)
+	}
+}
+
+func TestQQBindDelegatesToProfilePreparer(t *testing.T) {
+	thread := control.ThreadSummary{ThreadID: "thread-1", Title: "One"}
+	service, adapter, repository := newServiceFixture(t, &fakeControl{threads: []control.ThreadSummary{thread}}, &fakeRuntime{})
+	service.SetBindingPreparer(func(bindings.CreateRequest) (bindings.CreateRequest, error) {
+		return bindings.CreateRequest{}, errors.New("not routed to codex")
+	})
+	message := channels.InboundMessage{Address: channels.ChannelAddress{ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c", ChatID: "200"}, UserID: "200"}
+	service.bind(context.Background(), message, "thread-1")
+	if _, ok := repository.FindAddress("qqbot", "100", "c2c", "200", ""); ok {
+		t.Fatal("a rejected profile route created a QQ binding")
+	}
+	if len(adapter.sent) != 1 || !strings.Contains(adapter.sent[0].Text, "未分配给 Codex") {
+		t.Fatalf("profile routing rejection was not surfaced to the QQ user: %#v", adapter.sent)
+	}
+}
+
+func TestParseBindingTargetKeepsBackendExplicit(t *testing.T) {
+	backend, target := parseBindingTarget("openclaw agent:main:main")
+	if backend != conversation.BackendOpenClaw || target != "agent:main:main" {
+		t.Fatalf("explicit OpenClaw target parsed as backend=%q target=%q", backend, target)
+	}
+	backend, target = parseBindingTarget("codex thread-123")
+	if backend != conversation.BackendCodex || target != "thread-123" {
+		t.Fatalf("explicit Codex target parsed as backend=%q target=%q", backend, target)
 	}
 }
 

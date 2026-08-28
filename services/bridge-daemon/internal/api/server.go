@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/bindings"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/channelprofiles"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
@@ -35,16 +36,15 @@ type Server struct {
 	bindings *bindings.Repository
 	broker   *events.Broker
 	logger   *bridgelog.SafeLogger
-	telegram *telegram.Service
-	qqbot    *qqbot.Service
+	profiles *channelprofiles.Manager
 	openclaw *openclaw.Service
 	mirror   *mirror.Service
 	commands *commandregistry.Registry
 	http     *http.Server
 }
 
-func New(token string, runtimeManager *bridgeruntime.Manager, controlService *control.Service, bindingRepository *bindings.Repository, broker *events.Broker, logger *bridgelog.SafeLogger, telegramService *telegram.Service, qqbotService *qqbot.Service, mirrorService *mirror.Service, registries ...*commandregistry.Registry) *Server {
-	server := &Server{token: token, runtime: runtimeManager, control: controlService, bindings: bindingRepository, broker: broker, logger: logger, telegram: telegramService, qqbot: qqbotService, mirror: mirrorService}
+func New(token string, runtimeManager *bridgeruntime.Manager, controlService *control.Service, bindingRepository *bindings.Repository, broker *events.Broker, logger *bridgelog.SafeLogger, profileManager *channelprofiles.Manager, mirrorService *mirror.Service, registries ...*commandregistry.Registry) *Server {
+	server := &Server{token: token, runtime: runtimeManager, control: controlService, bindings: bindingRepository, broker: broker, logger: logger, profiles: profileManager, mirror: mirrorService}
 	if len(registries) > 0 {
 		server.commands = registries[0]
 	}
@@ -62,6 +62,13 @@ func New(token string, runtimeManager *bridgeruntime.Manager, controlService *co
 	mux.HandleFunc("GET /api/v1/bindings", server.authorized(server.bindingList))
 	mux.HandleFunc("POST /api/v1/bindings", server.authorized(server.createBinding))
 	mux.HandleFunc("DELETE /api/v1/bindings/{bindingId}", server.authorized(server.deleteBinding))
+	mux.HandleFunc("GET /api/v1/channel-profiles", server.authorized(server.profileList))
+	mux.HandleFunc("PUT /api/v1/channel-profiles/{profileId}", server.authorized(server.profileConfigure))
+	mux.HandleFunc("DELETE /api/v1/channel-profiles/{profileId}", server.authorized(server.profileDelete))
+	mux.HandleFunc("POST /api/v1/channel-profiles/{profileId}/start", server.authorized(server.profileStart))
+	mux.HandleFunc("POST /api/v1/channel-profiles/{profileId}/stop", server.authorized(server.profileStop))
+	mux.HandleFunc("GET /api/v1/channel-routing", server.authorized(server.profileRouting))
+	mux.HandleFunc("PUT /api/v1/channel-routing", server.authorized(server.profileRoutingConfigure))
 	mux.HandleFunc("PUT /api/v1/settings/security", server.authorized(server.updateSecurity))
 	mux.HandleFunc("PUT /api/v1/settings/codex", server.authorized(server.updateCodex))
 	mux.HandleFunc("PUT /api/v1/settings/openclaw", server.authorized(server.openclawConfigure))
@@ -240,13 +247,8 @@ func (s *Server) Serve(listener net.Listener) error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	var failures []error
-	if s.telegram != nil {
-		if err := s.telegram.Stop(ctx); err != nil {
-			failures = append(failures, err)
-		}
-	}
-	if s.qqbot != nil {
-		if err := s.qqbot.Stop(ctx); err != nil {
+	if s.profiles != nil {
+		if err := s.profiles.Close(ctx); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -438,7 +440,8 @@ func (s *Server) createBinding(response http.ResponseWriter, request *http.Reque
 	defer cancel()
 	backend := strings.ToLower(strings.TrimSpace(input.Backend))
 	if backend == "" {
-		backend = conversation.BackendCodex
+		writeError(response, http.StatusBadRequest, "invalid_backend", "绑定必须明确指定 codex 或 openclaw 后端")
+		return
 	}
 	if backend != conversation.BackendCodex && backend != conversation.BackendOpenClaw {
 		writeError(response, http.StatusBadRequest, "invalid_backend", "不支持的会话后端")
@@ -450,7 +453,10 @@ func (s *Server) createBinding(response http.ResponseWriter, request *http.Reque
 			writeError(response, http.StatusServiceUnavailable, "openclaw_unavailable", "OpenClaw 后端尚未初始化")
 			return
 		}
-		target := strings.TrimSpace(input.SessionKey)
+		target := strings.TrimSpace(input.TargetID)
+		if target == "" {
+			target = strings.TrimSpace(input.SessionKey)
+		}
 		if target == "" {
 			target = strings.TrimSpace(input.ThreadID)
 		}
@@ -463,9 +469,13 @@ func (s *Server) createBinding(response http.ResponseWriter, request *http.Reque
 			writeError(response, http.StatusConflict, "session_archived", "绑定目标 OpenClaw Session 已归档")
 			return
 		}
-		input.SessionKey, input.ThreadID = detail.Key, detail.Key
+		input.TargetID, input.SessionKey, input.ThreadID = detail.Key, detail.Key, detail.Key
 	} else {
-		thread, err := s.control.ReadThread(ctx, strings.TrimSpace(input.ThreadID), false)
+		target := strings.TrimSpace(input.TargetID)
+		if target == "" {
+			target = strings.TrimSpace(input.ThreadID)
+		}
+		thread, err := s.control.ReadThread(ctx, target, false)
 		if err != nil || thread.ThreadID == "" {
 			writeError(response, http.StatusBadRequest, "thread_not_found", "绑定目标 Thread 不存在")
 			return
@@ -474,10 +484,20 @@ func (s *Server) createBinding(response http.ResponseWriter, request *http.Reque
 			writeError(response, http.StatusConflict, "thread_archived", "绑定目标 Thread 已归档")
 			return
 		}
+		input.TargetID, input.ThreadID = thread.ThreadID, thread.ThreadID
+	}
+	if s.profiles == nil {
+		writeError(response, http.StatusServiceUnavailable, "channel_profiles_unavailable", "消息渠道 Profile 服务尚未初始化")
+		return
+	}
+	input, err := s.profiles.PrepareBinding(input)
+	if err != nil {
+		writeProfileBindingError(response, err)
+		return
 	}
 	created, err := s.bindings.Create(input)
 	if errors.Is(err, bindings.ErrDuplicate) {
-		writeError(response, http.StatusConflict, "binding_conflict", "同一渠道地址最多只能绑定一个 Thread")
+		writeError(response, http.StatusConflict, "binding_conflict", "同一渠道 Profile 的会话地址最多只能绑定一个目标")
 		return
 	}
 	if err != nil {
@@ -485,11 +505,8 @@ func (s *Server) createBinding(response http.ResponseWriter, request *http.Reque
 		return
 	}
 	s.broker.Publish(events.BindingCreated, safeAPIBindingPayload(created))
-	if s.telegram != nil {
-		s.telegram.BindingCreated(created)
-	}
-	if s.qqbot != nil {
-		s.qqbot.BindingCreated(created)
+	if s.profiles != nil {
+		s.profiles.BindingCreated(created)
 	}
 	writeJSON(response, http.StatusCreated, created)
 }
@@ -506,11 +523,8 @@ func (s *Server) deleteBinding(response http.ResponseWriter, request *http.Reque
 			break
 		}
 	}
-	if s.telegram != nil && deleted.ID != "" {
-		s.telegram.BindingDeleted(deleted)
-	}
-	if s.qqbot != nil && deleted.ID != "" {
-		s.qqbot.BindingDeleted(deleted)
+	if s.profiles != nil && deleted.ID != "" {
+		s.profiles.BindingDeleted(deleted)
 	}
 	err := s.bindings.Delete(id)
 	if errors.Is(err, bindings.ErrNotFound) {
@@ -523,11 +537,8 @@ func (s *Server) deleteBinding(response http.ResponseWriter, request *http.Reque
 	}
 	// The pre-delete notification above revokes delivery immediately. Notify
 	// again after persistence so both channel summaries observe the new count.
-	if s.telegram != nil && deleted.ID != "" {
-		s.telegram.BindingDeleted(deleted)
-	}
-	if s.qqbot != nil && deleted.ID != "" {
-		s.qqbot.BindingDeleted(deleted)
+	if s.profiles != nil && deleted.ID != "" {
+		s.profiles.BindingDeleted(deleted)
 	}
 	s.broker.Publish(events.BindingDeleted, safeAPIBindingPayload(deleted))
 	response.WriteHeader(http.StatusNoContent)
@@ -535,11 +546,139 @@ func (s *Server) deleteBinding(response http.ResponseWriter, request *http.Reque
 
 func safeAPIBindingPayload(binding bindings.Binding) map[string]any {
 	return map[string]any{
-		"bindingId": binding.ID, "backend": binding.Backend, "sessionKey": shortAPIID(binding.SessionKey), "channelType": binding.ChannelType,
-		"conversationType": binding.ConversationType,
-		"account":          maskedAPIID(binding.AccountID), "chat": maskedAPIID(binding.ChatID),
+		"bindingId": binding.ID, "backend": binding.Backend, "targetId": shortAPIID(binding.TargetID), "sessionKey": shortAPIID(binding.SessionKey), "channelType": binding.ChannelType,
+		"channelProfileId": binding.ChannelProfileID, "conversationType": binding.ConversationType, "conversationId": maskedAPIID(binding.ConversationID),
+		"account": maskedAPIID(binding.AccountID), "chat": maskedAPIID(binding.ChatID),
 		"topic": maskedAPIID(binding.TopicID), "threadId": shortAPIID(binding.ThreadID),
 	}
+}
+
+func (s *Server) profileList(response http.ResponseWriter, _ *http.Request) {
+	if s.profiles == nil {
+		writeError(response, http.StatusServiceUnavailable, "channel_profiles_unavailable", "消息渠道 Profile 服务尚未初始化")
+		return
+	}
+	writeJSON(response, http.StatusOK, s.profiles.List())
+}
+
+func (s *Server) profileConfigure(response http.ResponseWriter, request *http.Request) {
+	if s.profiles == nil {
+		writeError(response, http.StatusServiceUnavailable, "channel_profiles_unavailable", "消息渠道 Profile 服务尚未初始化")
+		return
+	}
+	profileID, ok := pathID(response, request.PathValue("profileId"), "Profile")
+	if !ok {
+		return
+	}
+	var input channelprofiles.ConfigureRequest
+	if !decodeBody(response, request, 64*1024, &input) {
+		return
+	}
+	input.ID = profileID
+	status, err := s.profiles.Configure(input)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_channel_profile", bridgelog.Redact(err.Error()))
+		return
+	}
+	s.broker.Publish(events.ChannelStatusChanged, map[string]any{"channelProfileId": status.ID, "platform": status.Platform, "state": status.State})
+	writeJSON(response, http.StatusOK, status)
+}
+
+func (s *Server) profileDelete(response http.ResponseWriter, request *http.Request) {
+	if s.profiles == nil {
+		writeError(response, http.StatusServiceUnavailable, "channel_profiles_unavailable", "消息渠道 Profile 服务尚未初始化")
+		return
+	}
+	profileID, ok := pathID(response, request.PathValue("profileId"), "Profile")
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 12*time.Second)
+	defer cancel()
+	if err := s.profiles.Delete(ctx, profileID); err != nil {
+		status, code := http.StatusBadRequest, "channel_profile_delete_failed"
+		if errors.Is(err, channelprofiles.ErrProfileNotFound) {
+			status, code = http.StatusNotFound, "channel_profile_not_found"
+		}
+		writeError(response, status, code, bridgelog.Redact(err.Error()))
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) profileStart(response http.ResponseWriter, request *http.Request) {
+	s.profileSetRunning(response, request, true)
+}
+
+func (s *Server) profileStop(response http.ResponseWriter, request *http.Request) {
+	s.profileSetRunning(response, request, false)
+}
+
+func (s *Server) profileSetRunning(response http.ResponseWriter, request *http.Request, start bool) {
+	if s.profiles == nil {
+		writeError(response, http.StatusServiceUnavailable, "channel_profiles_unavailable", "消息渠道 Profile 服务尚未初始化")
+		return
+	}
+	profileID, ok := pathID(response, request.PathValue("profileId"), "Profile")
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+	defer cancel()
+	var status channelprofiles.ProfileStatus
+	var err error
+	if start {
+		status, err = s.profiles.Start(ctx, profileID)
+	} else {
+		status, err = s.profiles.Stop(ctx, profileID)
+	}
+	if err != nil {
+		httpStatus, code := http.StatusConflict, "channel_profile_start_failed"
+		if !start {
+			code = "channel_profile_stop_failed"
+		}
+		if errors.Is(err, channelprofiles.ErrProfileNotFound) {
+			httpStatus, code = http.StatusNotFound, "channel_profile_not_found"
+		}
+		writeError(response, httpStatus, code, bridgelog.Redact(err.Error()))
+		return
+	}
+	writeJSON(response, http.StatusOK, status)
+}
+
+func (s *Server) profileRouting(response http.ResponseWriter, _ *http.Request) {
+	if s.profiles == nil {
+		writeError(response, http.StatusServiceUnavailable, "channel_profiles_unavailable", "消息渠道 Profile 服务尚未初始化")
+		return
+	}
+	writeJSON(response, http.StatusOK, s.profiles.Routing())
+}
+
+func (s *Server) profileRoutingConfigure(response http.ResponseWriter, request *http.Request) {
+	if s.profiles == nil {
+		writeError(response, http.StatusServiceUnavailable, "channel_profiles_unavailable", "消息渠道 Profile 服务尚未初始化")
+		return
+	}
+	var input channelprofiles.BackendRouting
+	if !decodeBody(response, request, 32*1024, &input) {
+		return
+	}
+	routing, err := s.profiles.SetRouting(input)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, "invalid_channel_routing", bridgelog.Redact(err.Error()))
+		return
+	}
+	writeJSON(response, http.StatusOK, routing)
+}
+
+func writeProfileBindingError(response http.ResponseWriter, err error) {
+	status, code := http.StatusBadRequest, "invalid_channel_profile"
+	if errors.Is(err, channelprofiles.ErrProfileNotFound) {
+		status, code = http.StatusNotFound, "channel_profile_not_found"
+	} else if errors.Is(err, channelprofiles.ErrPlatformMismatch) {
+		code = "channel_profile_platform_mismatch"
+	}
+	writeError(response, status, code, bridgelog.Redact(err.Error()))
 }
 
 func maskedAPIID(value string) string {
@@ -747,18 +886,18 @@ func (s *Server) writeOpenClawError(response http.ResponseWriter, err error) {
 }
 
 func (s *Server) channelList(response http.ResponseWriter, _ *http.Request) {
-	channels := []any{}
-	if s.telegram != nil {
-		channels = append(channels, s.telegram.Adapter().TelegramStatus())
+	if !s.requireProfiles(response) {
+		return
 	}
-	if s.qqbot != nil {
-		channels = append(channels, s.qqbot.Adapter().QQBotStatus())
-	}
-	writeJSON(response, http.StatusOK, map[string]any{"channels": channels})
+	profiles := s.profiles.List().Profiles
+	writeJSON(response, http.StatusOK, map[string]any{"channels": profiles})
 }
 
 func (s *Server) telegramStatus(response http.ResponseWriter, _ *http.Request) {
-	writeJSON(response, http.StatusOK, s.telegram.Adapter().TelegramStatus())
+	if !s.requireProfiles(response) {
+		return
+	}
+	writeJSON(response, http.StatusOK, s.profiles.TelegramStatus())
 }
 
 func (s *Server) telegramConfigure(response http.ResponseWriter, request *http.Request) {
@@ -766,7 +905,10 @@ func (s *Server) telegramConfigure(response http.ResponseWriter, request *http.R
 	if !decodeBody(response, request, 32*1024, &input) {
 		return
 	}
-	status, err := s.telegram.Configure(input)
+	if !s.requireProfiles(response) {
+		return
+	}
+	status, err := s.profiles.ConfigureDefaultTelegram(input)
 	if err != nil {
 		writeError(response, http.StatusBadRequest, "invalid_telegram_configuration", err.Error())
 		return
@@ -781,7 +923,10 @@ func (s *Server) telegramTest(response http.ResponseWriter, request *http.Reques
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
 	defer cancel()
-	result := s.telegram.Adapter().Test(ctx, input)
+	if !s.requireProfiles(response) {
+		return
+	}
+	result := s.profiles.TestDefaultTelegram(ctx, input)
 	s.broker.Publish(events.TelegramTested, map[string]any{"ok": result.OK, "category": result.Category})
 	// A completed diagnostic is transported as 200 even when reachability is
 	// false; the typed category is what the desktop client presents.
@@ -795,7 +940,10 @@ func (s *Server) telegramTestProxy(response http.ResponseWriter, request *http.R
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
 	defer cancel()
-	result := s.telegram.Adapter().TestProxy(ctx, input)
+	if !s.requireProfiles(response) {
+		return
+	}
+	result := s.profiles.TestDefaultTelegramProxy(ctx, input)
 	s.broker.Publish(events.TelegramTested, map[string]any{
 		"ok": result.OK, "category": result.Category, "networkStage": "proxy-test",
 		"effectiveProxyMode": result.EffectiveProxyMode, "maskedProxyAddress": result.MaskedProxyAddress,
@@ -809,27 +957,38 @@ func (s *Server) telegramTestProxy(response http.ResponseWriter, request *http.R
 func (s *Server) telegramStart(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
 	defer cancel()
-	if err := s.telegram.Start(ctx); err != nil {
+	if !s.requireProfiles(response) {
+		return
+	}
+	status, err := s.profiles.StartDefaultTelegram(ctx)
+	if err != nil {
 		writeError(response, http.StatusConflict, "telegram_start_failed", telegramSafeAPIMessage(err))
 		return
 	}
-	writeJSON(response, http.StatusOK, s.telegram.Adapter().TelegramStatus())
+	writeJSON(response, http.StatusOK, status)
 }
 
 func (s *Server) telegramStop(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
-	if err := s.telegram.Stop(ctx); err != nil {
+	if !s.requireProfiles(response) {
+		return
+	}
+	status, err := s.profiles.StopDefaultTelegram(ctx)
+	if err != nil {
 		writeError(response, http.StatusGatewayTimeout, "telegram_stop_failed", "Telegram polling did not stop in time")
 		return
 	}
-	writeJSON(response, http.StatusOK, s.telegram.Adapter().TelegramStatus())
+	writeJSON(response, http.StatusOK, status)
 }
 
 func (s *Server) telegramDeleteToken(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
-	if err := s.telegram.DeleteToken(ctx); err != nil {
+	if !s.requireProfiles(response) {
+		return
+	}
+	if err := s.profiles.DeleteDefaultTelegramToken(ctx); err != nil {
 		writeError(response, http.StatusGatewayTimeout, "telegram_token_delete_failed", "Telegram polling did not stop in time")
 		return
 	}
@@ -837,7 +996,10 @@ func (s *Server) telegramDeleteToken(response http.ResponseWriter, request *http
 }
 
 func (s *Server) qqbotStatus(response http.ResponseWriter, _ *http.Request) {
-	writeJSON(response, http.StatusOK, s.qqbot.Adapter().QQBotStatus())
+	if !s.requireProfiles(response) {
+		return
+	}
+	writeJSON(response, http.StatusOK, s.profiles.QQStatus())
 }
 
 func (s *Server) qqbotConfigure(response http.ResponseWriter, request *http.Request) {
@@ -845,7 +1007,10 @@ func (s *Server) qqbotConfigure(response http.ResponseWriter, request *http.Requ
 	if !decodeBody(response, request, 64*1024, &input) {
 		return
 	}
-	status, err := s.qqbot.Configure(input)
+	if !s.requireProfiles(response) {
+		return
+	}
+	status, err := s.profiles.ConfigureDefaultQQ(input, nil)
 	if err != nil {
 		writeError(response, http.StatusBadRequest, qqbot.ClassifyError(err), qqbotSafeAPIMessage(err))
 		return
@@ -858,7 +1023,10 @@ func (s *Server) qqbotSecret(response http.ResponseWriter, request *http.Request
 	if !decodeBody(response, request, 16*1024, &input) {
 		return
 	}
-	status, err := s.qqbot.Adapter().SetSecret(input.AppSecret)
+	if !s.requireProfiles(response) {
+		return
+	}
+	status, err := s.profiles.SetDefaultQQSecret(input.AppSecret)
 	input.AppSecret = ""
 	if err != nil {
 		writeError(response, http.StatusBadRequest, qqbot.ClassifyError(err), qqbotSafeAPIMessage(err))
@@ -870,7 +1038,10 @@ func (s *Server) qqbotSecret(response http.ResponseWriter, request *http.Request
 func (s *Server) qqbotDeleteSecret(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
-	if err := s.qqbot.DeleteSecret(ctx); err != nil {
+	if !s.requireProfiles(response) {
+		return
+	}
+	if err := s.profiles.DeleteDefaultQQSecret(ctx); err != nil {
 		writeError(response, http.StatusGatewayTimeout, "secret_delete_failed", "停止 QQ 官方机器人或清除 AppSecret 失败。")
 		return
 	}
@@ -884,7 +1055,10 @@ func (s *Server) qqbotTest(response http.ResponseWriter, request *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
 	defer cancel()
-	writeJSON(response, http.StatusOK, s.qqbot.Test(ctx, input))
+	if !s.requireProfiles(response) {
+		return
+	}
+	writeJSON(response, http.StatusOK, s.profiles.TestDefaultQQ(ctx, input))
 }
 
 func (s *Server) qqbotNetworkTest(response http.ResponseWriter, request *http.Request) {
@@ -894,31 +1068,53 @@ func (s *Server) qqbotNetworkTest(response http.ResponseWriter, request *http.Re
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
 	defer cancel()
-	writeJSON(response, http.StatusOK, s.qqbot.Adapter().TestNetwork(ctx))
+	if !s.requireProfiles(response) {
+		return
+	}
+	writeJSON(response, http.StatusOK, s.profiles.TestDefaultQQNetwork(ctx))
 }
 
 func (s *Server) qqbotStart(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
 	defer cancel()
-	if err := s.qqbot.Start(ctx); err != nil {
+	if !s.requireProfiles(response) {
+		return
+	}
+	status, err := s.profiles.StartDefaultQQ(ctx)
+	if err != nil {
 		writeError(response, http.StatusConflict, qqbot.ClassifyError(err), qqbotSafeAPIMessage(err))
 		return
 	}
-	writeJSON(response, http.StatusOK, s.qqbot.Adapter().QQBotStatus())
+	writeJSON(response, http.StatusOK, status)
 }
 
 func (s *Server) qqbotStop(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
-	if err := s.qqbot.Stop(ctx); err != nil {
+	if !s.requireProfiles(response) {
+		return
+	}
+	status, err := s.profiles.StopDefaultQQ(ctx)
+	if err != nil {
 		writeError(response, http.StatusGatewayTimeout, "qqbot_stop_failed", "QQ 官方机器人未能在限定时间内停止。")
 		return
 	}
-	writeJSON(response, http.StatusOK, s.qqbot.Adapter().QQBotStatus())
+	writeJSON(response, http.StatusOK, status)
 }
 
 func (s *Server) qqbotDiscoveredIdentities(response http.ResponseWriter, _ *http.Request) {
-	writeJSON(response, http.StatusOK, map[string]any{"identities": s.qqbot.Adapter().DiscoveredIdentities()})
+	if !s.requireProfiles(response) {
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"identities": s.profiles.DefaultQQIdentities()})
+}
+
+func (s *Server) requireProfiles(response http.ResponseWriter) bool {
+	if s.profiles != nil {
+		return true
+	}
+	writeError(response, http.StatusServiceUnavailable, "channel_profiles_unavailable", "消息渠道 Profile 服务尚未初始化")
+	return false
 }
 
 func qqbotSafeAPIMessage(err error) string {

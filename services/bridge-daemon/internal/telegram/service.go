@@ -41,6 +41,10 @@ type Runtime interface {
 	RespondInteraction(context.Context, string, interactions.ResponseRequest) (interactions.PendingInteraction, error)
 }
 
+// BindingPreparer lets the profile manager resolve the logical Profile and
+// validate the backend route before this transport writes a binding.
+type BindingPreparer func(bindings.CreateRequest) (bindings.CreateRequest, error)
+
 type turnRoute struct {
 	Address    channels.ChannelAddress
 	UserID     string
@@ -121,6 +125,8 @@ type Service struct {
 	sessions            map[string]*multiSession
 	flows               map[string]*interactionFlow
 	interactionNotified map[string]bool
+	channelProfileID    string
+	bindingPreparer     BindingPreparer
 	reconfiguring       bool
 	activeHandlers      int
 }
@@ -144,6 +150,37 @@ func NewService(controlService Control, runtime Runtime, repository *bindings.Re
 }
 
 func (s *Service) Adapter() *Adapter { return s.adapter }
+
+// SetChannelProfileID attaches this service instance to a physical channel
+// resource.  The adapter still reports the provider Bot ID in AccountID; the
+// profile ID is what keeps shared-bot bindings unambiguous.
+func (s *Service) SetChannelProfileID(profileID string) {
+	s.mu.Lock()
+	s.channelProfileID = strings.TrimSpace(profileID)
+	s.mu.Unlock()
+}
+
+func (s *Service) SetBindingPreparer(preparer BindingPreparer) {
+	s.mu.Lock()
+	s.bindingPreparer = preparer
+	s.mu.Unlock()
+}
+
+func (s *Service) prepareBinding(request bindings.CreateRequest) (bindings.CreateRequest, error) {
+	s.mu.Lock()
+	preparer := s.bindingPreparer
+	s.mu.Unlock()
+	if preparer == nil {
+		return request, nil
+	}
+	return preparer(request)
+}
+
+func (s *Service) channelProfile() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.channelProfileID
+}
 
 func (s *Service) SetCommandRegistry(commands *commandregistry.Registry) {
 	if commands == nil {
@@ -302,20 +339,21 @@ func (s *Service) DeleteToken(ctx context.Context) error {
 // removed outside the adapter. It revokes in-memory delivery rights before a
 // terminal Turn event can send content to the old address.
 func (s *Service) BindingDeleted(binding bindings.Binding) {
-	if !strings.EqualFold(binding.ChannelType, "telegram") {
+	if !strings.EqualFold(binding.ChannelType, "telegram") || !s.ownsBinding(binding) {
 		return
 	}
-	s.clearAddress(channels.ChannelAddress{ChannelType: "telegram", AccountID: binding.AccountID, ConversationType: binding.ConversationType, ChatID: binding.ChatID, TopicID: binding.TopicID})
+	s.clearAddress(channels.ChannelAddress{ChannelType: "telegram", ChannelProfileID: s.channelProfile(), AccountID: binding.AccountID, ConversationType: binding.ConversationType, ChatID: binding.ChatID, TopicID: binding.TopicID})
 	s.refreshBindingSummary()
 }
 
 func (s *Service) BindingCreated(binding bindings.Binding) {
-	if strings.EqualFold(binding.ChannelType, "telegram") {
+	if strings.EqualFold(binding.ChannelType, "telegram") && s.ownsBinding(binding) {
 		s.refreshBindingSummary()
 	}
 }
 
 func (s *Service) HandleMessage(ctx context.Context, message channels.InboundMessage) {
+	message.Address.ChannelProfileID = s.channelProfile()
 	s.mu.Lock()
 	if s.reconfiguring {
 		s.mu.Unlock()
@@ -417,6 +455,10 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 		return
 	}
 	argument := strings.TrimSpace(strings.Join(invocation.Arguments, " "))
+	if invocation.Definition.Action == commandregistry.ActionThreadsList {
+		s.listThreads(ctx, message)
+		return
+	}
 	if result, handled := s.queryService().ExecuteAction(ctx, invocation.Definition.Action, invocation.Arguments); handled {
 		s.sendQuery(ctx, message.Address, result)
 		return
@@ -430,7 +472,7 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 		}
 	case commandregistry.ActionThreadBind:
 		if argument == "" {
-			s.send(ctx, message.Address, "Usage: /bind <full-thread-id>. Use /threads to pick from recent Threads.")
+			s.send(ctx, message.Address, "Usage: /bind codex <Thread ID> or /bind openclaw <Session Key>. /threads lists the current backend.")
 			return
 		}
 		s.bind(ctx, message, argument)
@@ -456,6 +498,10 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 }
 
 func (s *Service) listThreads(ctx context.Context, message channels.InboundMessage) {
+	if binding, ok := s.findBinding(message.Address); ok && bindingBackend(binding) == conversation.BackendOpenClaw {
+		s.listOpenClawSessions(ctx, message)
+		return
+	}
 	threads, err := s.control.ListThreads(ctx, 10, "")
 	if err != nil {
 		s.send(ctx, message.Address, "Could not list Codex Threads. Check that Codex is connected.")
@@ -478,6 +524,30 @@ func (s *Service) listThreads(ctx context.Context, message channels.InboundMessa
 		rows = append(rows, channels.ActionRow{Buttons: []channels.Button{{Label: "Bind " + shortID(thread.ThreadID), Value: token}}})
 	}
 	_, _ = s.sendOutbound(ctx, channels.OutboundMessage{Address: message.Address, Text: strings.TrimSpace(text.String()), Actions: rows})
+}
+
+func (s *Service) listOpenClawSessions(ctx context.Context, message channels.InboundMessage) {
+	backend := s.openClawBackend()
+	if backend == nil {
+		s.send(ctx, message.Address, "The current backend is OpenClaw, but its Gateway is not configured.")
+		return
+	}
+	sessions, err := backend.ListSessions(ctx, 20)
+	if err != nil {
+		s.send(ctx, message.Address, "Could not list OpenClaw Sessions. Check the Gateway connection.")
+		return
+	}
+	if len(sessions) == 0 {
+		s.send(ctx, message.Address, "No OpenClaw Sessions are available.")
+		return
+	}
+	var output strings.Builder
+	output.WriteString("[OpenClaw] Current backend Sessions:\n")
+	for _, session := range sessions {
+		fmt.Fprintf(&output, "\n• %s · %s\n  Session: %s", displayTitle(session.Title), firstNonEmpty(session.Status, "idle"), session.Key)
+	}
+	output.WriteString("\n\nRebind with: /bind openclaw <Session Key>")
+	s.send(ctx, message.Address, output.String())
 }
 
 func (s *Service) listNumberedThreads(ctx context.Context, message channels.InboundMessage, argument string) {
@@ -549,7 +619,10 @@ func (s *Service) statusThread(ctx context.Context, message channels.InboundMess
 func (s *Service) stopThread(ctx context.Context, message channels.InboundMessage, threadID string) {
 	state := s.runtime.RuntimeState(threadID)
 	s.mu.Lock()
-	route := s.routes[state.TurnID]
+	route := s.routes[routeMapKey(conversation.BackendCodex, threadID, state.TurnID)]
+	if route == nil {
+		route = s.routes[state.TurnID] // legacy in-memory route compatibility
+	}
 	owned := route != nil && route.ThreadID == threadID && sameAddress(route.Address, message.Address) && route.UserID == message.UserID
 	s.mu.Unlock()
 	if !owned || !state.CanInterrupt || state.TurnID == "" {
@@ -576,9 +649,10 @@ func (s *Service) cancelThreadInteraction(ctx context.Context, message channels.
 	s.send(ctx, message.Address, "该会话没有等待中的用户输入。")
 }
 
-func (s *Service) bind(ctx context.Context, message channels.InboundMessage, threadID string) {
-	threadID = strings.TrimSpace(threadID)
-	if sessionKey, ok := parseOpenClawSelector(threadID); ok {
+func (s *Service) bind(ctx context.Context, message channels.InboundMessage, selector string) {
+	backendKind, target := parseBindingTarget(selector)
+	if backendKind == conversation.BackendOpenClaw {
+		sessionKey := target
 		backend := s.openClawBackend()
 		if backend == nil {
 			s.send(ctx, message.Address, "OpenClaw 后端尚未配置，请先在设置页测试连接。")
@@ -593,12 +667,18 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, thr
 			s.send(ctx, message.Address, "指定的 OpenClaw Session 已归档，不能绑定。")
 			return
 		}
-		s.clearAddress(message.Address)
-		created, previous, err := s.bindings.UpsertAddress(bindings.CreateRequest{
-			Backend: conversation.BackendOpenClaw, ChannelType: "telegram", AccountID: message.Address.AccountID,
-			ConversationType: "default", ChatID: message.Address.ChatID, TopicID: message.Address.TopicID,
+		input, err := s.prepareBinding(bindings.CreateRequest{
+			Backend: conversation.BackendOpenClaw, TargetID: detail.Key, ChannelType: "telegram", ChannelProfileID: message.Address.ChannelProfileID,
+			ResourceID: message.Address.ChannelProfileID, AccountID: message.Address.AccountID,
+			ConversationType: "default", ConversationID: message.Address.ChatID, ChatID: message.Address.ChatID, TopicID: message.Address.TopicID,
 			ThreadID: detail.Key, SessionKey: detail.Key,
 		})
+		if err != nil {
+			s.send(ctx, message.Address, "当前 Telegram Profile 未分配给 OpenClaw，无法创建该绑定。")
+			return
+		}
+		s.clearAddress(message.Address)
+		created, previous, err := s.bindings.UpsertAddress(input)
 		if err != nil {
 			s.send(ctx, message.Address, "保存 OpenClaw 绑定失败。")
 			return
@@ -612,6 +692,7 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, thr
 		s.send(ctx, message.Address, fmt.Sprintf("已绑定到 [OpenClaw] %s（Session：%s）。", displayTitle(detail.Title), detail.Key))
 		return
 	}
+	threadID := target
 	if s.registry != nil {
 		selector := strings.TrimSpace(strings.Trim(threadID, "#[]"))
 		if number, err := strconv.Atoi(selector); err == nil {
@@ -629,11 +710,17 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, thr
 		s.send(ctx, message.Address, "That Thread is archived and cannot be bound.")
 		return
 	}
-	s.clearAddress(message.Address)
-	created, previous, err := s.bindings.UpsertAddress(bindings.CreateRequest{
-		Backend: conversation.BackendCodex, ChannelType: "telegram", AccountID: message.Address.AccountID, ConversationType: "default", ChatID: message.Address.ChatID,
+	input, err := s.prepareBinding(bindings.CreateRequest{
+		Backend: conversation.BackendCodex, TargetID: threadID, ChannelType: "telegram", ChannelProfileID: message.Address.ChannelProfileID,
+		ResourceID: message.Address.ChannelProfileID, AccountID: message.Address.AccountID, ConversationType: "default", ConversationID: message.Address.ChatID, ChatID: message.Address.ChatID,
 		TopicID: message.Address.TopicID, ThreadID: threadID,
 	})
+	if err != nil {
+		s.send(ctx, message.Address, "当前 Telegram Profile 未分配给 Codex，无法创建该绑定。")
+		return
+	}
+	s.clearAddress(message.Address)
+	created, previous, err := s.bindings.UpsertAddress(input)
 	if err != nil {
 		s.send(ctx, message.Address, "Could not save the binding.")
 		return
@@ -653,7 +740,7 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, thr
 
 func (s *Service) unbind(ctx context.Context, message channels.InboundMessage) {
 	s.clearAddress(message.Address)
-	deleted, err := s.bindings.DeleteAddress("telegram", message.Address.AccountID, telegramConversationType(message.Address.ConversationType), message.Address.ChatID, message.Address.TopicID)
+	deleted, err := s.bindings.DeleteProfileAddress("telegram", message.Address.ChannelProfileID, telegramConversationType(message.Address.ConversationType), message.Address.ChatID, message.Address.TopicID)
 	if errors.Is(err, bindings.ErrNotFound) {
 		s.send(ctx, message.Address, "This chat/topic is not bound.")
 		return
@@ -684,7 +771,7 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 			s.send(ctx, message.Address, "绑定的 OpenClaw Session 已不可用，请重新绑定。")
 			return
 		}
-		s.send(ctx, message.Address, fmt.Sprintf("当前绑定 [OpenClaw]\n标题：%s\nSession：%s\n更新：%s\n状态：%s", displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), detail.Status))
+		s.send(ctx, message.Address, fmt.Sprintf("Current binding\nBackend: OpenClaw\nProfile: %s\nTitle: %s\nSession: %s\nUpdated: %s\nState: %s", firstNonEmpty(binding.ChannelProfileID, "default"), displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
 		return
 	}
 	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
@@ -692,8 +779,8 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 		s.send(ctx, message.Address, "Bound Thread "+shortID(binding.ThreadID)+" is no longer available. Use /unbind or bind another Thread.")
 		return
 	}
-	s.send(ctx, message.Address, fmt.Sprintf("Current binding\nTitle: %s\nThread: %s\nProject: %s\nUpdated: %s\nState: %s\nLatest Turn: %s",
-		displayTitle(thread.Title), shortID(thread.ThreadID), projectName(thread.CWD), displayTime(thread.UpdatedAt), thread.Runtime.State, latestTurnStatus(thread)))
+	s.send(ctx, message.Address, fmt.Sprintf("Current binding\nBackend: Codex\nProfile: %s\nTitle: %s\nThread: %s\nProject: %s\nUpdated: %s\nState: %s\nLatest Turn: %s",
+		firstNonEmpty(binding.ChannelProfileID, "default"), displayTitle(thread.Title), shortID(thread.ThreadID), projectName(thread.CWD), displayTime(thread.UpdatedAt), thread.Runtime.State, latestTurnStatus(thread)))
 }
 
 func (s *Service) status(ctx context.Context, message channels.InboundMessage) {
@@ -793,7 +880,10 @@ func (s *Service) stopTurn(ctx context.Context, message channels.InboundMessage)
 	}
 	state := s.runtime.RuntimeState(binding.ThreadID)
 	s.mu.Lock()
-	route := s.routes[state.TurnID]
+	route := s.routes[routeMapKey(conversation.BackendCodex, binding.ThreadID, state.TurnID)]
+	if route == nil {
+		route = s.routes[state.TurnID] // legacy in-memory route compatibility
+	}
 	owned := route != nil && sameAddress(route.Address, message.Address) && route.UserID == message.UserID
 	s.mu.Unlock()
 	if !owned || !state.CanInterrupt {
@@ -846,7 +936,7 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 	}
 	route := &turnRoute{Address: message.Address, UserID: message.UserID, Backend: conversation.BackendCodex, SessionKey: accepted.ThreadID, ThreadID: accepted.ThreadID, TurnID: accepted.TurnID}
 	s.mu.Lock()
-	s.routes[accepted.TurnID] = route
+	s.routes[routeMapKey(route.Backend, route.SessionKey, route.TurnID)] = route
 	s.mu.Unlock()
 	s.publishMessageEvent(events.TelegramMessageRouted, message, "turn-started")
 	for _, interaction := range s.runtime.ListInteractions("pending") {
@@ -883,7 +973,7 @@ func (s *Service) startOpenClawTurn(ctx context.Context, message channels.Inboun
 	}
 	route := &turnRoute{Address: message.Address, UserID: message.UserID, Backend: conversation.BackendOpenClaw, SessionKey: key, ThreadID: key, TurnID: accepted.RunID}
 	s.mu.Lock()
-	s.routes[accepted.RunID] = route
+	s.routes[routeMapKey(route.Backend, route.SessionKey, route.TurnID)] = route
 	s.mu.Unlock()
 	s.publishMessageEvent(events.TelegramMessageRouted, message, "openclaw-turn-started")
 }
@@ -1047,7 +1137,7 @@ func (s *Service) handleEvent(event events.Event) {
 		return
 	}
 	s.mu.Lock()
-	route := s.routes[event.TurnID]
+	route := s.routeForEventLocked(event)
 	s.mu.Unlock()
 	if route == nil || event.ThreadID != route.ThreadID {
 		return
@@ -1058,7 +1148,7 @@ func (s *Service) handleEvent(event events.Event) {
 	}
 	switch event.EventType {
 	case events.TurnCompleted, events.TurnFailed, events.TurnInterrupted:
-		s.removeRoute(route.TurnID)
+		s.removeRoute(route)
 	}
 }
 
@@ -1084,17 +1174,17 @@ func (s *Service) handleOpenClawEvent(event events.Event, route *turnRoute) {
 			text = "OpenClaw 任务已完成，但 Gateway 没有返回可显示的文本。"
 		}
 		s.send(ctx, route.Address, text)
-		s.removeRoute(route.TurnID)
+		s.removeRoute(route)
 	case events.OpenClawMessageAborted:
 		s.send(ctx, route.Address, "OpenClaw 任务已停止。")
-		s.removeRoute(route.TurnID)
+		s.removeRoute(route)
 	case events.OpenClawMessageFailed:
 		reason := payloadString(event.Payload, "error")
 		if reason == "" {
 			reason = "Gateway 返回了错误。"
 		}
 		s.send(ctx, route.Address, "OpenClaw 任务失败："+reason)
-		s.removeRoute(route.TurnID)
+		s.removeRoute(route)
 	}
 }
 
@@ -1178,7 +1268,7 @@ func (s *Service) finishRoutesForBackend(backend string) {
 
 func (s *Service) handleInteractionEvent(event events.Event) {
 	s.mu.Lock()
-	route := s.routes[event.TurnID]
+	route := s.routeForEventLocked(event)
 	s.mu.Unlock()
 	if route == nil || route.ThreadID != event.ThreadID {
 		return
@@ -1403,9 +1493,16 @@ func (s *Service) clearQuestionControls(interactionID string) {
 	s.mu.Unlock()
 }
 
-func (s *Service) removeRoute(turnID string) {
+func (s *Service) removeRoute(route *turnRoute) {
+	if route == nil {
+		return
+	}
+	turnID := route.TurnID
 	s.mu.Lock()
-	delete(s.routes, turnID)
+	delete(s.routes, routeMapKey(route.Backend, route.SessionKey, route.TurnID))
+	if s.routes[turnID] == route {
+		delete(s.routes, turnID)
+	}
 	for key, wait := range s.waits {
 		if wait.TurnID == turnID {
 			delete(s.waits, key)
@@ -1432,12 +1529,55 @@ func (s *Service) removeRoute(turnID string) {
 func (s *Service) routeActive(route *turnRoute) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.routes[route.TurnID] == route && !route.Revoked
+	current := s.routes[routeMapKey(route.Backend, route.SessionKey, route.TurnID)]
+	if current == nil {
+		current = s.routes[route.TurnID]
+	}
+	return current == route && !route.Revoked
+}
+
+func (s *Service) routeForEventLocked(event events.Event) *turnRoute {
+	backend := eventBackend(event)
+	if route := s.routes[routeMapKey(backend, event.ThreadID, event.TurnID)]; route != nil {
+		return route
+	}
+	return s.routes[event.TurnID] // legacy in-memory route compatibility
+}
+
+func routeMapKey(backend, targetID, turnID string) string {
+	return strings.Join([]string{strings.ToLower(strings.TrimSpace(backend)), strings.TrimSpace(targetID), strings.TrimSpace(turnID)}, "\x00")
+}
+
+func eventBackend(event events.Event) string {
+	if event.Payload != nil {
+		if backend, ok := event.Payload["backend"].(string); ok && strings.TrimSpace(backend) != "" {
+			return strings.ToLower(strings.TrimSpace(backend))
+		}
+	}
+	if strings.HasPrefix(event.EventType, "openclaw.") {
+		return conversation.BackendOpenClaw
+	}
+	return conversation.BackendCodex
 }
 
 func (s *Service) findBinding(address channels.ChannelAddress) (bindings.Binding, bool) {
-	binding, ok := s.bindings.FindAddress("telegram", address.AccountID, telegramConversationType(address.ConversationType), address.ChatID, address.TopicID)
+	owner := strings.TrimSpace(address.ChannelProfileID)
+	if owner == "" {
+		owner = address.AccountID
+	}
+	binding, ok := s.bindings.FindProfileAddress("telegram", owner, telegramConversationType(address.ConversationType), address.ChatID, address.TopicID)
+	if !ok && address.ChannelProfileID == "" {
+		binding, ok = s.bindings.FindAddress("telegram", address.AccountID, telegramConversationType(address.ConversationType), address.ChatID, address.TopicID)
+	}
 	return binding, ok && binding.Enabled
+}
+
+func (s *Service) ownsBinding(binding bindings.Binding) bool {
+	profileID := s.channelProfile()
+	if profileID == "" {
+		return binding.ChannelProfileID == "" && binding.ResourceID == ""
+	}
+	return binding.ResourceID == profileID || binding.ChannelProfileID == profileID
 }
 
 func (s *Service) openClawBackend() conversation.IConversationBackend {
@@ -1463,6 +1603,26 @@ func parseOpenClawSelector(value string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// /bind now carries the backend explicitly.  The legacy oc:/openclaw:
+// selector and an unprefixed Codex Thread remain accepted so existing chats
+// do not lose their bindings during upgrade.
+func parseBindingTarget(value string) (backend, target string) {
+	value = strings.TrimSpace(value)
+	parts := strings.Fields(value)
+	if len(parts) >= 2 {
+		switch strings.ToLower(parts[0]) {
+		case conversation.BackendCodex:
+			return conversation.BackendCodex, strings.Join(parts[1:], " ")
+		case conversation.BackendOpenClaw:
+			return conversation.BackendOpenClaw, strings.Join(parts[1:], " ")
+		}
+	}
+	if key, ok := parseOpenClawSelector(value); ok {
+		return conversation.BackendOpenClaw, key
+	}
+	return conversation.BackendCodex, value
 }
 
 func (s *Service) send(ctx context.Context, address channels.ChannelAddress, text string) {
@@ -1548,11 +1708,17 @@ func (s *Service) publishMessageEvent(eventType string, message channels.Inbound
 
 func (s *Service) refreshBindingSummary() {
 	status := s.adapter.TelegramStatus()
-	if status.BotID == "" {
+	profileID := s.channelProfile()
+	if status.BotID == "" && profileID == "" {
 		s.adapter.SetBindingSummary(nil)
 		return
 	}
-	items := s.bindings.ListChannelAccount("telegram", status.BotID)
+	var items []bindings.Binding
+	if profileID != "" {
+		items = s.bindings.ListChannelProfile("telegram", profileID)
+	} else {
+		items = s.bindings.ListChannelAccount("telegram", status.BotID)
+	}
 	summaries := make([]string, 0, len(items))
 	for _, item := range items {
 		summaries = append(summaries, maskID(item.ChatID)+"/"+maskID(item.TopicID)+"→"+shortID(item.ThreadID))
@@ -1760,7 +1926,7 @@ func interactionIDFromPayload(payload map[string]any) string {
 
 func safeBindingPayload(binding bindings.Binding) map[string]any {
 	backend := bindingBackend(binding)
-	return map[string]any{"bindingId": binding.ID, "backend": backend, "sessionKey": shortID(firstNonEmpty(binding.SessionKey, binding.ThreadID)), "channelType": binding.ChannelType, "conversationType": binding.ConversationType, "account": shortID(binding.AccountID), "chat": maskID(binding.ChatID), "topic": maskID(binding.TopicID), "threadId": shortID(binding.ThreadID)}
+	return map[string]any{"bindingId": binding.ID, "backend": backend, "targetId": shortID(firstNonEmpty(binding.TargetID, binding.SessionKey, binding.ThreadID)), "sessionKey": shortID(firstNonEmpty(binding.SessionKey, binding.ThreadID)), "channelType": binding.ChannelType, "channelProfileId": binding.ChannelProfileID, "conversationType": binding.ConversationType, "conversationId": maskID(binding.ConversationID), "account": shortID(binding.AccountID), "chat": maskID(binding.ChatID), "topic": maskID(binding.TopicID), "threadId": shortID(binding.ThreadID)}
 }
 
 func payloadString(payload map[string]any, key string) string {
@@ -1842,7 +2008,7 @@ func maskID(value string) string {
 }
 
 func waitKey(address channels.ChannelAddress, userID string, threads ...string) string {
-	parts := []string{address.AccountID, telegramConversationType(address.ConversationType), address.ChatID, address.TopicID, userID}
+	parts := []string{address.ChannelProfileID, address.AccountID, telegramConversationType(address.ConversationType), address.ChatID, address.TopicID, userID}
 	if len(threads) > 0 {
 		parts = append(parts, threads[0])
 	}
@@ -1850,7 +2016,7 @@ func waitKey(address channels.ChannelAddress, userID string, threads ...string) 
 }
 
 func sameAddress(left, right channels.ChannelAddress) bool {
-	return left.ChannelType == right.ChannelType && left.AccountID == right.AccountID && telegramConversationType(left.ConversationType) == telegramConversationType(right.ConversationType) && left.ChatID == right.ChatID && left.TopicID == right.TopicID
+	return left.ChannelType == right.ChannelType && left.ChannelProfileID == right.ChannelProfileID && left.AccountID == right.AccountID && telegramConversationType(left.ConversationType) == telegramConversationType(right.ConversationType) && left.ChatID == right.ChatID && left.TopicID == right.TopicID
 }
 
 func telegramConversationType(value string) string {

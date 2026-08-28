@@ -108,6 +108,27 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
     public Task<ChannelListResponse> GetChannelsAsync(CancellationToken cancellationToken = default) =>
         GetAsync<ChannelListResponse>("/api/v1/channels", cancellationToken);
 
+    public Task<ChannelProfilesResponse> GetChannelProfilesAsync(CancellationToken cancellationToken = default) =>
+        GetAsync<ChannelProfilesResponse>("/api/v1/channel-profiles", cancellationToken);
+
+    public Task<ChannelProfileStatus> ConfigureChannelProfileAsync(string profileId, ChannelProfileConfigureRequest input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<ChannelProfileStatus>(HttpMethod.Put, $"/api/v1/channel-profiles/{Uri.EscapeDataString(profileId)}", input, cancellationToken);
+
+    public Task<ChannelProfileStatus> StartChannelProfileAsync(string profileId, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<ChannelProfileStatus>(HttpMethod.Post, $"/api/v1/channel-profiles/{Uri.EscapeDataString(profileId)}/start", null, cancellationToken);
+
+    public Task<ChannelProfileStatus> StopChannelProfileAsync(string profileId, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<ChannelProfileStatus>(HttpMethod.Post, $"/api/v1/channel-profiles/{Uri.EscapeDataString(profileId)}/stop", null, cancellationToken);
+
+    public Task DeleteChannelProfileAsync(string profileId, CancellationToken cancellationToken = default) =>
+        SendNoContentAsync(HttpMethod.Delete, $"/api/v1/channel-profiles/{Uri.EscapeDataString(profileId)}", cancellationToken);
+
+    public Task<BackendChannelRoutingSettings> GetChannelRoutingAsync(CancellationToken cancellationToken = default) =>
+        GetAsync<BackendChannelRoutingSettings>("/api/v1/channel-routing", cancellationToken);
+
+    public Task<BackendChannelRoutingSettings> ConfigureChannelRoutingAsync(BackendChannelRoutingSettings input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<BackendChannelRoutingSettings>(HttpMethod.Put, "/api/v1/channel-routing", input, cancellationToken);
+
     public Task<TelegramChannelStatus> GetTelegramStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<TelegramChannelStatus>("/api/v1/channels/telegram/status", cancellationToken);
 

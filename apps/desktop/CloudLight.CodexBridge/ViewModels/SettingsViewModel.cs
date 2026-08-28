@@ -36,6 +36,7 @@ public sealed class SettingsViewModel : ObservableObject
 	private bool _openClawAutoDiscover;
 	private bool _openClawAutoReconnect;
 	private bool _mirrorEnabled;
+	private ChannelProfilesViewModel? _channelProfiles;
 	private bool _telegramMirrorEnabled;
 	private string _telegramMirrorChatId = "";
 	private bool _qqMirrorEnabled;
@@ -100,7 +101,8 @@ public sealed class SettingsViewModel : ObservableObject
     public bool AutoRefreshThreads { get => _autoRefreshThreads; set => SetProperty(ref _autoRefreshThreads, value); }
     public int ThreadRefreshIntervalSeconds { get => _threadRefreshIntervalSeconds; set => SetProperty(ref _threadRefreshIntervalSeconds, value); }
     public string Theme { get => _theme; set { if (SetProperty(ref _theme, value)) App.ApplyTheme(value); } }
-    public bool MirrorAutoStart { get => _mirrorAutoStart; set => SetProperty(ref _mirrorAutoStart, value); }
+	public bool MirrorAutoStart { get => _mirrorAutoStart; set => SetProperty(ref _mirrorAutoStart, value); }
+	public ChannelProfilesViewModel? ChannelProfiles { get => _channelProfiles; set => SetProperty(ref _channelProfiles, value); }
     public bool TelegramAutoStart { get => _settings.TelegramAutoStart; set { _settings.TelegramAutoStart = value; OnPropertyChanged(); } }
     public bool QqAutoStart { get => _settings.QqAutoStart; set { _settings.QqAutoStart = value; OnPropertyChanged(); } }
 	public string OpenClawGatewayUrl { get => _openClawGatewayUrl; set => SetProperty(ref _openClawGatewayUrl, value); }

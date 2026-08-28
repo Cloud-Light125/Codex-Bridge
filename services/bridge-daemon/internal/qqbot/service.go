@@ -46,6 +46,10 @@ type Runtime interface {
 	RespondInteraction(context.Context, string, interactions.ResponseRequest) (interactions.PendingInteraction, error)
 }
 
+// BindingPreparer lets the profile manager resolve the logical Profile and
+// validate the backend route before this transport writes a binding.
+type BindingPreparer func(bindings.CreateRequest) (bindings.CreateRequest, error)
+
 type serviceAdapter interface {
 	Configure(ConfigureRequest) (AdapterStatus, error)
 	QQBotStatus() AdapterStatus
@@ -108,6 +112,8 @@ type Service struct {
 	flowByInput         map[string]string
 	interactionNotified map[string]bool
 	appID               string
+	channelProfileID    string
+	bindingPreparer     BindingPreparer
 	reconfiguring       bool
 	activeHandlers      int
 }
@@ -135,6 +141,34 @@ func NewService(controlService Control, runtime Runtime, repository *bindings.Re
 }
 
 func (s *Service) Adapter() *Adapter { return s.adapter }
+
+func (s *Service) SetChannelProfileID(profileID string) {
+	s.mu.Lock()
+	s.channelProfileID = strings.TrimSpace(profileID)
+	s.mu.Unlock()
+}
+
+func (s *Service) SetBindingPreparer(preparer BindingPreparer) {
+	s.mu.Lock()
+	s.bindingPreparer = preparer
+	s.mu.Unlock()
+}
+
+func (s *Service) prepareBinding(request bindings.CreateRequest) (bindings.CreateRequest, error) {
+	s.mu.Lock()
+	preparer := s.bindingPreparer
+	s.mu.Unlock()
+	if preparer == nil {
+		return request, nil
+	}
+	return preparer(request)
+}
+
+func (s *Service) channelProfile() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.channelProfileID
+}
 
 func (s *Service) SetCommandRegistry(commands *commandregistry.Registry) {
 	if commands == nil {
@@ -173,7 +207,7 @@ func (s *Service) Configure(request ConfigureRequest) (AdapterStatus, error) {
 	if err != nil {
 		return AdapterStatus{}, err
 	}
-	s.refreshBindingCount(status.AppID)
+	s.refreshBindingCount()
 	s.publishChannel(events.ChannelStatusChanged, "")
 	return status, nil
 }
@@ -200,7 +234,7 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 	status := s.transport.QQBotStatus()
 	s.onAppID(status.AppID)
-	s.refreshBindingCount(status.AppID)
+	s.refreshBindingCount()
 	return nil
 }
 
@@ -238,23 +272,24 @@ func (s *Service) DeleteSecret(ctx context.Context) error {
 }
 
 func (s *Service) BindingCreated(binding bindings.Binding) {
-	if !strings.EqualFold(binding.ChannelType, "qqbot") {
+	if !strings.EqualFold(binding.ChannelType, "qqbot") || !s.ownsBinding(binding) {
 		return
 	}
-	s.refreshBindingCount(binding.AccountID)
+	s.refreshBindingCount()
 }
 
 func (s *Service) BindingDeleted(binding bindings.Binding) {
-	if !strings.EqualFold(binding.ChannelType, "qqbot") {
+	if !strings.EqualFold(binding.ChannelType, "qqbot") || !s.ownsBinding(binding) {
 		return
 	}
 	s.clearAddress(channels.ChannelAddress{
-		ChannelType: "qqbot", AccountID: binding.AccountID, ConversationType: binding.ConversationType, ChatID: binding.ChatID,
+		ChannelType: "qqbot", ChannelProfileID: s.channelProfile(), AccountID: binding.AccountID, ConversationType: binding.ConversationType, ChatID: binding.ChatID,
 	})
-	s.refreshBindingCount(binding.AccountID)
+	s.refreshBindingCount()
 }
 
 func (s *Service) HandleMessage(parent context.Context, message channels.InboundMessage) {
+	message.Address.ChannelProfileID = s.channelProfile()
 	s.mu.Lock()
 	if s.reconfiguring {
 		s.mu.Unlock()
@@ -358,6 +393,10 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 		return
 	}
 	argument := strings.TrimSpace(strings.Join(invocation.Arguments, " "))
+	if invocation.Definition.Action == commandregistry.ActionThreadsList {
+		s.listThreads(ctx, message)
+		return
+	}
 	if result, handled := s.queryService().ExecuteAction(ctx, invocation.Definition.Action, invocation.Arguments); handled {
 		s.sendQuery(ctx, message.Address, result)
 		return
@@ -371,7 +410,7 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 		}
 	case commandregistry.ActionThreadBind:
 		if argument == "" {
-			s.send(ctx, message.Address, "用法：/bind <序号、完整 Thread ID 或唯一前缀>。序号必须来自 5 分钟内的 /threads 列表。")
+			s.send(ctx, message.Address, "用法：/bind codex <Thread ID> 或 /bind openclaw <Session Key>。/threads 会显示当前后端会话。")
 			return
 		}
 		s.bind(ctx, message, argument)
@@ -397,6 +436,10 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 }
 
 func (s *Service) listThreads(ctx context.Context, message channels.InboundMessage) {
+	if binding, ok := s.findBinding(message.Address); ok && bindingBackend(binding) == conversation.BackendOpenClaw {
+		s.listOpenClawSessions(ctx, message)
+		return
+	}
 	result, err := s.control.ListThreads(ctx, 10, "")
 	if err != nil {
 		s.send(ctx, message.Address, "无法读取 Codex Thread，请确认 Codex 已连接。")
@@ -416,6 +459,30 @@ func (s *Service) listThreads(ctx context.Context, message channels.InboundMessa
 		fmt.Fprintf(&output, "%d. %s\n   项目：%s · ID：%s · 更新：%s\n", index+1, displayTitle(thread.Title), projectName(thread.CWD), shortID(thread.ThreadID), displayTime(thread.UpdatedAt))
 	}
 	s.send(ctx, message.Address, strings.TrimSpace(output.String()))
+}
+
+func (s *Service) listOpenClawSessions(ctx context.Context, message channels.InboundMessage) {
+	backend := s.openClawBackend()
+	if backend == nil {
+		s.send(ctx, message.Address, "当前后端是 OpenClaw，但 Gateway 尚未配置。")
+		return
+	}
+	sessions, err := backend.ListSessions(ctx, 20)
+	if err != nil {
+		s.send(ctx, message.Address, "无法读取 OpenClaw Session，请检查 Gateway 连接。")
+		return
+	}
+	if len(sessions) == 0 {
+		s.send(ctx, message.Address, "当前没有可用的 OpenClaw Session。")
+		return
+	}
+	var output strings.Builder
+	output.WriteString("[OpenClaw] 当前后端 Session：\n")
+	for _, session := range sessions {
+		fmt.Fprintf(&output, "\n• %s · %s\n  Session：%s", displayTitle(session.Title), firstNonEmpty(session.Status, "idle"), session.Key)
+	}
+	output.WriteString("\n\n重新绑定：/bind openclaw <Session Key>")
+	s.send(ctx, message.Address, output.String())
 }
 
 func (s *Service) listNumberedThreads(ctx context.Context, message channels.InboundMessage, argument string) {
@@ -487,7 +554,10 @@ func (s *Service) statusThread(ctx context.Context, message channels.InboundMess
 func (s *Service) stopThread(ctx context.Context, message channels.InboundMessage, threadID string) {
 	state := s.runtime.RuntimeState(threadID)
 	s.mu.Lock()
-	route := s.routes[state.TurnID]
+	route := s.routes[routeMapKey(conversation.BackendCodex, threadID, state.TurnID)]
+	if route == nil {
+		route = s.routes[state.TurnID] // legacy in-memory route compatibility
+	}
 	owned := route != nil && route.ThreadID == threadID && sameAddress(route.Address, message.Address) && route.UserID == message.UserID
 	s.mu.Unlock()
 	if !owned || !state.CanInterrupt || state.TurnID == "" {
@@ -515,7 +585,9 @@ func (s *Service) cancelThreadInteraction(ctx context.Context, message channels.
 }
 
 func (s *Service) bind(ctx context.Context, message channels.InboundMessage, selector string) {
-	if sessionKey, ok := parseOpenClawSelector(selector); ok {
+	backendKind, target := parseBindingTarget(selector)
+	if backendKind == conversation.BackendOpenClaw {
+		sessionKey := target
 		backend := s.openClawBackend()
 		if backend == nil {
 			s.send(ctx, message.Address, "OpenClaw 后端尚未配置，请先在设置页测试连接。")
@@ -530,17 +602,23 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, sel
 			s.send(ctx, message.Address, "指定的 OpenClaw Session 已归档，不能绑定。")
 			return
 		}
-		s.clearAddress(message.Address)
-		created, previous, err := s.bindings.UpsertAddress(bindings.CreateRequest{
-			Backend: conversation.BackendOpenClaw, ChannelType: "qqbot", AccountID: message.Address.AccountID,
-			ConversationType: qqbotConversationType(message.Address.ConversationType), ChatID: message.Address.ChatID,
+		input, err := s.prepareBinding(bindings.CreateRequest{
+			Backend: conversation.BackendOpenClaw, TargetID: detail.Key, ChannelType: "qqbot", ChannelProfileID: message.Address.ChannelProfileID,
+			ResourceID: message.Address.ChannelProfileID, AccountID: message.Address.AccountID,
+			ConversationType: qqbotConversationType(message.Address.ConversationType), ConversationID: message.Address.ChatID, ChatID: message.Address.ChatID,
 			ThreadID: detail.Key, SessionKey: detail.Key,
 		})
+		if err != nil {
+			s.send(ctx, message.Address, "当前 QQ Profile 未分配给 OpenClaw，无法创建该绑定。")
+			return
+		}
+		s.clearAddress(message.Address)
+		created, previous, err := s.bindings.UpsertAddress(input)
 		if err != nil {
 			s.send(ctx, message.Address, "保存 OpenClaw 绑定失败。")
 			return
 		}
-		s.refreshBindingCount(created.AccountID)
+		s.refreshBindingCount()
 		payload := safeBindingPayload(created)
 		if previous != nil {
 			payload["replacedSessionKey"] = shortID(firstNonEmpty(previous.SessionKey, previous.ThreadID))
@@ -549,7 +627,7 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, sel
 		s.send(ctx, message.Address, fmt.Sprintf("已绑定到 [OpenClaw] %s（Session：%s）。", displayTitle(detail.Title), detail.Key))
 		return
 	}
-	threadID, errText := s.resolveThread(ctx, message.Address, selector)
+	threadID, errText := s.resolveThread(ctx, message.Address, target)
 	if errText != "" {
 		s.send(ctx, message.Address, errText)
 		return
@@ -563,16 +641,22 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, sel
 		s.send(ctx, message.Address, "该 Thread 已归档，不能绑定。")
 		return
 	}
-	s.clearAddress(message.Address)
-	created, previous, err := s.bindings.UpsertAddress(bindings.CreateRequest{
-		Backend: conversation.BackendCodex, ChannelType: "qqbot", AccountID: message.Address.AccountID, ConversationType: qqbotConversationType(message.Address.ConversationType),
-		ChatID: message.Address.ChatID, TopicID: "", ThreadID: threadID,
+	input, err := s.prepareBinding(bindings.CreateRequest{
+		Backend: conversation.BackendCodex, TargetID: threadID, ChannelType: "qqbot", ChannelProfileID: message.Address.ChannelProfileID,
+		ResourceID: message.Address.ChannelProfileID, AccountID: message.Address.AccountID, ConversationType: qqbotConversationType(message.Address.ConversationType),
+		ConversationID: message.Address.ChatID, ChatID: message.Address.ChatID, TopicID: "", ThreadID: threadID,
 	})
+	if err != nil {
+		s.send(ctx, message.Address, "当前 QQ Profile 未分配给 Codex，无法创建该绑定。")
+		return
+	}
+	s.clearAddress(message.Address)
+	created, previous, err := s.bindings.UpsertAddress(input)
 	if err != nil {
 		s.send(ctx, message.Address, "保存绑定失败。")
 		return
 	}
-	s.refreshBindingCount(created.AccountID)
+	s.refreshBindingCount()
 	payload := safeBindingPayload(created)
 	if previous != nil {
 		payload["replacedThreadId"] = shortID(previous.ThreadID)
@@ -642,7 +726,7 @@ func (s *Service) resolveThread(ctx context.Context, address channels.ChannelAdd
 
 func (s *Service) unbind(ctx context.Context, message channels.InboundMessage) {
 	s.clearAddress(message.Address)
-	deleted, err := s.bindings.DeleteAddress("qqbot", message.Address.AccountID, qqbotConversationType(message.Address.ConversationType), message.Address.ChatID, "")
+	deleted, err := s.bindings.DeleteProfileAddress("qqbot", message.Address.ChannelProfileID, qqbotConversationType(message.Address.ConversationType), message.Address.ChatID, "")
 	if errors.Is(err, bindings.ErrNotFound) {
 		s.send(ctx, message.Address, "当前 QQ 会话尚未绑定。")
 		return
@@ -651,7 +735,7 @@ func (s *Service) unbind(ctx context.Context, message channels.InboundMessage) {
 		s.send(ctx, message.Address, "解除绑定失败。")
 		return
 	}
-	s.refreshBindingCount(deleted.AccountID)
+	s.refreshBindingCount()
 	s.broker.Publish(events.BindingDeleted, safeBindingPayload(deleted))
 	s.send(ctx, message.Address, "已解除绑定，并清除该 QQ 会话的投递和等待状态；Thread 本身未被删除。")
 }
@@ -673,7 +757,7 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 			s.send(ctx, message.Address, "绑定的 OpenClaw Session 已不可用，请重新绑定。")
 			return
 		}
-		s.send(ctx, message.Address, fmt.Sprintf("当前绑定 [OpenClaw]\n标题：%s\nSession：%s\n更新：%s\n状态：%s", displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
+		s.send(ctx, message.Address, fmt.Sprintf("当前绑定\n后端：OpenClaw\nProfile：%s\n标题：%s\nSession：%s\n更新：%s\n状态：%s", firstNonEmpty(binding.ChannelProfileID, "默认"), displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
 		return
 	}
 	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
@@ -681,7 +765,7 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 		s.send(ctx, message.Address, "绑定的 Thread "+shortID(binding.ThreadID)+" 已不存在，请解除绑定或重新绑定。")
 		return
 	}
-	s.send(ctx, message.Address, fmt.Sprintf("当前绑定\n标题：%s\n项目：%s\nThread：%s\n更新：%s\n状态：%s\n最近 Turn 结果：%s", displayTitle(thread.Title), projectName(thread.CWD), shortID(thread.ThreadID), displayTime(thread.UpdatedAt), thread.Runtime.State, latestTurnResult(thread)))
+	s.send(ctx, message.Address, fmt.Sprintf("当前绑定\n后端：Codex\nProfile：%s\n标题：%s\n项目：%s\nThread：%s\n更新：%s\n状态：%s\n最近 Turn 结果：%s", firstNonEmpty(binding.ChannelProfileID, "默认"), displayTitle(thread.Title), projectName(thread.CWD), shortID(thread.ThreadID), displayTime(thread.UpdatedAt), thread.Runtime.State, latestTurnResult(thread)))
 }
 
 func (s *Service) status(ctx context.Context, message channels.InboundMessage) {
@@ -775,7 +859,10 @@ func (s *Service) stopTurn(ctx context.Context, message channels.InboundMessage)
 	}
 	state := s.runtime.RuntimeState(binding.ThreadID)
 	s.mu.Lock()
-	route := s.routes[state.TurnID]
+	route := s.routes[routeMapKey(conversation.BackendCodex, binding.ThreadID, state.TurnID)]
+	if route == nil {
+		route = s.routes[state.TurnID] // legacy in-memory route compatibility
+	}
 	owned := route != nil && sameAddress(route.Address, message.Address) && route.UserID == message.UserID && route.ThreadID == binding.ThreadID
 	s.mu.Unlock()
 	if !owned || !state.CanInterrupt || (state.Origin != "local" && state.Origin != "qqbot") || state.TurnID == "" || state.TurnID != route.TurnID {
@@ -824,7 +911,7 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 	}
 	route := &turnRoute{Address: message.Address, UserID: message.UserID, Backend: conversation.BackendCodex, SessionKey: accepted.ThreadID, ThreadID: accepted.ThreadID, TurnID: accepted.TurnID}
 	s.mu.Lock()
-	s.routes[accepted.TurnID] = route
+	s.routes[routeMapKey(route.Backend, route.SessionKey, route.TurnID)] = route
 	s.mu.Unlock()
 	s.publishMessage(events.QQBotMessageRouted, message, "turn-started")
 	for _, interaction := range s.runtime.ListInteractions("pending") {
@@ -861,7 +948,7 @@ func (s *Service) startOpenClawTurn(ctx context.Context, message channels.Inboun
 	}
 	route := &turnRoute{Address: message.Address, UserID: message.UserID, Backend: conversation.BackendOpenClaw, SessionKey: key, ThreadID: key, TurnID: accepted.RunID}
 	s.mu.Lock()
-	s.routes[accepted.RunID] = route
+	s.routes[routeMapKey(route.Backend, route.SessionKey, route.TurnID)] = route
 	s.mu.Unlock()
 	s.publishMessage(events.QQBotMessageRouted, message, "openclaw-turn-started")
 }
@@ -888,7 +975,7 @@ func (s *Service) startTurnNumbered(ctx context.Context, message channels.Inboun
 	}
 	route := &turnRoute{Address: message.Address, UserID: message.UserID, Backend: conversation.BackendCodex, SessionKey: accepted.ThreadID, ThreadID: accepted.ThreadID, TurnID: accepted.TurnID}
 	s.mu.Lock()
-	s.routes[accepted.TurnID] = route
+	s.routes[routeMapKey(route.Backend, route.SessionKey, route.TurnID)] = route
 	s.mu.Unlock()
 	s.publishMessage(events.QQBotMessageRouted, message, "turn-started")
 	for _, interaction := range s.runtime.ListInteractions("pending") {
@@ -1095,7 +1182,7 @@ func (s *Service) handleEvent(event events.Event) {
 		return
 	}
 	s.mu.Lock()
-	route := s.routes[event.TurnID]
+	route := s.routeForEventLocked(event)
 	s.mu.Unlock()
 	if route == nil || route.ThreadID != event.ThreadID {
 		return
@@ -1106,7 +1193,7 @@ func (s *Service) handleEvent(event events.Event) {
 	}
 	switch event.EventType {
 	case events.TurnCompleted, events.TurnFailed, events.TurnInterrupted:
-		s.removeRoute(route.TurnID)
+		s.removeRoute(route)
 	}
 }
 
@@ -1132,23 +1219,23 @@ func (s *Service) handleOpenClawEvent(event events.Event, route *turnRoute) {
 			text = "OpenClaw 任务已完成，但 Gateway 没有返回可显示的文本。"
 		}
 		s.send(ctx, route.Address, text)
-		s.removeRoute(route.TurnID)
+		s.removeRoute(route)
 	case events.OpenClawMessageAborted:
 		s.send(ctx, route.Address, "OpenClaw 任务已停止。")
-		s.removeRoute(route.TurnID)
+		s.removeRoute(route)
 	case events.OpenClawMessageFailed:
 		reason := payloadString(event.Payload, "error")
 		if reason == "" {
 			reason = "Gateway 返回了错误。"
 		}
 		s.send(ctx, route.Address, "OpenClaw 任务失败："+reason)
-		s.removeRoute(route.TurnID)
+		s.removeRoute(route)
 	}
 }
 
 func (s *Service) handleInteractionEvent(event events.Event) {
 	s.mu.Lock()
-	route := s.routes[event.TurnID]
+	route := s.routeForEventLocked(event)
 	s.mu.Unlock()
 	if route == nil || route.ThreadID != event.ThreadID {
 		return
@@ -1302,7 +1389,7 @@ func (s *Service) handleAdapterEvent(event AdapterEvent) {
 		eventType = events.QQBotConnected
 		status := s.transport.QQBotStatus()
 		s.onAppID(status.AppID)
-		s.refreshBindingCount(status.AppID)
+		s.refreshBindingCount()
 	case "ready":
 		eventType = events.QQBotReady
 	case "disconnected":
@@ -1536,12 +1623,33 @@ func (s *Service) publishMessage(eventType string, message channels.InboundMessa
 }
 
 func (s *Service) findBinding(address channels.ChannelAddress) (bindings.Binding, bool) {
-	binding, ok := s.bindings.FindAddress("qqbot", address.AccountID, qqbotConversationType(address.ConversationType), address.ChatID, "")
+	owner := strings.TrimSpace(address.ChannelProfileID)
+	if owner == "" {
+		owner = address.AccountID
+	}
+	binding, ok := s.bindings.FindProfileAddress("qqbot", owner, qqbotConversationType(address.ConversationType), address.ChatID, "")
+	if !ok && address.ChannelProfileID == "" {
+		binding, ok = s.bindings.FindAddress("qqbot", address.AccountID, qqbotConversationType(address.ConversationType), address.ChatID, "")
+	}
 	return binding, ok && binding.Enabled
 }
 
-func (s *Service) refreshBindingCount(accountID string) {
-	accountID = strings.TrimSpace(accountID)
+func (s *Service) ownsBinding(binding bindings.Binding) bool {
+	profileID := s.channelProfile()
+	if profileID == "" {
+		return binding.ChannelProfileID == "" && binding.ResourceID == ""
+	}
+	return binding.ResourceID == profileID || binding.ChannelProfileID == profileID
+}
+
+func (s *Service) refreshBindingCount() {
+	profileID := s.channelProfile()
+	if profileID != "" {
+		s.transport.SetBindingCount(s.bindings.CountChannelProfile("qqbot", profileID))
+		return
+	}
+	status := s.transport.QQBotStatus()
+	accountID := strings.TrimSpace(status.AppID)
 	if accountID == "" {
 		s.transport.SetBindingCount(0)
 		return
@@ -1563,12 +1671,23 @@ func (s *Service) onAppID(appID string) {
 func (s *Service) routeActive(route *turnRoute) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.routes[route.TurnID] == route && !route.Revoked
+	current := s.routes[routeMapKey(route.Backend, route.SessionKey, route.TurnID)]
+	if current == nil {
+		current = s.routes[route.TurnID]
+	}
+	return current == route && !route.Revoked
 }
 
-func (s *Service) removeRoute(turnID string) {
+func (s *Service) removeRoute(route *turnRoute) {
+	if route == nil {
+		return
+	}
+	turnID := route.TurnID
 	s.mu.Lock()
-	delete(s.routes, turnID)
+	delete(s.routes, routeMapKey(route.Backend, route.SessionKey, route.TurnID))
+	if s.routes[turnID] == route {
+		delete(s.routes, turnID)
+	}
 	for id, flow := range s.flows {
 		if flow.TurnID == turnID {
 			delete(s.flowByInput, inputKey(flow.Address, flow.UserID))
@@ -1576,6 +1695,29 @@ func (s *Service) removeRoute(turnID string) {
 		}
 	}
 	s.mu.Unlock()
+}
+
+func (s *Service) routeForEventLocked(event events.Event) *turnRoute {
+	if route := s.routes[routeMapKey(eventBackend(event), event.ThreadID, event.TurnID)]; route != nil {
+		return route
+	}
+	return s.routes[event.TurnID] // legacy in-memory route compatibility
+}
+
+func routeMapKey(backend, targetID, turnID string) string {
+	return strings.Join([]string{strings.ToLower(strings.TrimSpace(backend)), strings.TrimSpace(targetID), strings.TrimSpace(turnID)}, "\x00")
+}
+
+func eventBackend(event events.Event) string {
+	if event.Payload != nil {
+		if backend, ok := event.Payload["backend"].(string); ok && strings.TrimSpace(backend) != "" {
+			return strings.ToLower(strings.TrimSpace(backend))
+		}
+	}
+	if strings.HasPrefix(event.EventType, "openclaw.") {
+		return conversation.BackendOpenClaw
+	}
+	return conversation.BackendCodex
 }
 
 func (s *Service) clearTurnInput(turnID string) {
@@ -1707,8 +1849,8 @@ func cloneAnswers(source map[string][]string) map[string][]string {
 func safeBindingPayload(binding bindings.Binding) map[string]any {
 	backend := bindingBackend(binding)
 	return map[string]any{
-		"bindingId": binding.ID, "backend": backend, "sessionKey": shortID(firstNonEmpty(binding.SessionKey, binding.ThreadID)), "channelType": "qqbot", "conversationType": binding.ConversationType,
-		"account": maskID(binding.AccountID), "chat": maskID(binding.ChatID), "threadId": shortID(binding.ThreadID),
+		"bindingId": binding.ID, "backend": backend, "targetId": shortID(firstNonEmpty(binding.TargetID, binding.SessionKey, binding.ThreadID)), "sessionKey": shortID(firstNonEmpty(binding.SessionKey, binding.ThreadID)), "channelType": "qqbot", "channelProfileId": binding.ChannelProfileID, "conversationType": binding.ConversationType,
+		"conversationId": maskID(binding.ConversationID), "account": maskID(binding.AccountID), "chat": maskID(binding.ChatID), "threadId": shortID(binding.ThreadID),
 	}
 }
 
@@ -1737,6 +1879,23 @@ func parseOpenClawSelector(value string) (string, bool) {
 	return "", false
 }
 
+func parseBindingTarget(value string) (backend, target string) {
+	value = strings.TrimSpace(value)
+	parts := strings.Fields(value)
+	if len(parts) >= 2 {
+		switch strings.ToLower(parts[0]) {
+		case conversation.BackendCodex:
+			return conversation.BackendCodex, strings.Join(parts[1:], " ")
+		case conversation.BackendOpenClaw:
+			return conversation.BackendOpenClaw, strings.Join(parts[1:], " ")
+		}
+	}
+	if key, ok := parseOpenClawSelector(value); ok {
+		return conversation.BackendOpenClaw, key
+	}
+	return conversation.BackendCodex, value
+}
+
 func payloadString(payload map[string]any, key string) string {
 	if payload == nil {
 		return ""
@@ -1755,7 +1914,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func addressKey(address channels.ChannelAddress) string {
-	return strings.Join([]string{"qqbot", address.AccountID, qqbotConversationType(address.ConversationType), address.ChatID}, "\x00")
+	return strings.Join([]string{"qqbot", address.ChannelProfileID, address.AccountID, qqbotConversationType(address.ConversationType), address.ChatID}, "\x00")
 }
 
 func inputKey(address channels.ChannelAddress, userID string) string {
@@ -1763,7 +1922,7 @@ func inputKey(address channels.ChannelAddress, userID string) string {
 }
 
 func sameAddress(left, right channels.ChannelAddress) bool {
-	return strings.EqualFold(left.ChannelType, right.ChannelType) && left.AccountID == right.AccountID && qqbotConversationType(left.ConversationType) == qqbotConversationType(right.ConversationType) && left.ChatID == right.ChatID
+	return strings.EqualFold(left.ChannelType, right.ChannelType) && left.ChannelProfileID == right.ChannelProfileID && left.AccountID == right.AccountID && qqbotConversationType(left.ConversationType) == qqbotConversationType(right.ConversationType) && left.ChatID == right.ChatID
 }
 
 func qqbotConversationType(value string) string {

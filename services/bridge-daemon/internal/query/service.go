@@ -146,29 +146,13 @@ func (s *Service) threads(ctx context.Context, arguments []string) string {
 		}
 		fmt.Fprintf(&output, "#%d %s · %s\n", thread.Number, displayTitle(thread.Title), statusChinese(state))
 	}
-	if page == 1 && s.openclaw != nil {
-		if sessions, openclawErr := s.openclaw.ListSessions(ctx, 20); openclawErr == nil && len(sessions) > 0 {
-			if output.Len() > 0 {
-				output.WriteString("\n")
-			}
-			output.WriteString("[OpenClaw] 会话\n\n")
-			for _, session := range sessions {
-				state := session.Status
-				if state == "" {
-					state = "idle"
-				}
-				fmt.Fprintf(&output, "[OpenClaw] %s · %s\n", displayTitle(session.Title), statusChinese(state))
-				fmt.Fprintf(&output, "  绑定：/bind oc:%s\n", session.Key)
-			}
-		}
-	}
 	if output.Len() == 0 {
 		if page == 1 {
-			return "当前没有可用的 Codex 或 OpenClaw 会话。"
+			return "当前没有可用的 Codex 会话。"
 		}
 		return "该页没有会话。"
 	}
-	output.WriteString("\n回复：\n#编号 你的消息；OpenClaw 使用 /bind oc:<session-key> 后直接发送")
+	output.WriteString("\n回复：\n#编号 你的消息")
 	return output.String()
 }
 

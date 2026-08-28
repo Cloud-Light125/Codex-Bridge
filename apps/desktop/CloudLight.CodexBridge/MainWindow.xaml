@@ -15,8 +15,10 @@
                 <StackPanel Grid.Row="1">
                     <TextBlock Text="工作区" Style="{StaticResource EyebrowTextStyle}" Margin="20,10,0,8"/>
                     <RadioButton Content="概览" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsOverviewPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="overview"/>
-                    <RadioButton Content="Codex 会话" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsSessionsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="sessions"/>
-                    <RadioButton Content="远程渠道" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsChannelsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="channels"/>
+                    <RadioButton Content="Codex" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsSessionsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="sessions"/>
+                    <RadioButton Content="OpenClaw" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsOpenClawPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="openclaw"/>
+                    <RadioButton Content="QQ" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsQqPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="qq"/>
+                    <RadioButton Content="Telegram" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsTelegramPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="telegram"/>
                     <RadioButton Content="指令" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsCommandsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="commands"/>
                     <RadioButton Content="消息同步" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsMirrorPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="mirror"/>
                     <RadioButton Content="备份与恢复" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsBackupPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="backup"/>

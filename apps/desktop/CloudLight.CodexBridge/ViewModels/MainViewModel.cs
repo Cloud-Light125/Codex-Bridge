@@ -29,8 +29,8 @@ public sealed class MainViewModel : ObservableObject
     private bool _initialized;
     private bool _isCodexDiscoveryRetrying;
 
-    public MainViewModel(DaemonProcessManager daemon, BridgeApiClient api, SessionsViewModel sessions,
-        ChannelsViewModel channels, CommandsViewModel commands, OverviewViewModel overview, MirrorViewModel mirror, BackupViewModel backup,
+    public MainViewModel(DaemonProcessManager daemon, BridgeApiClient api, SessionsViewModel sessions, OpenClawViewModel openClaw,
+        ChannelProfilesViewModel channelProfiles, CommandsViewModel commands, OverviewViewModel overview, MirrorViewModel mirror, BackupViewModel backup,
         SettingsViewModel settingsViewModel, LogsViewModel logsViewModel, UserSettings settings,
         SettingsService settingsService, LogService logs, CodexDiscoveryService codexDiscoveryService,
         CodexDiscoveryResult codexDiscovery)
@@ -38,7 +38,8 @@ public sealed class MainViewModel : ObservableObject
         _daemon = daemon;
         _api = api;
         Sessions = sessions;
-        Channels = channels;
+        OpenClaw = openClaw;
+        ChannelProfiles = channelProfiles;
         Commands = commands;
         Overview = overview;
         Mirror = mirror;
@@ -60,7 +61,8 @@ public sealed class MainViewModel : ObservableObject
     }
 
     public SessionsViewModel Sessions { get; }
-    public ChannelsViewModel Channels { get; }
+    public OpenClawViewModel OpenClaw { get; }
+    public ChannelProfilesViewModel ChannelProfiles { get; }
     public CommandsViewModel Commands { get; }
     public OverviewViewModel Overview { get; }
     public MirrorViewModel Mirror { get; }
@@ -70,11 +72,13 @@ public sealed class MainViewModel : ObservableObject
     public ICommand NavigateCommand { get; }
     public ICommand RefreshCommand { get; }
     public string CurrentPageKey { get; private set; }
-    public string PageTitle => CurrentPageKey switch { "sessions" => "会话", "channels" => "远程渠道", "commands" => "指令管理", "mirror" => "消息同步", "backup" => "备份与恢复", "settings" => "设置", "logs" => "运行日志", _ => "概览" };
-    public string PageDescription => CurrentPageKey switch { "sessions" => "浏览 Codex 与 OpenClaw 会话、处理等待事项并继续对话", "channels" => "管理 QQ 机器人与 Telegram", "commands" => "统一管理 QQ 和 Telegram 使用的远程指令", "mirror" => "将 Codex 的最终回答发送到指定渠道", "backup" => "备份或恢复 Codex 与应用数据", "settings" => "管理启动、窗口、外观、Codex 与 OpenClaw 设置", "logs" => "查看本机运行信息和错误详情", _ => "查看 Codex、OpenClaw、远程渠道与消息同步状态" };
+    public string PageTitle => CurrentPageKey switch { "sessions" => "Codex", "openclaw" => "OpenClaw", "qq" => "QQ", "telegram" => "Telegram", "commands" => "指令管理", "mirror" => "消息同步", "backup" => "备份与恢复", "settings" => "设置", "logs" => "运行日志", _ => "概览" };
+    public string PageDescription => CurrentPageKey switch { "sessions" => "只显示 Codex Thread 与 Codex 消息历史", "openclaw" => "独立查看 OpenClaw Gateway、Session 与消息历史", "qq" => "管理 QQ Bot Profile、Gateway 连接与后端分配", "telegram" => "管理 Telegram Profile、Long Polling 与后端分配", "commands" => "统一管理 QQ 和 Telegram 使用的远程指令", "mirror" => "将 Codex 的最终回答发送到指定渠道", "backup" => "备份或恢复 Codex 与应用数据", "settings" => "管理启动、窗口、外观、OpenClaw 与消息渠道", "logs" => "查看本机运行信息和错误详情", _ => "查看 Codex、OpenClaw、远程渠道与消息同步状态" };
     public bool IsOverviewPage => CurrentPageKey == "overview";
     public bool IsSessionsPage => CurrentPageKey == "sessions";
-    public bool IsChannelsPage => CurrentPageKey == "channels";
+    public bool IsOpenClawPage => CurrentPageKey == "openclaw";
+    public bool IsQqPage => CurrentPageKey == "qq";
+    public bool IsTelegramPage => CurrentPageKey == "telegram";
     public bool IsCommandsPage => CurrentPageKey == "commands";
     public bool IsMirrorPage => CurrentPageKey == "mirror";
     public bool IsBackupPage => CurrentPageKey == "backup";
@@ -117,7 +121,8 @@ public sealed class MainViewModel : ObservableObject
             if (!_codexDiscovery.Found) EnsureCodexDiscoveryRetryStarted();
             await RefreshAsync();
             await InitializeRemoteChannelsAsync(forceRetry: false);
-			await Settings.InitializeOpenClawAsync(_lifetime.Token);
+            await Settings.InitializeOpenClawAsync(_lifetime.Token);
+            await OpenClaw.RefreshAsync(_lifetime.Token);
             if (CurrentPageKey == "commands") await Commands.EnsureInitializedAsync(_lifetime.Token);
             _initialized = true;
         }
@@ -139,7 +144,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(CurrentPageKey));
         OnPropertyChanged(nameof(PageTitle));
         OnPropertyChanged(nameof(PageDescription));
-        OnPropertyChanged(nameof(IsOverviewPage)); OnPropertyChanged(nameof(IsSessionsPage)); OnPropertyChanged(nameof(IsChannelsPage)); OnPropertyChanged(nameof(IsCommandsPage));
+        OnPropertyChanged(nameof(IsOverviewPage)); OnPropertyChanged(nameof(IsSessionsPage)); OnPropertyChanged(nameof(IsOpenClawPage)); OnPropertyChanged(nameof(IsQqPage)); OnPropertyChanged(nameof(IsTelegramPage)); OnPropertyChanged(nameof(IsCommandsPage));
         OnPropertyChanged(nameof(IsMirrorPage)); OnPropertyChanged(nameof(IsBackupPage)); OnPropertyChanged(nameof(IsSettingsPage)); OnPropertyChanged(nameof(IsLogsPage));
         _settings.LastPage = CurrentPageKey;
         _ = _settingsService.SaveAsync(_settings);
@@ -149,10 +154,15 @@ public sealed class MainViewModel : ObservableObject
 
     private object ResolvePage(string key) => key switch
     {
-        "sessions" => Sessions, "channels" => Channels, "commands" => Commands, "mirror" => Mirror, "backup" => Backup,
+        "sessions" => Sessions,
+        "openclaw" => OpenClaw,
+        "qq" => SelectChannelPage("qqbot"),
+        "telegram" => SelectChannelPage("telegram"),
+        "commands" => Commands, "mirror" => Mirror, "backup" => Backup,
         "settings" => Settings, "logs" => Logs, _ => Overview
     };
-    private static string NormalizePage(string? key) => key is "overview" or "sessions" or "channels" or "commands" or "mirror" or "backup" or "settings" or "logs" ? key : "overview";
+    private object SelectChannelPage(string platform) { ChannelProfiles.SelectPlatform(platform); return ChannelProfiles; }
+    private static string NormalizePage(string? key) => key == "channels" ? "telegram" : key is "overview" or "sessions" or "openclaw" or "qq" or "telegram" or "commands" or "mirror" or "backup" or "settings" or "logs" ? key : "overview";
 
     public async Task RefreshAsync()
     {
@@ -177,6 +187,7 @@ public sealed class MainViewModel : ObservableObject
                 ErrorMessage = string.IsNullOrWhiteSpace(status.LastError) ? "" : UiText.UserError(status.LastError, "连接");
             }
 			await Sessions.RefreshAsync(_lifetime.Token);
+			await OpenClaw.RefreshAsync(_lifetime.Token);
 			await Settings.RefreshOpenClawAsync(_lifetime.Token);
         }
         catch (Exception exception)
@@ -217,24 +228,26 @@ public sealed class MainViewModel : ObservableObject
         }
         await RefreshAsync();
         await InitializeRemoteChannelsAsync(forceRetry: true);
-		await Settings.InitializeOpenClawAsync(_lifetime.Token);
+        await Settings.InitializeOpenClawAsync(_lifetime.Token);
+        await OpenClaw.RefreshAsync(_lifetime.Token);
         await Commands.RefreshAsync(_lifetime.Token);
     }
 
     private async Task InitializeRemoteChannelsAsync(bool forceRetry)
     {
-        // The daemon creates its channel services before publishing its ready message.
-        // Load local secrets and configure/start those services only after API connection,
-        // then enable message mirroring so it cannot race channel initialization.
-        await Channels.EnsureInitializedAsync(_lifetime.Token, forceRetry).ConfigureAwait(false);
+        // Restore profile metadata and DPAPI credentials after the daemon is
+        // connected. The daemon deduplicates shared physical transports before
+        // any poller or QQ Gateway is started.
+        await ChannelProfiles.EnsureInitializedAsync(_lifetime.Token, forceRetry).ConfigureAwait(false);
         await Settings.InitializeMirrorAsync(_settings.MirrorAutoStart, _lifetime.Token).ConfigureAwait(false);
     }
 
     private void OnEventReceived(object? sender, BridgeEvent bridgeEvent)
     {
         QueueUiAction(() => Sessions.ApplyEvent(bridgeEvent));
-        if (bridgeEvent.EventType.StartsWith("channel.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("binding.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("telegram.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qq.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qqbot.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("openclaw.", StringComparison.OrdinalIgnoreCase))
-            if (Channels.IsContentReady) QueueUiAction(() => Channels.ApplyEvent(bridgeEvent));
+        QueueUiAction(() => OpenClaw.ApplyEvent(bridgeEvent));
+        if (bridgeEvent.EventType.StartsWith("channel.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("binding.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("telegram.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qq", StringComparison.OrdinalIgnoreCase))
+            QueueUiAction(() => ChannelProfiles.ApplyEvent(bridgeEvent));
         if (bridgeEvent.EventType is "codex.connected" or "codex.disconnected" or "codex.config_updated" or "openclaw.connected" or "openclaw.disconnected" or "openclaw.reconnecting" or "openclaw.session.updated" or "error") { QueueUiTask(RefreshAsync); return; }
         if (bridgeEvent.EventType != "thread.updated") return;
         _eventRefresh?.Cancel(); _eventRefresh?.Dispose();
@@ -252,7 +265,7 @@ public sealed class MainViewModel : ObservableObject
     {
         if (!connected || !_initialized) return;
         QueueUiTask(RefreshAsync);
-        if (Channels.IsContentReady) QueueUiTask(() => Channels.RefreshAsync(_lifetime.Token, preserveOperationMessage: true));
+        QueueUiTask(() => ChannelProfiles.RefreshAsync(_lifetime.Token, preserveStatus: true));
     }
     private void QueueUiAction(Action action) => _ = RunUiActionAsync(action);
     private void QueueUiTask(Func<Task> action) => _ = RunUiTaskAsync(action);
@@ -389,7 +402,6 @@ public sealed class MainViewModel : ObservableObject
         _lifetime.Cancel();
         await CancelCodexDiscoveryRetryAsync().ConfigureAwait(false);
         _codexRetryCancellation?.Dispose();
-        await Channels.StopAsync().ConfigureAwait(false);
         _api.Dispose(); await _daemon.StopAsync().ConfigureAwait(false); _lifetime.Dispose();
     }
 }
