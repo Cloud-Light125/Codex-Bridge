@@ -461,8 +461,8 @@ public sealed class UserSettings
 	public string QqCommandPrefix { get; set; } = "/codex";
 	public string QqProxyMode { get; set; } = "environment";
 	public string QqProxyUrl { get; set; } = "";
-	// Channel profiles intentionally hold only non-sensitive configuration.
-	// Bot tokens and QQ AppSecrets remain in profile-scoped DPAPI stores.
+	// Telegram tokens remain in profile-scoped DPAPI stores. QQ AppSecrets are
+	// deliberately persisted with their profile so they survive a reinstall.
 	public List<ChannelProfileSettings> ChannelProfiles { get; set; } = [];
 	public BackendChannelRoutingSettings ChannelRouting { get; set; } = new();
 	// Prevent a user who deliberately removed every profile from being treated
@@ -507,6 +507,7 @@ public sealed class TelegramProfileSettings
 public sealed class QqProfileSettings
 {
 	public string AppId { get; set; } = "";
+	public string AppSecret { get; set; } = "";
 	public bool AutoStart { get; set; }
 	public bool ReconnectEnabled { get; set; } = true;
 	public bool SendProgressUpdates { get; set; } = true;
@@ -521,20 +522,52 @@ public sealed class QqProfileSettings
 
 public sealed class BackendChannelRouteSettings
 {
-	public List<string> TelegramProfileIds { get; set; } = [];
-	public List<string> QqProfileIds { get; set; } = [];
+	private List<string> _telegramProfileIds = [];
+	private List<string> _qqProfileIds = [];
+
+	// System.Text.Json assigns explicit JSON null values through the setter.
+	// Keep routing collections usable for older daemon responses as well as
+	// partially populated settings files.
+	public List<string> TelegramProfileIds
+	{
+		get => _telegramProfileIds;
+		set => _telegramProfileIds = value ?? [];
+	}
+
+	public List<string> QqProfileIds
+	{
+		get => _qqProfileIds;
+		set => _qqProfileIds = value ?? [];
+	}
 }
 
 public sealed class BackendChannelRoutingSettings
 {
-	public BackendChannelRouteSettings Codex { get; set; } = new();
-	public BackendChannelRouteSettings OpenClaw { get; set; } = new();
+	private BackendChannelRouteSettings _codex = new();
+	private BackendChannelRouteSettings _openClaw = new();
+
+	public BackendChannelRouteSettings Codex
+	{
+		get => _codex;
+		set => _codex = value ?? new();
+	}
+
+	public BackendChannelRouteSettings OpenClaw
+	{
+		get => _openClaw;
+		set => _openClaw = value ?? new();
+	}
 }
 
 public sealed class ChannelProfilesResponse
 {
 	public List<ChannelProfileStatus> Profiles { get; set; } = [];
-	public BackendChannelRoutingSettings Routing { get; set; } = new();
+	private BackendChannelRoutingSettings _routing = new();
+	public BackendChannelRoutingSettings Routing
+	{
+		get => _routing;
+		set => _routing = value ?? new();
+	}
 }
 
 // These are display-safe daemon responses.  They never contain a Telegram

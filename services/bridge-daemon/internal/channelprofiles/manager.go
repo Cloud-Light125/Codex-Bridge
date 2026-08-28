@@ -953,11 +953,17 @@ func normalizeIDs(values []string) []string {
 }
 
 func cloneRouting(value BackendRouting) BackendRouting {
-	value.Codex.TelegramProfileIDs = append([]string(nil), value.Codex.TelegramProfileIDs...)
-	value.Codex.QQProfileIDs = append([]string(nil), value.Codex.QQProfileIDs...)
-	value.OpenClaw.TelegramProfileIDs = append([]string(nil), value.OpenClaw.TelegramProfileIDs...)
-	value.OpenClaw.QQProfileIDs = append([]string(nil), value.OpenClaw.QQProfileIDs...)
+	value.Codex.TelegramProfileIDs = cloneIDs(value.Codex.TelegramProfileIDs)
+	value.Codex.QQProfileIDs = cloneIDs(value.Codex.QQProfileIDs)
+	value.OpenClaw.TelegramProfileIDs = cloneIDs(value.OpenClaw.TelegramProfileIDs)
+	value.OpenClaw.QQProfileIDs = cloneIDs(value.OpenClaw.QQProfileIDs)
 	return value
+}
+
+func cloneIDs(values []string) []string {
+	result := make([]string, len(values))
+	copy(result, values)
+	return result
 }
 
 func cloneConfigureRequest(value ConfigureRequest) ConfigureRequest {

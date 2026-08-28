@@ -14,7 +14,7 @@ public partial class ChannelProfilesView : UserControl
     private void DeleteProfile_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not ChannelProfilesViewModel viewModel || sender is not Button { Tag: ChannelProfileViewModel profile }) return;
-        if (MessageBox.Show($"确定删除 {profile.Name} 吗？这会删除本机安全凭据；已有聊天绑定需先解除。", "删除 Channel Profile", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        if (MessageBox.Show($"确定删除 {profile.Name} 吗？这会删除本机保存的凭据；已有聊天绑定需先解除。", "删除 Channel Profile", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
         viewModel.DeleteProfileCommand.Execute(profile);
     }
 }

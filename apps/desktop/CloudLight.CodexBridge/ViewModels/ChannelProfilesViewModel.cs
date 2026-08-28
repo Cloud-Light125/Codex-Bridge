@@ -94,9 +94,21 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         StatusMessage = "正在恢复消息渠道 Profile…";
         try
         {
+            var restoredProfiles = new List<(ChannelProfileViewModel Profile, string? Secret)>();
+            var migratedQqSecret = false;
             foreach (var profile in Profiles)
             {
-                var secret = await LoadSecretAsync(profile, cancellationToken);
+                var restored = await LoadSecretAsync(profile, cancellationToken);
+                restoredProfiles.Add((profile, restored.Secret));
+                migratedQqSecret |= restored.MigratedFromDpapi;
+            }
+            if (migratedQqSecret)
+            {
+                PersistProfilesToSettings();
+                await _settingsService.SaveAsync(_settings);
+            }
+            foreach (var (profile, secret) in restoredProfiles)
+            {
                 profile.SetCredentialConfigured(!string.IsNullOrWhiteSpace(secret));
                 var status = await _api.ConfigureChannelProfileAsync(profile.Id, profile.ToRequest(secret), cancellationToken);
                 profile.ApplyStatus(status);
@@ -109,7 +121,7 @@ public sealed class ChannelProfilesViewModel : ObservableObject
             }
             await RefreshAsync(cancellationToken, preserveStatus: true);
             _initialized = true;
-            StatusMessage = "Profile、路由与本机安全凭据已恢复。";
+            StatusMessage = "Profile、路由与已保存凭据已恢复。";
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -214,11 +226,16 @@ public sealed class ChannelProfilesViewModel : ObservableObject
             if (profile.HasPendingSecret)
             {
                 await SaveSecretAsync(profile, profile.TakePendingSecret());
+                if (profile.IsQq)
+                {
+                    PersistProfilesToSettings();
+                    await _settingsService.SaveAsync(_settings);
+                }
             }
-            var secret = await LoadSecretAsync(profile);
-            var status = await _api.ConfigureChannelProfileAsync(profile.Id, profile.ToRequest(secret));
+            var restored = await LoadSecretAsync(profile);
+            var status = await _api.ConfigureChannelProfileAsync(profile.Id, profile.ToRequest(restored.Secret));
             profile.ApplyStatus(status);
-            profile.SetCredentialConfigured(!string.IsNullOrWhiteSpace(secret));
+            profile.SetCredentialConfigured(!string.IsNullOrWhiteSpace(restored.Secret));
             PersistProfilesToSettings();
             await _settingsService.SaveAsync(_settings);
             if (profile.Enabled && profile.AutoStart)
@@ -226,7 +243,9 @@ public sealed class ChannelProfilesViewModel : ObservableObject
                 profile.ApplyStatus(await _api.StartChannelProfileAsync(profile.Id));
             }
             await SaveRoutingAsync();
-            StatusMessage = $"已保存 {profile.Name}；凭据仍只保存在 DPAPI 安全存储。";
+            StatusMessage = profile.IsQq
+                ? $"已保存 {profile.Name}；AppSecret 已保存到 settings.json 和 DPAPI。"
+                : $"已保存 {profile.Name}；凭据仍只保存在 DPAPI 安全存储。";
         }
         catch (Exception exception)
         {
@@ -325,25 +344,61 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         _settings.ChannelRouting = BuildRouting();
     }
 
-    private static bool ContainsRoute(BackendChannelRouteSettings route, ChannelProfileViewModel profile) =>
-        profile.IsTelegram ? route.TelegramProfileIds.Any(id => string.Equals(id, profile.Id, StringComparison.OrdinalIgnoreCase))
-            : route.QqProfileIds.Any(id => string.Equals(id, profile.Id, StringComparison.OrdinalIgnoreCase));
+    private static bool ContainsRoute(BackendChannelRouteSettings? route, ChannelProfileViewModel profile) =>
+        (profile.IsTelegram ? route?.TelegramProfileIds : route?.QqProfileIds)?
+            .Any(id => string.Equals(id, profile.Id, StringComparison.OrdinalIgnoreCase)) == true;
 
     private bool MatchesPlatform(object item) => item is ChannelProfileViewModel profile && profile.Platform == SelectedPlatform;
 
-    private static async Task<string?> LoadSecretAsync(ChannelProfileViewModel profile, CancellationToken cancellationToken = default) =>
-        profile.IsTelegram
-            ? await new TelegramSecretService(profile.Id).LoadAsync(cancellationToken)
-            : await new QqSecretService(profile.Id).LoadAsync(cancellationToken);
+    private static async Task<(string? Secret, bool MigratedFromDpapi)> LoadSecretAsync(ChannelProfileViewModel profile, CancellationToken cancellationToken = default)
+    {
+        if (profile.IsTelegram)
+            return (await new TelegramSecretService(profile.Id).LoadAsync(cancellationToken), false);
+        return await ResolveQqAppSecretAsync(
+            profile.QqSettings,
+            token => new QqSecretService(profile.Id).LoadAsync(token),
+            cancellationToken);
+    }
+
+    internal static async Task<(string? Secret, bool MigratedFromDpapi)> ResolveQqAppSecretAsync(
+        QqProfileSettings settings,
+        Func<CancellationToken, Task<string?>> loadDpapiAsync,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(loadDpapiAsync);
+
+        var storedSecret = settings.AppSecret?.Trim() ?? "";
+        if (storedSecret.Length > 0)
+        {
+            settings.AppSecret = storedSecret;
+            return (storedSecret, false);
+        }
+
+        var legacySecret = (await loadDpapiAsync(cancellationToken))?.Trim() ?? "";
+        if (legacySecret.Length == 0) return (null, false);
+
+        settings.AppSecret = legacySecret;
+        return (legacySecret, true);
+    }
 
     private static async Task SaveSecretAsync(ChannelProfileViewModel profile, string secret) {
         if (profile.IsTelegram) await new TelegramSecretService(profile.Id).SaveAsync(secret);
-        else await new QqSecretService(profile.Id).SaveAsync(secret);
+        else
+        {
+            var appSecret = secret.Trim();
+            await new QqSecretService(profile.Id).SaveAsync(appSecret);
+            profile.QqSettings.AppSecret = appSecret;
+        }
     }
 
     private static async Task DeleteSecretAsync(ChannelProfileViewModel profile) {
         if (profile.IsTelegram) await new TelegramSecretService(profile.Id).DeleteAsync();
-        else await new QqSecretService(profile.Id).DeleteAsync();
+        else
+        {
+            await new QqSecretService(profile.Id).DeleteAsync();
+            profile.QqSettings.AppSecret = "";
+        }
     }
 }
 
@@ -378,6 +433,7 @@ public sealed class ChannelProfileViewModel : ObservableObject
     public bool SendProgressUpdates { get => IsTelegram ? _settings.Telegram.SendProgressUpdates : _settings.Qq.SendProgressUpdates; set { if (IsTelegram) _settings.Telegram.SendProgressUpdates = value; else _settings.Qq.SendProgressUpdates = value; OnPropertyChanged(); } }
     public bool ReconnectEnabled { get => _settings.Qq.ReconnectEnabled; set { _settings.Qq.ReconnectEnabled = value; OnPropertyChanged(); } }
     public string AppId { get => _settings.Qq.AppId; set { _settings.Qq.AppId = value?.Trim() ?? ""; OnPropertyChanged(); } }
+    internal QqProfileSettings QqSettings => _settings.Qq;
     public int PollingTimeoutSeconds { get => _settings.Telegram.PollingTimeoutSeconds; set { _settings.Telegram.PollingTimeoutSeconds = Math.Clamp(value, 10, 60); OnPropertyChanged(); } }
     public string ProxyMode { get => IsTelegram ? _settings.Telegram.ProxyMode : _settings.Qq.ProxyMode; set { if (IsTelegram) _settings.Telegram.ProxyMode = value; else _settings.Qq.ProxyMode = value; OnPropertyChanged(); } }
     public string ProxyUrl { get => IsTelegram ? _settings.Telegram.ProxyUrl : _settings.Qq.ProxyUrl; set { if (IsTelegram) _settings.Telegram.ProxyUrl = value?.Trim() ?? ""; else _settings.Qq.ProxyUrl = value?.Trim() ?? ""; OnPropertyChanged(); } }
@@ -387,7 +443,9 @@ public sealed class ChannelProfileViewModel : ObservableObject
     public string StatusText => string.IsNullOrWhiteSpace(_status.State) ? "未配置" : UiText.Status(_status.State);
     public string ConnectionText => _status.Connected ? "已连接" : _status.Running ? "连接中 / 重连中" : "已停止";
     public string SharedText => string.IsNullOrWhiteSpace(_status.SharedWithProfileId) ? "独立连接" : $"与 { _status.SharedWithProfileId } 共用凭据与连接";
-    public string CredentialSummary => HasPendingSecret ? "有未保存的凭据" : _credentialConfigured ? "凭据已由 DPAPI 安全保存" : "尚未保存凭据";
+    public string CredentialSummary => HasPendingSecret ? "有未保存的凭据" : _credentialConfigured
+        ? IsQq ? "AppSecret 已保存到 settings.json 和 DPAPI" : "凭据已由 DPAPI 安全保存"
+        : "尚未保存凭据";
     public string AccountText => IsTelegram ? (string.IsNullOrWhiteSpace(_status.BotUsername) ? _status.AccountId : $"@{_status.BotUsername}") : _status.AccountId;
     public string LastError => _status.LastError;
     public string BindingCountText => $"{_status.BindingCount} 个聊天绑定";
@@ -471,7 +529,7 @@ public sealed class ChannelProfileViewModel : ObservableObject
             },
             Qq = new QqProfileSettings
             {
-                AppId = _settings.Qq.AppId, AutoStart = _settings.Qq.AutoStart, ReconnectEnabled = _settings.Qq.ReconnectEnabled,
+                AppId = _settings.Qq.AppId, AppSecret = _settings.Qq.AppSecret, AutoStart = _settings.Qq.AutoStart, ReconnectEnabled = _settings.Qq.ReconnectEnabled,
                 SendProgressUpdates = _settings.Qq.SendProgressUpdates, AllowedUserOpenIds = [.. _settings.Qq.AllowedUserOpenIds],
                 AllowedGroupOpenIds = [.. _settings.Qq.AllowedGroupOpenIds], AllowedGroupMemberOpenIds = [.. _settings.Qq.AllowedGroupMemberOpenIds],
                 GroupTriggerMode = _settings.Qq.GroupTriggerMode, CommandPrefix = _settings.Qq.CommandPrefix,

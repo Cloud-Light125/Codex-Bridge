@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using CloudLight.CodexBridge.Models;
 
 namespace CloudLight.CodexBridge.Services;
@@ -8,7 +9,8 @@ public sealed class SettingsService
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true
+        WriteIndented = true,
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
     };
 
     public string DataDirectory { get; } = Path.Combine(
@@ -169,6 +171,7 @@ public sealed class SettingsService
 			profile.Telegram.ProxyUrl = NormalizeProfileProxy(profile.Telegram.ProxyMode, profile.Telegram.ProxyUrl, out var telegramMode);
 			profile.Telegram.ProxyMode = telegramMode;
 			profile.Qq.AppId = profile.Qq.AppId?.Trim() ?? "";
+			profile.Qq.AppSecret = profile.Qq.AppSecret?.Trim() ?? "";
 			profile.Qq.AllowedUserOpenIds = NormalizeOpenIds(profile.Qq.AllowedUserOpenIds);
 			profile.Qq.AllowedGroupOpenIds = NormalizeOpenIds(profile.Qq.AllowedGroupOpenIds);
 			profile.Qq.AllowedGroupMemberOpenIds = NormalizeOpenIds(profile.Qq.AllowedGroupMemberOpenIds);

@@ -80,6 +80,84 @@ func TestTwoQQProfilesAndSharedTelegramCanRouteBothBackends(t *testing.T) {
 	}
 }
 
+func TestRoutingResponsesNormalizeNullEmptyAndPartialSlices(t *testing.T) {
+	manager := newTestManager(t)
+
+	// A newly started daemon has no routing configuration yet. Both the
+	// dedicated routing response and the profile-list response must still be
+	// safe for clients that enumerate every route collection.
+	assertRoutingSlices(t, manager.Routing())
+	assertEmptyRouting(t, manager.Routing(), "unconfigured routing")
+	assertRoutingJSONUsesArrays(t, manager.Routing())
+	assertRoutingSlices(t, manager.List().Routing)
+	assertRoutingJSONUsesArrays(t, manager.List())
+
+	for _, test := range []struct {
+		name string
+		json string
+	}{
+		{
+			name: "null fields",
+			json: `{"codex":{"telegramProfileIds":null,"qqProfileIds":null},"openClaw":null}`,
+		},
+		{
+			name: "empty arrays",
+			json: `{"codex":{"telegramProfileIds":[],"qqProfileIds":[]},"openClaw":{"telegramProfileIds":[],"qqProfileIds":[]}}`,
+		},
+		{
+			name: "both backends empty",
+			json: `{"codex":{},"openClaw":{}}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var input BackendRouting
+			if err := json.Unmarshal([]byte(test.json), &input); err != nil {
+				t.Fatalf("decode route input: %v", err)
+			}
+			routing, err := manager.SetRouting(input)
+			if err != nil {
+				t.Fatalf("set routing: %v", err)
+			}
+			assertRoutingSlices(t, routing)
+			assertEmptyRouting(t, routing, test.name)
+			assertRoutingJSONUsesArrays(t, routing)
+		})
+	}
+
+	configureTelegram(t, manager, "telegram-1", "Telegram-1", "123456:routing-test-token")
+	configureQQ(t, manager, "qq-1", "QQ-1", "10001", "routing-test-secret")
+
+	var qqOnly BackendRouting
+	if err := json.Unmarshal([]byte(`{"codex":{"qqProfileIds":["qq-1"]}}`), &qqOnly); err != nil {
+		t.Fatalf("decode QQ-only route: %v", err)
+	}
+	routing, err := manager.SetRouting(qqOnly)
+	if err != nil {
+		t.Fatalf("set QQ-only route: %v", err)
+	}
+	assertRoutingSlices(t, routing)
+	assertRoutingJSONUsesArrays(t, routing)
+	if len(routing.Codex.TelegramProfileIDs) != 0 || len(routing.OpenClaw.TelegramProfileIDs) != 0 ||
+		len(routing.OpenClaw.QQProfileIDs) != 0 || len(routing.Codex.QQProfileIDs) != 1 || routing.Codex.QQProfileIDs[0] != "qq-1" {
+		t.Fatalf("unexpected QQ-only route: %#v", routing)
+	}
+
+	var telegramOnly BackendRouting
+	if err := json.Unmarshal([]byte(`{"openClaw":{"telegramProfileIds":["telegram-1"]}}`), &telegramOnly); err != nil {
+		t.Fatalf("decode Telegram-only route: %v", err)
+	}
+	routing, err = manager.SetRouting(telegramOnly)
+	if err != nil {
+		t.Fatalf("set Telegram-only route: %v", err)
+	}
+	assertRoutingSlices(t, routing)
+	assertRoutingJSONUsesArrays(t, routing)
+	if len(routing.Codex.TelegramProfileIDs) != 0 || len(routing.Codex.QQProfileIDs) != 0 ||
+		len(routing.OpenClaw.QQProfileIDs) != 0 || len(routing.OpenClaw.TelegramProfileIDs) != 1 || routing.OpenClaw.TelegramProfileIDs[0] != "telegram-1" {
+		t.Fatalf("unexpected Telegram-only route: %#v", routing)
+	}
+}
+
 func TestPrepareBindingUsesExplicitBackendRoutingWithoutCrossingResources(t *testing.T) {
 	manager := newTestManager(t)
 	token := "123456:shared-telegram-token"
@@ -194,6 +272,42 @@ func defaultQQConfig(appID string, secret *string) *QQConfig {
 	return &QQConfig{
 		AppID: appID, AppSecret: secret, Enabled: true, Environment: "production", GroupTriggerMode: "official-at",
 		CommandPrefix: "/codex", GatewayReconnectEnabled: true, SendProgressUpdates: true,
+	}
+}
+
+func assertRoutingSlices(t *testing.T, routing BackendRouting) {
+	t.Helper()
+	for _, route := range []struct {
+		name string
+		ids  []string
+	}{
+		{"codex.telegramProfileIds", routing.Codex.TelegramProfileIDs},
+		{"codex.qqProfileIds", routing.Codex.QQProfileIDs},
+		{"openClaw.telegramProfileIds", routing.OpenClaw.TelegramProfileIDs},
+		{"openClaw.qqProfileIds", routing.OpenClaw.QQProfileIDs},
+	} {
+		if route.ids == nil {
+			t.Errorf("%s must be an empty slice, not nil", route.name)
+		}
+	}
+}
+
+func assertEmptyRouting(t *testing.T, routing BackendRouting, scenario string) {
+	t.Helper()
+	if len(routing.Codex.TelegramProfileIDs) != 0 || len(routing.Codex.QQProfileIDs) != 0 ||
+		len(routing.OpenClaw.TelegramProfileIDs) != 0 || len(routing.OpenClaw.QQProfileIDs) != 0 {
+		t.Fatalf("%s produced non-empty routing: %#v", scenario, routing)
+	}
+}
+
+func assertRoutingJSONUsesArrays(t *testing.T, value any) {
+	t.Helper()
+	payload, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal routing response: %v", err)
+	}
+	if strings.Contains(string(payload), "null") {
+		t.Fatalf("routing response contains null instead of []: %s", payload)
 	}
 }
 

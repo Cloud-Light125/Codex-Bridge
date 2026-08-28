@@ -1,8 +1,10 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using CloudLight.CodexBridge.Services;
 using CloudLight.CodexBridge.Models;
+using CloudLight.CodexBridge.ViewModels;
 using Microsoft.Win32;
 
 if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreCase))
@@ -149,6 +151,122 @@ if (args.Contains("--channel-profile-migration-tests", StringComparer.OrdinalIgn
 	Assert(codexOnly.Count == 1 && codexOnly[0].ThreadId == "thread-1",
 		"Codex 列表不得渲染 OpenClaw Session");
     Console.WriteLine("PASS channel profile migration, default routing, DPAPI secret-path compatibility, Codex/OpenClaw list separation");
+    return;
+}
+
+if (args.Contains("--channel-profile-routing-tests", StringComparer.OrdinalIgnoreCase))
+{
+    var routeJsonOptions = new JsonSerializerOptions
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+    BackendChannelRoutingSettings ParseRouting(string json) =>
+        JsonSerializer.Deserialize<BackendChannelRoutingSettings>(json, routeJsonOptions)
+        ?? throw new InvalidOperationException("路由 JSON 不得反序列化为 null");
+    void AssertEmptyRoutes(BackendChannelRoutingSettings routing, string scenario)
+    {
+        Assert(routing.Codex.TelegramProfileIds.Count == 0 && routing.Codex.QqProfileIds.Count == 0 &&
+               routing.OpenClaw.TelegramProfileIds.Count == 0 && routing.OpenClaw.QqProfileIds.Count == 0,
+            $"{scenario} 必须保留四个可用的空路由集合");
+    }
+
+    AssertEmptyRoutes(ParseRouting("""
+        {"codex":{"telegramProfileIds":null,"qqProfileIds":null},"openClaw":null}
+        """), "null 路由字段");
+    var nullResponse = JsonSerializer.Deserialize<ChannelProfilesResponse>("""{"profiles":[],"routing":null}""", routeJsonOptions)
+        ?? throw new InvalidOperationException("渠道 Profile 响应不得反序列化为 null");
+    AssertEmptyRoutes(nullResponse.Routing, "null 响应路由");
+    AssertEmptyRoutes(ParseRouting("""
+        {"codex":{"telegramProfileIds":[],"qqProfileIds":[]},"openClaw":{"telegramProfileIds":[],"qqProfileIds":[]}}
+        """), "空数组路由字段");
+    AssertEmptyRoutes(ParseRouting("""{"codex":{},"openClaw":{}}"""), "Codex/OpenClaw 均为空");
+
+    var qqOnly = ParseRouting("""{"codex":{"qqProfileIds":["qq-1"]},"openClaw":{"qqProfileIds":["qq-2"]}}""");
+    Assert(qqOnly.Codex.TelegramProfileIds.Count == 0 && qqOnly.OpenClaw.TelegramProfileIds.Count == 0 &&
+           qqOnly.Codex.QqProfileIds.SequenceEqual(["qq-1"]) && qqOnly.OpenClaw.QqProfileIds.SequenceEqual(["qq-2"]),
+        "只有 QQ 的路由不得产生 null 或 Telegram 分配");
+
+    var telegramOnly = ParseRouting("""{"codex":{"telegramProfileIds":["telegram-1"]},"openClaw":{"telegramProfileIds":["telegram-2"]}}""");
+    Assert(telegramOnly.Codex.QqProfileIds.Count == 0 && telegramOnly.OpenClaw.QqProfileIds.Count == 0 &&
+           telegramOnly.Codex.TelegramProfileIds.SequenceEqual(["telegram-1"]) && telegramOnly.OpenClaw.TelegramProfileIds.SequenceEqual(["telegram-2"]),
+        "只有 Telegram 的路由不得产生 null 或 QQ 分配");
+
+    Console.WriteLine("PASS channel profile routing null/empty/partial JSON normalization");
+    return;
+}
+
+if (args.Contains("--qq-profile-app-secret-tests", StringComparer.OrdinalIgnoreCase))
+{
+    const string appSecret = "qq-profile-app-secret-test";
+    var settingsJsonOptions = new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
+    var savedProfile = new ChannelProfileViewModel(new ChannelProfileSettings
+    {
+        Id = "qq-1",
+        Name = "QQ-1",
+        Platform = "qqbot",
+        Qq = new QqProfileSettings { AppId = "10001", AppSecret = appSecret }
+    });
+    var savedSettings = SettingsService.NormalizeForMigration(new UserSettings
+    {
+        ChannelProfilesMigrated = true,
+        ChannelProfiles = [savedProfile.ToSettings()]
+    });
+    var serializedSettings = JsonSerializer.Serialize(savedSettings, settingsJsonOptions);
+    Assert(serializedSettings.Contains("\"appSecret\"", StringComparison.Ordinal),
+        "QQ AppSecret 必须序列化到 settings.json");
+
+    var restartedSettings = SettingsService.NormalizeForMigration(
+        JsonSerializer.Deserialize<UserSettings>(serializedSettings, settingsJsonOptions)!);
+    var restartedQq = restartedSettings.ChannelProfiles.Single(profile => profile.Id == "qq-1").Qq;
+    var dpapiReads = 0;
+    var restored = await ChannelProfilesViewModel.ResolveQqAppSecretAsync(
+        restartedQq,
+        _ =>
+        {
+            dpapiReads++;
+            return Task.FromResult<string?>(null);
+        });
+    Assert(restored.Secret == appSecret && !restored.MigratedFromDpapi && dpapiReads == 0,
+        "重启后 settings.json 中的 QQ AppSecret 必须优先于不存在的 DPAPI 文件");
+    var request = new ChannelProfileViewModel(restartedSettings.ChannelProfiles.Single(profile => profile.Id == "qq-1"))
+        .ToRequest(restored.Secret);
+    Assert(request.Qq?.AppSecret == appSecret,
+        "settings.json 中的 QQ AppSecret 必须能恢复到 Profile 配置请求");
+
+    var legacyQq = new QqProfileSettings { AppId = "10001" };
+    var migrated = await ChannelProfilesViewModel.ResolveQqAppSecretAsync(
+        legacyQq,
+        _ => Task.FromResult<string?>(appSecret));
+    Assert(migrated.Secret == appSecret && migrated.MigratedFromDpapi && legacyQq.AppSecret == appSecret,
+        "旧 DPAPI QQ AppSecret 必须自动迁移到 Profile settings");
+
+    var migratedSettings = SettingsService.NormalizeForMigration(new UserSettings
+    {
+        ChannelProfilesMigrated = true,
+        ChannelProfiles =
+        [
+            new ChannelProfileSettings { Id = "qq-legacy", Name = "QQ-Legacy", Platform = "qqbot", Qq = legacyQq }
+        ]
+    });
+    var reloadedMigratedSettings = SettingsService.NormalizeForMigration(JsonSerializer.Deserialize<UserSettings>(
+        JsonSerializer.Serialize(migratedSettings, settingsJsonOptions), settingsJsonOptions)!);
+    var migratedDpapiReads = 0;
+    var restoredMigrated = await ChannelProfilesViewModel.ResolveQqAppSecretAsync(
+        reloadedMigratedSettings.ChannelProfiles.Single().Qq,
+        _ =>
+        {
+            migratedDpapiReads++;
+            return Task.FromResult<string?>(null);
+        });
+    Assert(restoredMigrated.Secret == appSecret && migratedDpapiReads == 0,
+        "迁移后的 QQ AppSecret 在 DPAPI 文件缺失时仍必须可恢复");
+
+    Console.WriteLine("PASS QQ Profile AppSecret settings persistence and DPAPI migration");
     return;
 }
 
