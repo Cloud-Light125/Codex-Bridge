@@ -1,5 +1,10 @@
 package control
 
+const (
+	TurnOriginQQ       = "qqbot"
+	TurnOriginTelegram = "telegram"
+)
+
 type ThreadSummary struct {
 	ThreadID    string `json:"threadId"`
 	Number      int    `json:"number"`

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.3",
+    [string]$Version = "1.1.0",
     [string]$OutputDirectory = "",
     [string]$InnoCompiler = ""
 )
@@ -48,12 +48,19 @@ if (Test-Path -LiteralPath $resolvedStageDirectory) {
 if ($LASTEXITCODE -ne 0) { throw "Self-contained application publish failed." }
 
 New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
-$defineVersion = '/DMyAppVersion="' + $Version + '"'
-$defineSource = '/DSourceDir="' + $resolvedStageDirectory + '"'
-$defineOutput = '/DOutputDir="' + $releaseDirectory + '"'
-$defineIcon = '/DAppIconFile="' + $iconFile + '"'
-& $InnoCompiler $defineVersion $defineSource $defineOutput $defineIcon $installerScript
-if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed." }
+$defineVersion = '/DMyAppVersion=' + $Version
+$defineSource = '/DSourceDir=' + $resolvedStageDirectory
+$defineOutput = '/DOutputDir=' + $releaseDirectory
+$defineIcon = '/DAppIconFile=' + $iconFile
+$compilerStartInfo = [Diagnostics.ProcessStartInfo]::new()
+$compilerStartInfo.FileName = $InnoCompiler
+$compilerStartInfo.UseShellExecute = $false
+foreach ($argument in @($defineVersion, $defineSource, $defineOutput, $defineIcon, $installerScript)) {
+    $compilerStartInfo.ArgumentList.Add($argument)
+}
+$compilerProcess = [Diagnostics.Process]::Start($compilerStartInfo)
+$compilerProcess.WaitForExit()
+if ($compilerProcess.ExitCode -ne 0) { throw "Inno Setup compilation failed." }
 
 $installerPath = Join-Path $releaseDirectory "CloudLight-CodexBridge-Setup-$Version-win-x64.exe"
 if (-not (Test-Path -LiteralPath $installerPath)) {

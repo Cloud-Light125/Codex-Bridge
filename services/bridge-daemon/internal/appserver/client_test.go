@@ -50,19 +50,41 @@ func TestTurnStartWireValuesMatchInstalledSchema(t *testing.T) {
 	}
 }
 
+func TestRemoteTurnWireValuesUseUnrestrictedNeverWithoutModel(t *testing.T) {
+	params, diagnostic, err := buildTurnStartParams("thread-1", "remote task", TurnStartOptions{
+		ApprovalPolicy: security.ApprovalNever, SandboxMode: security.SandboxDangerFullAccess,
+	})
+	if err != nil {
+		t.Fatalf("buildTurnStartParams returned error: %v", err)
+	}
+	if params["approvalPolicy"] != "never" {
+		t.Fatalf("approvalPolicy = %#v, want never", params["approvalPolicy"])
+	}
+	sandbox, ok := params["sandboxPolicy"].(map[string]any)
+	if !ok || sandbox["type"] != "dangerFullAccess" {
+		t.Fatalf("sandboxPolicy = %#v, want dangerFullAccess", params["sandboxPolicy"])
+	}
+	if _, exists := params["model"]; exists {
+		t.Fatalf("remote turn unexpectedly overrides model: %#v", params["model"])
+	}
+	if diagnostic.ApprovalPolicy != "never" || diagnostic.SandboxType != "dangerFullAccess" || !diagnostic.NetworkAccess || diagnostic.Model != "" {
+		t.Fatalf("unexpected remote diagnostic: %+v", diagnostic)
+	}
+}
+
 func TestTurnStartWireValuesRejectUnknownSecurityValues(t *testing.T) {
 	_, _, err := buildTurnStartParams("thread-1", "text", TurnStartOptions{
-		ApprovalPolicy: security.ApprovalPolicy("never"), SandboxMode: security.SandboxWorkspaceWrite,
+		ApprovalPolicy: security.ApprovalPolicy("sometimes"), SandboxMode: security.SandboxWorkspaceWrite,
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported approval policy") {
 		t.Fatalf("unknown approval policy must fail closed; got %v", err)
 	}
 
 	_, _, err = buildTurnStartParams("thread-1", "text", TurnStartOptions{
-		ApprovalPolicy: security.ApprovalOnRequest, SandboxMode: security.SandboxMode("danger-full-access"),
+		ApprovalPolicy: security.ApprovalOnRequest, SandboxMode: security.SandboxMode("unknown"),
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported sandbox mode") {
-		t.Fatalf("danger-full-access must not be mapped; got %v", err)
+		t.Fatalf("unknown sandbox mode must fail closed; got %v", err)
 	}
 }
 

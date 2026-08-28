@@ -605,7 +605,7 @@ func isActiveState(state string) bool {
 
 func controllableOrigin(origin string) bool {
 	switch strings.ToLower(strings.TrimSpace(origin)) {
-	case "local", "bridge", "telegram", "qqbot":
+	case "local", "bridge", control.TurnOriginTelegram, control.TurnOriginQQ:
 		return true
 	default:
 		return false

@@ -199,23 +199,12 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 		delete(m.starting, threadID)
 		m.stateMu.Unlock()
 	}()
-	model, effort := "", ""
-	if request.Model != nil {
-		model = strings.TrimSpace(*request.Model)
-	}
-	if request.ReasoningEffort != nil {
-		effort = strings.TrimSpace(*request.ReasoningEffort)
-	}
-	status := m.Status()
-	sandboxMode, err := security.ParseSandboxMode(status.SandboxMode)
+	options, err := turnStartOptions(request, cwd, m.Status().SandboxMode)
 	if err != nil {
 		return control.TurnAccepted{}, fmt.Errorf("prepare Codex turn security policy: %w", err)
 	}
 	m.logger.Printf("rpcTrace stage=turn/start-request selectedThreadId=%s requestThreadId=%s", threadID, threadID)
-	result, err := client.TurnStart(ctx, threadID, text, appserver.TurnStartOptions{
-		CWD: cwd, CollaborationMode: request.CollaborationMode, Model: model,
-		ReasoningEffort: effort, ApprovalPolicy: security.ApprovalOnRequest, SandboxMode: sandboxMode,
-	})
+	result, err := client.TurnStart(ctx, threadID, text, options)
 	if err != nil {
 		if compatibilityError := turnStartProtocolCompatibilityError(err); compatibilityError != nil {
 			state := control.RuntimeState{ThreadID: threadID, State: StateFailed, Origin: "local", Error: compatibilityError.Message}
@@ -265,6 +254,40 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 	m.setState(state, true)
 	m.broker.PublishScoped(events.TurnStarted, threadID, turnID, "", map[string]any{"status": stateName, "source": origin})
 	return control.TurnAccepted{ThreadID: threadID, TurnID: turnID, Status: stateName, AcceptedAt: acceptedAt}, nil
+}
+
+func turnStartOptions(request control.StartTurnRequest, cwd, configuredSandboxMode string) (appserver.TurnStartOptions, error) {
+	options := appserver.TurnStartOptions{
+		CWD:               cwd,
+		CollaborationMode: request.CollaborationMode,
+		ApprovalPolicy:    security.ApprovalOnRequest,
+	}
+	if request.Model != nil {
+		options.Model = strings.TrimSpace(*request.Model)
+	}
+	if request.ReasoningEffort != nil {
+		options.ReasoningEffort = strings.TrimSpace(*request.ReasoningEffort)
+	}
+	if isRemoteChannelTurn(request.Origin) {
+		options.ApprovalPolicy = security.ApprovalNever
+		options.SandboxMode = security.SandboxDangerFullAccess
+		return options, nil
+	}
+	sandboxMode, err := security.ParseSandboxMode(configuredSandboxMode)
+	if err != nil {
+		return appserver.TurnStartOptions{}, err
+	}
+	options.SandboxMode = sandboxMode
+	return options, nil
+}
+
+func isRemoteChannelTurn(origin string) bool {
+	switch strings.ToLower(strings.TrimSpace(origin)) {
+	case control.TurnOriginQQ, control.TurnOriginTelegram:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) InterruptTurn(ctx context.Context, threadID, turnID string) (control.InterruptResult, error) {
