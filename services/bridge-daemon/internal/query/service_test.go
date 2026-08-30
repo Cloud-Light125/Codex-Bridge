@@ -2,13 +2,16 @@ package query
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
@@ -17,6 +20,45 @@ import (
 type fakeControl struct {
 	threads []control.ThreadSummary
 	details map[string]control.ThreadDetail
+}
+
+type fakeOpenClawBackend struct {
+	sessions []conversation.Session
+	details  map[string]conversation.Detail
+}
+
+func (f *fakeOpenClawBackend) Backend() string { return conversation.BackendOpenClaw }
+func (f *fakeOpenClawBackend) ListSessions(_ context.Context, limit int) ([]conversation.Session, error) {
+	result := append([]conversation.Session(nil), f.sessions...)
+	if limit > 0 && limit < len(result) {
+		result = result[:limit]
+	}
+	return result, nil
+}
+func (f *fakeOpenClawBackend) SessionByNumber(_ context.Context, number int) (conversation.Session, error) {
+	for _, item := range f.sessions {
+		if item.Number == number {
+			return item, nil
+		}
+	}
+	return conversation.Session{}, errors.New("session not found")
+}
+func (f *fakeOpenClawBackend) ReadSession(_ context.Context, key string) (conversation.Detail, error) {
+	detail, ok := f.details[key]
+	if !ok {
+		return conversation.Detail{}, errors.New("session not found")
+	}
+	return detail, nil
+}
+func (f *fakeOpenClawBackend) SendMessage(context.Context, string, string) (conversation.SendResult, error) {
+	return conversation.SendResult{}, nil
+}
+func (f *fakeOpenClawBackend) Abort(context.Context, string, string) (conversation.AbortResult, error) {
+	return conversation.AbortResult{}, nil
+}
+func (f *fakeOpenClawBackend) SubscribeEvents(func(conversation.Event)) func() { return func() {} }
+func (f *fakeOpenClawBackend) ConnectionStatus() conversation.ConnectionStatus {
+	return conversation.ConnectionStatus{Backend: conversation.BackendOpenClaw, Connected: true, Running: true, State: "connected", SessionCount: len(f.sessions)}
 }
 
 func (f *fakeControl) ListThreads(_ context.Context, limit int, _ string) (control.ThreadList, error) {
@@ -162,6 +204,48 @@ func TestQuotaUsesOfficialRateLimitSnapshotWithoutInference(t *testing.T) {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("quota missing %q: %s", expected, text)
 		}
+	}
+}
+
+func TestOpenClawQueriesUseSessionsAndRejectCodexOnlyActions(t *testing.T) {
+	sessions := []conversation.Session{
+		{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Number: 1, Title: "main", Status: "idle", UpdatedAt: "2026-08-30T09:00:00Z"},
+		{Backend: conversation.BackendOpenClaw, Key: "agent:daily:task", Number: 2, Title: "daily-task", Status: "running", UpdatedAt: "2026-08-30T10:00:00Z"},
+	}
+	backend := &fakeOpenClawBackend{sessions: sessions, details: map[string]conversation.Detail{
+		"agent:main:main":  {Session: sessions[0], Messages: []conversation.Message{{Role: "user", Text: "hello"}, {Role: "assistant", Text: "world"}}},
+		"agent:daily:task": {Session: sessions[1]},
+	}}
+	service := New(&fakeControl{}, &fakeRuntime{}, nil)
+	service.SetOpenClawBackend(backend)
+
+	threads, handled := service.ExecuteActionForBackend(context.Background(), conversation.BackendOpenClaw, "", commandregistry.ActionThreadsList, nil)
+	if !handled || !strings.Contains(threads.Parts[0], "#1 main") || !strings.Contains(threads.Parts[0], "SessionKey：agent:daily:task") {
+		t.Fatalf("OpenClaw /threads result=%#v", threads)
+	}
+	info, _ := service.ExecuteActionForBackend(context.Background(), conversation.BackendOpenClaw, "", commandregistry.ActionThreadInfo, []string{"#2"})
+	if !strings.Contains(info.Parts[0], "#2 daily-task") || !strings.Contains(info.Parts[0], "状态：运行中") {
+		t.Fatalf("OpenClaw /thread result=%#v", info)
+	}
+	history, _ := service.ExecuteActionForBackend(context.Background(), conversation.BackendOpenClaw, "agent:main:main", commandregistry.ActionThreadHistory, nil)
+	if !strings.Contains(strings.Join(history.Parts, "\n"), "world") {
+		t.Fatalf("OpenClaw /history result=%#v", history)
+	}
+	for _, action := range []string{
+		commandregistry.ActionThreadRunning,
+		commandregistry.ActionThreadWaiting,
+		commandregistry.ActionThreadFailed,
+		commandregistry.ActionAccountQuota,
+		commandregistry.ActionInteractionCancel,
+	} {
+		unsupported, handled := service.ExecuteActionForBackend(context.Background(), conversation.BackendOpenClaw, "", action, nil)
+		if !handled || len(unsupported.Parts) == 0 || !strings.Contains(unsupported.Parts[0], "不适用于 OpenClaw") {
+			t.Fatalf("Codex-only action %s was not rejected: %#v", action, unsupported)
+		}
+	}
+	refreshed, _ := service.ExecuteActionForBackend(context.Background(), conversation.BackendOpenClaw, "", commandregistry.ActionOpenClawRefresh, nil)
+	if !strings.Contains(refreshed.Parts[0], "共 2 个") {
+		t.Fatalf("OpenClaw-specific refresh result=%#v", refreshed)
 	}
 }
 

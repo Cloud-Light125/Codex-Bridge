@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/numberprefix"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
@@ -72,24 +74,57 @@ func (s *Service) Execute(ctx context.Context, text string) (Result, bool) {
 	if !invocation.Definition.Enabled {
 		return one("指令 " + invocation.Definition.Name + " 当前已停用。"), true
 	}
-	return s.ExecuteAction(ctx, invocation.Definition.Action, invocation.Arguments)
+	return s.ExecuteActionForBackend(ctx, conversation.BackendCodex, "", invocation.Definition.Action, invocation.Arguments)
 }
 
 func (s *Service) ExecuteAction(ctx context.Context, action string, arguments []string) (Result, bool) {
+	return s.ExecuteActionForBackend(ctx, conversation.BackendCodex, "", action, arguments)
+}
+
+// ExecuteActionForBackend is the shared command handler entry point. The
+// registry decides whether an action is supported by the selected backend;
+// this service then dispatches to the corresponding backend adapter while
+// keeping formatting and argument validation in one place for both channels.
+func (s *Service) ExecuteActionForBackend(ctx context.Context, backend, target, action string, arguments []string) (Result, bool) {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	if backend == "" {
+		backend = conversation.BackendCodex
+	}
+	if !s.commands.ActionSupportsBackend(action, backend) {
+		return one(NotApplicableText(backend)), true
+	}
 	switch action {
 	case commandregistry.ActionBridgeHelp:
-		return one(s.commands.HelpText()), true
+		return one(s.commands.HelpTextForBackend(backend)), true
 	case commandregistry.ActionThreadsList:
+		if backend == conversation.BackendOpenClaw {
+			return one(s.openClawThreads(ctx, arguments)), true
+		}
 		return one(s.threads(ctx, arguments)), true
 	case commandregistry.ActionThreadInfo:
+		if backend == conversation.BackendOpenClaw {
+			return one(s.openClawThreadInfo(ctx, arguments, target)), true
+		}
+		if len(arguments) == 0 && strings.TrimSpace(target) != "" {
+			arguments = []string{target}
+		}
 		return one(s.threadInfo(ctx, arguments)), true
 	case commandregistry.ActionThreadHistory:
+		if backend == conversation.BackendOpenClaw {
+			return s.openClawHistory(ctx, arguments, target), true
+		}
+		if len(arguments) == 0 && strings.TrimSpace(target) != "" {
+			arguments = []string{target}
+		}
 		return s.history(ctx, arguments), true
 	case commandregistry.ActionThreadRunning:
 		return one(s.running(ctx, arguments)), true
 	case commandregistry.ActionThreadWaiting:
 		return one(s.waiting(ctx, arguments)), true
 	case commandregistry.ActionThreadRecent:
+		if backend == conversation.BackendOpenClaw {
+			return one(s.openClawRecent(ctx, arguments)), true
+		}
 		return one(s.recent(ctx, arguments)), true
 	case commandregistry.ActionThreadFailed:
 		return one(s.failed(ctx, arguments)), true
@@ -97,12 +132,24 @@ func (s *Service) ExecuteAction(ctx context.Context, action string, arguments []
 		return one(s.quota(ctx, arguments)), true
 	case commandregistry.ActionBridgeStatus:
 		if len(arguments) > 0 {
+			if backend == conversation.BackendOpenClaw {
+				return one(s.openClawThreadInfo(ctx, arguments, target)), true
+			}
 			return one(s.threadInfo(ctx, arguments)), true
 		}
-		return one(s.connectionStatus()), true
+		return one(s.connectionStatusForBackend(backend)), true
+	case commandregistry.ActionOpenClawRefresh:
+		return one(s.openClawRefresh(ctx, arguments)), true
 	default:
 		return Result{}, false
 	}
+}
+
+func NotApplicableText(backend string) string {
+	if backend == conversation.BackendOpenClaw {
+		return "该指令不适用于 OpenClaw；它依赖 Codex 的专属运行状态。"
+	}
+	return "该指令不适用于当前会话后端。"
 }
 
 func one(text string) Result { return Result{Parts: []string{strings.TrimSpace(text)}} }
@@ -124,7 +171,7 @@ func (s *Service) threads(ctx context.Context, arguments []string) string {
 	var err error
 	for current := 1; current <= page; current++ {
 		list, err = s.control.ListThreads(ctx, 20, cursor)
-		if err != nil && s.openclaw == nil {
+		if err != nil {
 			return "无法读取 Codex 会话，请确认 Codex 已连接。"
 		}
 		if current < page {
@@ -154,6 +201,240 @@ func (s *Service) threads(ctx context.Context, arguments []string) string {
 	}
 	output.WriteString("\n回复：\n#编号 你的消息")
 	return output.String()
+}
+
+func (s *Service) openClawThreads(ctx context.Context, arguments []string) string {
+	if len(arguments) > 1 {
+		return "用法：/threads [页码]"
+	}
+	page := 1
+	if len(arguments) == 1 {
+		parsed, err := strconv.Atoi(strings.TrimSpace(arguments[0]))
+		if err != nil || parsed < 1 {
+			return "页码必须是大于 0 的整数。"
+		}
+		page = parsed
+	}
+	if s.openclaw == nil {
+		return "当前后端是 OpenClaw，但 Gateway 尚未配置。"
+	}
+	sessions, err := s.openclaw.ListSessions(ctx, 200)
+	if err != nil {
+		return "无法读取 OpenClaw Session，请检查 Gateway 连接。"
+	}
+	start := (page - 1) * 20
+	if start >= len(sessions) {
+		if page == 1 {
+			return "当前没有可用的 OpenClaw Session。"
+		}
+		return "该页没有 OpenClaw Session。"
+	}
+	end := start + 20
+	if end > len(sessions) {
+		end = len(sessions)
+	}
+	// A backend may return sessions in activity order. The number, rather than
+	// that order, is the stable user-facing selector, so list it numerically.
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if sessions[i].Number == sessions[j].Number {
+			return sessions[i].Key < sessions[j].Key
+		}
+		return sessions[i].Number < sessions[j].Number
+	})
+	var output strings.Builder
+	fmt.Fprintf(&output, "[OpenClaw] 会话 · 第 %d 页\n\n", page)
+	for _, session := range sessions[start:end] {
+		fmt.Fprintf(&output, "#%d %s\n    SessionKey：%s\n    状态：%s\n\n", session.Number, displayTitle(session.Title), session.Key, statusChinese(firstNonEmpty(session.Status, "idle")))
+	}
+	output.WriteString("回复：#12 你的消息；也可使用 /bind 12 绑定。")
+	return strings.TrimSpace(output.String())
+}
+
+func (s *Service) openClawThreadInfo(ctx context.Context, arguments []string, target string) string {
+	if len(arguments) > 1 {
+		return "用法：/thread [编号]"
+	}
+	session, message := s.resolveOpenClawSession(ctx, arguments, target)
+	if message != "" {
+		return message
+	}
+	state := statusChinese(firstNonEmpty(session.Status, "idle"))
+	lines := []string{fmt.Sprintf("#%d %s", session.Number, displayTitle(session.Title)), "后端：OpenClaw", "状态：" + state}
+	if session.Model != "" {
+		lines = append(lines, "模型："+session.Model)
+	}
+	if session.UpdatedAt != "" {
+		lines = append(lines, "最后更新："+absoluteLocalTime(session.UpdatedAt))
+	}
+	lines = append(lines, "SessionKey："+session.Key)
+	return strings.Join(lines, "\n")
+}
+
+func (s *Service) openClawHistory(ctx context.Context, arguments []string, target string) Result {
+	if len(arguments) > 2 {
+		return one("用法：/history [编号] [数量]")
+	}
+	count := 3
+	if len(arguments) == 2 {
+		parsed, err := strconv.Atoi(arguments[1])
+		if err != nil || parsed < 1 || parsed > 10 {
+			return one("聊天轮数仅支持 1～10。")
+		}
+		count = parsed
+	}
+	session, message := s.resolveOpenClawSession(ctx, arguments, target)
+	if message != "" {
+		return one(message)
+	}
+	if s.openclaw == nil {
+		return one("当前后端是 OpenClaw，但 Gateway 尚未配置。")
+	}
+	detail, err := s.openclaw.ReadSession(ctx, session.Key)
+	if err != nil || detail.Key == "" {
+		return one(fmt.Sprintf("OpenClaw 会话 #%d 当前不可用。", session.Number))
+	}
+	if detail.Number == 0 {
+		detail.Number = session.Number
+	}
+	type round struct{ user, assistant string }
+	rounds := make([]round, 0, len(detail.Messages))
+	for _, item := range detail.Messages {
+		text := strings.TrimSpace(item.Text)
+		if text == "" {
+			continue
+		}
+		if strings.EqualFold(item.Role, "user") {
+			rounds = append(rounds, round{user: text})
+			continue
+		}
+		if len(rounds) > 0 {
+			if rounds[len(rounds)-1].assistant == "" {
+				rounds[len(rounds)-1].assistant = text
+			} else {
+				rounds[len(rounds)-1].assistant += "\n" + text
+			}
+		}
+	}
+	if len(rounds) > count {
+		rounds = rounds[len(rounds)-count:]
+	}
+	if len(rounds) == 0 {
+		return one(fmt.Sprintf("#%d %s\n暂无可显示的聊天记录。", detail.Number, displayTitle(detail.Title)))
+	}
+	var body strings.Builder
+	for index, item := range rounds {
+		assistant := item.assistant
+		if assistant == "" {
+			assistant = "尚未完成"
+		}
+		fmt.Fprintf(&body, "[%d]\n你：\n%s\n\nOpenClaw：\n%s", index+1, item.user, assistant)
+		if index < len(rounds)-1 {
+			body.WriteString("\n\n")
+		}
+	}
+	prefix := fmt.Sprintf("#%d %s\n最近 %d 轮：\n\n", detail.Number, displayTitle(detail.Title), len(rounds))
+	return Result{Parts: splitPrefixed(prefix, body.String(), 3200)}
+}
+
+func (s *Service) openClawRecent(ctx context.Context, arguments []string) string {
+	if len(arguments) != 0 {
+		return "用法：/recent"
+	}
+	if s.openclaw == nil {
+		return "当前后端是 OpenClaw，但 Gateway 尚未配置。"
+	}
+	sessions, err := s.openclaw.ListSessions(ctx, 200)
+	if err != nil {
+		return "无法读取最近 OpenClaw Session，请检查 Gateway 连接。"
+	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		a, aOK := parseTime(sessions[i].UpdatedAt)
+		b, bOK := parseTime(sessions[j].UpdatedAt)
+		if aOK && bOK && !a.Equal(b) {
+			return a.After(b)
+		}
+		return sessions[i].Number < sessions[j].Number
+	})
+	if len(sessions) > 10 {
+		sessions = sessions[:10]
+	}
+	if len(sessions) == 0 {
+		return "当前没有 OpenClaw Session 活动。"
+	}
+	lines := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		lines = append(lines, fmt.Sprintf("#%d %s · %s", session.Number, displayTitle(session.Title), relativeTime(session.UpdatedAt, s.now())))
+	}
+	return "最近 OpenClaw 活动：\n\n" + strings.Join(lines, "\n")
+}
+
+func (s *Service) openClawRefresh(ctx context.Context, arguments []string) string {
+	if len(arguments) != 0 {
+		return "用法：/oc-refresh"
+	}
+	if s.openclaw == nil {
+		return "当前后端是 OpenClaw，但 Gateway 尚未配置。"
+	}
+	sessions, err := s.openclaw.ListSessions(ctx, 200)
+	if err != nil {
+		return "OpenClaw Session 刷新失败，请检查 Gateway 连接。"
+	}
+	return fmt.Sprintf("OpenClaw 专属：Session 列表已刷新，共 %d 个。", len(sessions))
+}
+
+func (s *Service) resolveOpenClawSession(ctx context.Context, arguments []string, target string) (conversation.Session, string) {
+	selector := strings.TrimSpace(target)
+	if len(arguments) > 0 {
+		selector = strings.TrimSpace(arguments[0])
+	}
+	if selector == "" {
+		return conversation.Session{}, "当前聊天尚未绑定 OpenClaw Session，请先使用 /threads 或 /bind。"
+	}
+	for _, prefix := range []string{"oc:", "openclaw:"} {
+		if strings.HasPrefix(strings.ToLower(selector), prefix) {
+			selector = strings.TrimSpace(selector[len(prefix):])
+			break
+		}
+	}
+	if parsed, recognized, err := numberprefix.Parse(selector); err != nil {
+		return conversation.Session{}, err.Error()
+	} else if recognized && parsed.Number > 0 {
+		if parsed.Content != "" {
+			return conversation.Session{}, "请只指定一个 OpenClaw Session 编号。"
+		}
+		session, err := s.openClawByNumber(ctx, parsed.Number)
+		if err != nil {
+			return conversation.Session{}, fmt.Sprintf("OpenClaw 会话编号 #%d 不存在。", parsed.Number)
+		}
+		return session, ""
+	}
+	if s.openclaw == nil {
+		return conversation.Session{}, "当前后端是 OpenClaw，但 Gateway 尚未配置。"
+	}
+	session, err := s.openclaw.ReadSession(ctx, selector)
+	if err != nil || session.Key == "" {
+		return conversation.Session{}, "指定的 OpenClaw Session 不存在或当前不可用。"
+	}
+	return session.Session, ""
+}
+
+func (s *Service) openClawByNumber(ctx context.Context, number int) (conversation.Session, error) {
+	if s.openclaw == nil {
+		return conversation.Session{}, errors.New("OpenClaw backend is unavailable")
+	}
+	if numbered, ok := s.openclaw.(conversation.NumberedSessionBackend); ok {
+		return numbered.SessionByNumber(ctx, number)
+	}
+	sessions, err := s.openclaw.ListSessions(ctx, 200)
+	if err != nil {
+		return conversation.Session{}, err
+	}
+	for _, session := range sessions {
+		if session.Number == number {
+			return session, nil
+		}
+	}
+	return conversation.Session{}, errors.New("OpenClaw session number not found")
 }
 
 func (s *Service) threadInfo(ctx context.Context, arguments []string) string {
@@ -514,6 +795,21 @@ func (s *Service) connectionStatus() string {
 		lines = append(lines, "OpenClaw Gateway："+state)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (s *Service) connectionStatusForBackend(backend string) string {
+	if backend != conversation.BackendOpenClaw {
+		return s.connectionStatus()
+	}
+	if s.openclaw == nil {
+		return "OpenClaw 状态\nGateway：未配置"
+	}
+	status := s.openclaw.ConnectionStatus()
+	state := firstNonEmpty(status.State, "未配置")
+	if status.Connected {
+		state = "已连接"
+	}
+	return fmt.Sprintf("OpenClaw 状态\nGateway：%s\nSession：%d 个\n自动重连：%t", state, status.SessionCount, status.AutoReconnect)
 }
 
 func (s *Service) recentThreads(ctx context.Context, limit int) ([]control.ThreadSummary, error) {

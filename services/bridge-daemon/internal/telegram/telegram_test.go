@@ -23,6 +23,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -469,10 +470,13 @@ type fakeOpenClawBackend struct {
 
 func (f *fakeOpenClawBackend) Backend() string { return conversation.BackendOpenClaw }
 func (f *fakeOpenClawBackend) ListSessions(context.Context, int) ([]conversation.Session, error) {
-	return []conversation.Session{{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Title: "Main", Status: "idle"}}, nil
+	return []conversation.Session{{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Number: 1, Title: "Main", Status: "idle", UpdatedAt: "2026-08-30T00:00:00Z"}}, nil
+}
+func (f *fakeOpenClawBackend) SessionByNumber(context.Context, int) (conversation.Session, error) {
+	return conversation.Session{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Number: 1, Title: "Main", Status: "idle"}, nil
 }
 func (f *fakeOpenClawBackend) ReadSession(context.Context, string) (conversation.Detail, error) {
-	return conversation.Detail{Session: conversation.Session{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Title: "Main", Status: "idle"}}, nil
+	return conversation.Detail{Session: conversation.Session{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Number: 1, Title: "Main", Status: "idle", UpdatedAt: "2026-08-30T00:00:00Z"}, Messages: []conversation.Message{{Role: "user", Text: "previous question"}, {Role: "assistant", Text: "previous answer"}}}, nil
 }
 func (f *fakeOpenClawBackend) SendMessage(_ context.Context, key, message string) (conversation.SendResult, error) {
 	f.sends = append(f.sends, key+":"+message)
@@ -551,5 +555,43 @@ func TestTelegramRoutesBoundOpenClawSessionAndFinalOrAbort(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Telegram did not acknowledge OpenClaw stop")
+	}
+}
+
+func TestTelegramNumberedPrefixUsesOpenClawOrCodexNamespace(t *testing.T) {
+	repository, err := bindings.NewRepository(filepath.Join(t.TempDir(), "bindings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{state: control.RuntimeState{CanSend: true}}
+	service := NewService(&fakeControl{thread: control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "codex-thread-1", Title: "Codex one"}}}, runtime, repository, events.NewBroker(), nil)
+	defer service.Close(context.Background())
+	backend := &fakeOpenClawBackend{}
+	service.SetOpenClawBackend(backend)
+	service.SetBackendResolver(func(string) string { return conversation.BackendOpenClaw })
+	openAddress := channels.ChannelAddress{ChannelType: "telegram", AccountID: "bot", ConversationType: "default", ChatID: "open"}
+	if !service.handleNumbered(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "[1] hello"}, "[1] hello") {
+		t.Fatal("Telegram did not recognize OpenClaw bracket prefix")
+	}
+	if len(backend.sends) != 1 || backend.sends[0] != "agent:main:main:hello" {
+		t.Fatalf("Telegram OpenClaw route=%#v", backend.sends)
+	}
+	if _, _, err := repository.UpsertAddress(bindings.CreateRequest{Backend: conversation.BackendCodex, ChannelType: "telegram", AccountID: "bot", ConversationType: "default", ChatID: "codex", ThreadID: "codex-thread-1", TargetID: "codex-thread-1"}); err != nil {
+		t.Fatal(err)
+	}
+	numbers, err := threadregistry.New(filepath.Join(t.TempDir(), "thread-numbers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := numbers.Ensure(threadregistry.Metadata{ThreadID: "codex-thread-1", Title: "Codex one", CreatedAt: "2026-08-30T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	service.registry = numbers
+	codexAddress := channels.ChannelAddress{ChannelType: "telegram", AccountID: "bot", ConversationType: "default", ChatID: "codex"}
+	if !service.handleNumbered(context.Background(), channels.InboundMessage{Address: codexAddress, UserID: "user", Text: "#1 codex"}, "#1 codex") {
+		t.Fatal("Telegram did not recognize Codex hash prefix")
+	}
+	if runtime.starts != 1 || len(backend.sends) != 1 {
+		t.Fatalf("Telegram number spaces crossed: starts=%d sends=%#v", runtime.starts, backend.sends)
 	}
 }

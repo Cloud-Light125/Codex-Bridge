@@ -119,12 +119,21 @@ func (s *Server) SetOpenClawBackend(backend *openclaw.Service) {
 	s.openclaw = backend
 }
 
-func (s *Server) commandList(response http.ResponseWriter, _ *http.Request) {
+func (s *Server) commandList(response http.ResponseWriter, request *http.Request) {
 	if s.commands == nil {
 		writeError(response, http.StatusServiceUnavailable, "commands_unavailable", "指令服务尚未初始化")
 		return
 	}
-	writeJSON(response, http.StatusOK, s.commands.List())
+	backend := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("backend")))
+	if backend != "" && backend != commandregistry.BackendCapabilityCodex && backend != commandregistry.BackendCapabilityOpenClaw {
+		writeError(response, http.StatusBadRequest, "invalid_backend", "backend 必须是 codex 或 openclaw")
+		return
+	}
+	if backend == "" {
+		writeJSON(response, http.StatusOK, s.commands.List())
+		return
+	}
+	writeJSON(response, http.StatusOK, s.commands.ListForBackend(backend))
 }
 
 func (s *Server) commandCreate(response http.ResponseWriter, request *http.Request) {

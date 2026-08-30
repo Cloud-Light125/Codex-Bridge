@@ -358,6 +358,20 @@ func (m *Manager) Routing() BackendRouting {
 	return cloneRouting(m.routing)
 }
 
+// CurrentBackend returns the default backend for an unbound conversation on a
+// logical channel profile. A binding always wins over this fallback. When a
+// profile is assigned to both backends, retain Codex as the legacy default so
+// existing channels do not change behavior until they are explicitly bound.
+func (m *Manager) CurrentBackend(profileID string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	profileID = strings.TrimSpace(profileID)
+	if routeContains(m.routing.OpenClaw, profileID) && !routeContains(m.routing.Codex, profileID) {
+		return conversation.BackendOpenClaw
+	}
+	return conversation.BackendCodex
+}
+
 // PrepareBinding resolves a user-facing profile ID into its physical resource
 // ID.  This makes the repository key deterministic even when profiles share
 // one token/AppSecret.
@@ -710,6 +724,7 @@ func (m *Manager) newResourceLocked(request ConfigureRequest, key string) (*reso
 		item.telegram = telegram.NewService(m.control, m.runtime, m.bindings, m.broker, m.logger, m.registry)
 		item.telegram.SetChannelProfileID(item.id)
 		item.telegram.SetBindingPreparer(m.PrepareBinding)
+		item.telegram.SetBackendResolver(m.CurrentBackend)
 		item.telegram.SetOpenClawBackend(m.openclaw)
 		if m.commands != nil {
 			item.telegram.SetCommandRegistry(m.commands)
@@ -718,6 +733,7 @@ func (m *Manager) newResourceLocked(request ConfigureRequest, key string) (*reso
 		item.qq = qqbot.NewService(m.control, m.runtime, m.bindings, m.broker, m.logger, m.registry)
 		item.qq.SetChannelProfileID(item.id)
 		item.qq.SetBindingPreparer(m.PrepareBinding)
+		item.qq.SetBackendResolver(m.CurrentBackend)
 		item.qq.SetOpenClawBackend(m.openclaw)
 		if m.commands != nil {
 			item.qq.SetCommandRegistry(m.commands)

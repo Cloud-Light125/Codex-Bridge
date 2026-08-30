@@ -21,6 +21,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/numberprefix"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
@@ -103,16 +104,17 @@ type interactionFlow struct {
 }
 
 type Service struct {
-	adapter  *Adapter
-	control  Control
-	runtime  Runtime
-	bindings *bindings.Repository
-	broker   *events.Broker
-	logger   *bridgelog.SafeLogger
-	registry *threadregistry.Registry
-	commands *commandregistry.Registry
-	queries  *bridgequery.Service
-	openclaw conversation.IConversationBackend
+	adapter         *Adapter
+	control         Control
+	runtime         Runtime
+	bindings        *bindings.Repository
+	broker          *events.Broker
+	logger          *bridgelog.SafeLogger
+	registry        *threadregistry.Registry
+	commands        *commandregistry.Registry
+	queries         *bridgequery.Service
+	openclaw        conversation.IConversationBackend
+	backendResolver func(string) string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -163,6 +165,14 @@ func (s *Service) SetChannelProfileID(profileID string) {
 func (s *Service) SetBindingPreparer(preparer BindingPreparer) {
 	s.mu.Lock()
 	s.bindingPreparer = preparer
+	s.mu.Unlock()
+}
+
+// SetBackendResolver supplies the profile manager's default backend for
+// unbound conversations. Existing bindings remain authoritative.
+func (s *Service) SetBackendResolver(resolver func(string) string) {
+	s.mu.Lock()
+	s.backendResolver = resolver
 	s.mu.Unlock()
 }
 
@@ -398,6 +408,9 @@ func (s *Service) HandleMessage(ctx context.Context, message channels.InboundMes
 }
 
 func (s *Service) handleNumbered(ctx context.Context, message channels.InboundMessage, text string) bool {
+	if s.backendForMessage(message) == conversation.BackendOpenClaw {
+		return s.handleOpenClawNumbered(ctx, message, text)
+	}
 	if s.registry == nil {
 		return false
 	}
@@ -420,6 +433,86 @@ func (s *Service) handleNumbered(ctx context.Context, message channels.InboundMe
 	return true
 }
 
+func (s *Service) handleOpenClawNumbered(ctx context.Context, message channels.InboundMessage, text string) bool {
+	prefix, recognized, err := numberprefix.Parse(text)
+	if !recognized {
+		return false
+	}
+	if err != nil {
+		s.send(ctx, message.Address, err.Error())
+		return true
+	}
+	session, err := s.openClawSessionByNumber(ctx, prefix.Number)
+	if err != nil {
+		if !prefix.Explicit {
+			return false
+		}
+		s.send(ctx, message.Address, fmt.Sprintf("OpenClaw 会话编号 #%d 不存在。请先发送 /threads。", prefix.Number))
+		return true
+	}
+	if prefix.Content == "" {
+		s.send(ctx, message.Address, fmt.Sprintf("请在 #%d 后输入消息或命令。", prefix.Number))
+		return true
+	}
+	if strings.HasPrefix(prefix.Content, "/") {
+		s.handleOpenClawTargetCommand(ctx, message, session, prefix.Content)
+		return true
+	}
+	if s.answerFreeTextForThread(ctx, message, prefix.Content, session.Key) {
+		return true
+	}
+	s.startOpenClawTurnForKey(ctx, message, prefix.Content, session.Key)
+	return true
+}
+
+func (s *Service) openClawSessionByNumber(ctx context.Context, number int) (conversation.Session, error) {
+	backend := s.openClawBackend()
+	if backend == nil {
+		return conversation.Session{}, errors.New("OpenClaw backend unavailable")
+	}
+	if numbered, ok := backend.(conversation.NumberedSessionBackend); ok {
+		return numbered.SessionByNumber(ctx, number)
+	}
+	sessions, err := backend.ListSessions(ctx, 200)
+	if err != nil {
+		return conversation.Session{}, err
+	}
+	for _, session := range sessions {
+		if session.Number == number {
+			return session, nil
+		}
+	}
+	return conversation.Session{}, errors.New("OpenClaw session number not found")
+}
+
+func (s *Service) handleOpenClawTargetCommand(ctx context.Context, message channels.InboundMessage, session conversation.Session, text string) {
+	invocation, found := s.commandRegistry().Resolve(text)
+	if !found {
+		s.send(ctx, message.Address, fmt.Sprintf("#%d 不支持该指令。", session.Number))
+		return
+	}
+	if !invocation.Definition.Enabled {
+		s.send(ctx, message.Address, "指令 "+invocation.Definition.Name+" 当前已停用。")
+		return
+	}
+	if !commandregistry.SupportsBackend(invocation.Definition.BackendCapability, conversation.BackendOpenClaw) {
+		s.send(ctx, message.Address, "该指令不适用于 OpenClaw；它依赖 Codex 的专属运行状态。")
+		return
+	}
+	selector := strconv.Itoa(session.Number)
+	switch invocation.Definition.Action {
+	case commandregistry.ActionThreadStop:
+		s.stopOpenClawSession(ctx, message, session.Key)
+	case commandregistry.ActionBridgeStatus, commandregistry.ActionThreadInfo:
+		s.runQueryActionForBackend(ctx, message, conversation.BackendOpenClaw, session.Key, commandregistry.ActionThreadInfo, []string{selector})
+	case commandregistry.ActionThreadHistory:
+		args := append([]string{selector}, invocation.Arguments...)
+		s.runQueryActionForBackend(ctx, message, conversation.BackendOpenClaw, session.Key, commandregistry.ActionThreadHistory, args)
+	default:
+		s.send(ctx, message.Address, fmt.Sprintf("指令 %s 不支持 #编号 会话上下文。", invocation.Definition.Name))
+	}
+}
+
 func (s *Service) handleTargetCommand(ctx context.Context, message channels.InboundMessage, record threadregistry.Record, text string) {
 	invocation, found := s.commandRegistry().Resolve(text)
 	if !found {
@@ -428,6 +521,10 @@ func (s *Service) handleTargetCommand(ctx context.Context, message channels.Inbo
 	}
 	if !invocation.Definition.Enabled {
 		s.send(ctx, message.Address, "指令 "+invocation.Definition.Name+" 当前已停用。")
+		return
+	}
+	if !commandregistry.SupportsBackend(invocation.Definition.BackendCapability, conversation.BackendCodex) {
+		s.send(ctx, message.Address, "该指令不适用于 Codex。")
 		return
 	}
 	switch invocation.Definition.Action {
@@ -454,25 +551,28 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 		s.send(ctx, message.Address, "指令 "+invocation.Definition.Name+" 当前已停用。")
 		return
 	}
-	argument := strings.TrimSpace(strings.Join(invocation.Arguments, " "))
-	if invocation.Definition.Action == commandregistry.ActionThreadsList {
-		s.listThreads(ctx, message)
+	backend := s.backendForMessage(message)
+	target := s.targetForMessage(message)
+	if !commandregistry.SupportsBackend(invocation.Definition.BackendCapability, backend) {
+		s.send(ctx, message.Address, bridgequery.NotApplicableText(backend))
 		return
 	}
-	if result, handled := s.queryService().ExecuteAction(ctx, invocation.Definition.Action, invocation.Arguments); handled {
+	argument := strings.TrimSpace(strings.Join(invocation.Arguments, " "))
+	if result, handled := s.queryService().ExecuteActionForBackend(ctx, backend, target, invocation.Definition.Action, invocation.Arguments); handled {
 		s.sendQuery(ctx, message.Address, result)
 		return
 	}
 	switch invocation.Definition.Action {
 	case commandregistry.ActionBridgeStart:
 		if binding, ok := s.findBinding(message.Address); ok {
-			s.send(ctx, message.Address, "CloudLight Codex Bridge is ready. This chat/topic is bound to Thread "+shortID(binding.ThreadID)+".\nUse /help to list commands.")
+			label := firstNonEmpty(binding.ThreadID, binding.SessionKey)
+			s.send(ctx, message.Address, fmt.Sprintf("CloudLight Codex Bridge is ready. This chat/topic is bound to %s [%s].\nUse /help to list commands.", backend, shortID(label)))
 		} else {
-			s.send(ctx, message.Address, "CloudLight Codex Bridge is ready. This chat/topic is not bound yet.\nUse /threads to choose a Thread, or /bind <full-thread-id>.\nUse /help to list commands.")
+			s.send(ctx, message.Address, "CloudLight Codex Bridge is ready. This chat/topic is not bound yet.\nUse /threads to choose a session, or /bind <number or ID>.\nUse /help to list commands.")
 		}
 	case commandregistry.ActionThreadBind:
 		if argument == "" {
-			s.send(ctx, message.Address, "Usage: /bind codex <Thread ID> or /bind openclaw <Session Key>. /threads lists the current backend.")
+			s.send(ctx, message.Address, "Usage: /bind <number or ID>. For OpenClaw you can also use /bind oc:<SessionKey>. /threads lists the current backend.")
 			return
 		}
 		s.bind(ctx, message, argument)
@@ -578,6 +678,10 @@ func (s *Service) listNumberedThreads(ctx context.Context, message channels.Inbo
 }
 
 func (s *Service) commandThread(ctx context.Context, message channels.InboundMessage, selector, action string) {
+	if s.backendForMessage(message) == conversation.BackendOpenClaw {
+		s.commandOpenClawTarget(ctx, message, selector, action)
+		return
+	}
 	if s.registry == nil {
 		s.send(ctx, message.Address, "聊天编号尚未初始化。")
 		return
@@ -600,6 +704,37 @@ func (s *Service) commandThread(ctx context.Context, message channels.InboundMes
 		s.stopThread(ctx, message, record.ThreadID)
 	case "cancel":
 		s.cancelThreadInteraction(ctx, message, record.ThreadID)
+	}
+}
+
+func (s *Service) commandOpenClawTarget(ctx context.Context, message channels.InboundMessage, selector, action string) {
+	selector = strings.TrimSpace(selector)
+	var session conversation.Session
+	var err error
+	if parsed, recognized, parseErr := numberprefix.Parse(selector); parseErr != nil {
+		s.send(ctx, message.Address, parseErr.Error())
+		return
+	} else if recognized && parsed.Number > 0 && parsed.Content == "" {
+		session, err = s.openClawSessionByNumber(ctx, parsed.Number)
+	} else {
+		backend := s.openClawBackend()
+		if backend != nil {
+			detail, readErr := backend.ReadSession(ctx, strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(selector, "oc:"), "openclaw:")))
+			err = readErr
+			session = detail.Session
+		}
+	}
+	if err != nil || session.Key == "" {
+		s.send(ctx, message.Address, "指定的 OpenClaw Session 不存在或当前不可用。")
+		return
+	}
+	switch action {
+	case "thread", "status":
+		s.runQueryActionForBackend(ctx, message, conversation.BackendOpenClaw, session.Key, commandregistry.ActionThreadInfo, []string{strconv.Itoa(session.Number)})
+	case "stop":
+		s.stopOpenClawSession(ctx, message, session.Key)
+	default:
+		s.send(ctx, message.Address, "该 OpenClaw Session 不支持此操作。")
 	}
 }
 
@@ -650,7 +785,7 @@ func (s *Service) cancelThreadInteraction(ctx context.Context, message channels.
 }
 
 func (s *Service) bind(ctx context.Context, message channels.InboundMessage, selector string) {
-	backendKind, target := parseBindingTarget(selector)
+	backendKind, target := parseBindingTarget(selector, s.backendForMessage(message))
 	if backendKind == conversation.BackendOpenClaw {
 		sessionKey := target
 		backend := s.openClawBackend()
@@ -658,7 +793,20 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, sel
 			s.send(ctx, message.Address, "OpenClaw 后端尚未配置，请先在设置页测试连接。")
 			return
 		}
-		detail, err := backend.ReadSession(ctx, sessionKey)
+		var detail conversation.Detail
+		var err error
+		if prefix, recognized, parseErr := numberprefix.Parse(sessionKey); parseErr != nil {
+			s.send(ctx, message.Address, parseErr.Error())
+			return
+		} else if recognized && prefix.Number > 0 && prefix.Content == "" {
+			session, lookupErr := s.openClawSessionByNumber(ctx, prefix.Number)
+			err = lookupErr
+			if err == nil {
+				detail, err = backend.ReadSession(ctx, session.Key)
+			}
+		} else {
+			detail, err = backend.ReadSession(ctx, sessionKey)
+		}
 		if err != nil || detail.Key == "" {
 			s.send(ctx, message.Address, "指定的 OpenClaw Session 不存在或当前不可用。请先发送 /threads 查看 Session。")
 			return
@@ -771,7 +919,7 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 			s.send(ctx, message.Address, "绑定的 OpenClaw Session 已不可用，请重新绑定。")
 			return
 		}
-		s.send(ctx, message.Address, fmt.Sprintf("Current binding\nBackend: OpenClaw\nProfile: %s\nTitle: %s\nSession: %s\nUpdated: %s\nState: %s", firstNonEmpty(binding.ChannelProfileID, "default"), displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
+		s.send(ctx, message.Address, fmt.Sprintf("Current binding\nBackend: OpenClaw\nProfile: %s\nSession: #%d %s\nSessionKey: %s\nUpdated: %s\nState: %s", firstNonEmpty(binding.ChannelProfileID, "default"), detail.Number, displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
 		return
 	}
 	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
@@ -816,7 +964,7 @@ func (s *Service) status(ctx context.Context, message channels.InboundMessage) {
 		if err != nil || detail.Key == "" {
 			lines = append(lines, "绑定：[OpenClaw] "+shortID(firstNonEmpty(binding.SessionKey, binding.ThreadID)), "Session：不可用或已删除")
 		} else {
-			lines = append(lines, "Session：[OpenClaw] "+displayTitle(detail.Title)+" · "+shortID(detail.Key), "状态："+firstNonEmpty(detail.Status, "idle"))
+			lines = append(lines, fmt.Sprintf("Session：[OpenClaw] #%d %s · %s", detail.Number, displayTitle(detail.Title), shortID(detail.Key)), "状态："+firstNonEmpty(detail.Status, "idle"))
 		}
 		s.send(ctx, message.Address, strings.Join(lines, "\n"))
 		return
@@ -852,30 +1000,8 @@ func (s *Service) stopTurn(ctx context.Context, message channels.InboundMessage)
 		return
 	}
 	if bindingBackend(binding) == conversation.BackendOpenClaw {
-		backend := s.openClawBackend()
-		if backend == nil {
-			s.send(ctx, message.Address, "OpenClaw 后端尚未连接。")
-			return
-		}
 		key := firstNonEmpty(binding.SessionKey, binding.ThreadID)
-		s.mu.Lock()
-		var route *turnRoute
-		for _, candidate := range s.routes {
-			if candidate.Backend == conversation.BackendOpenClaw && candidate.SessionKey == key && sameAddress(candidate.Address, message.Address) && candidate.UserID == message.UserID {
-				route = candidate
-				break
-			}
-		}
-		s.mu.Unlock()
-		if route == nil || route.TurnID == "" {
-			s.send(ctx, message.Address, "没有可由当前 Telegram 会话停止的 OpenClaw 任务。")
-			return
-		}
-		if _, err := backend.Abort(ctx, key, route.TurnID); err != nil {
-			s.send(ctx, message.Address, "OpenClaw 停止请求失败；任务可能已经结束。")
-			return
-		}
-		s.send(ctx, message.Address, "已请求停止 OpenClaw 任务。")
+		s.stopOpenClawSession(ctx, message, key)
 		return
 	}
 	state := s.runtime.RuntimeState(binding.ThreadID)
@@ -897,7 +1023,56 @@ func (s *Service) stopTurn(ctx context.Context, message channels.InboundMessage)
 	s.clearTurnInput(state.TurnID)
 }
 
+func (s *Service) stopOpenClawSession(ctx context.Context, message channels.InboundMessage, key string) {
+	backend := s.openClawBackend()
+	if backend == nil {
+		s.send(ctx, message.Address, "OpenClaw 后端尚未连接。")
+		return
+	}
+	s.mu.Lock()
+	var route *turnRoute
+	for _, candidate := range s.routes {
+		if candidate.Backend == conversation.BackendOpenClaw && candidate.SessionKey == key && sameAddress(candidate.Address, message.Address) && candidate.UserID == message.UserID {
+			route = candidate
+			break
+		}
+	}
+	s.mu.Unlock()
+	runID := ""
+	if route != nil {
+		runID = route.TurnID
+	}
+	if runID == "" {
+		if detail, err := backend.ReadSession(ctx, key); err == nil && detail.HasActiveRun {
+			runID = firstNonEmpty(detail.ActiveRunIDs...)
+		}
+	}
+	if runID == "" {
+		s.send(ctx, message.Address, "没有可由当前 Telegram 会话停止的 OpenClaw 任务。")
+		return
+	}
+	if _, err := backend.Abort(ctx, key, runID); err != nil {
+		s.send(ctx, message.Address, "OpenClaw 停止请求失败；任务可能已经结束。")
+		return
+	}
+	s.send(ctx, message.Address, "已请求停止 OpenClaw 任务。")
+}
+
 func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage, text string, target ...string) {
+	if s.backendForMessage(message) == conversation.BackendOpenClaw {
+		key := ""
+		if len(target) > 0 {
+			key = strings.TrimSpace(target[0])
+		} else if binding, ok := s.findBinding(message.Address); ok {
+			key = firstNonEmpty(binding.SessionKey, binding.ThreadID)
+		}
+		if key == "" {
+			s.reject(ctx, message, "请指定 OpenClaw Session 编号，例如：\n\n#12 继续处理\n\n发送 /threads 查看编号。", "unbound")
+			return
+		}
+		s.startOpenClawTurnForKey(ctx, message, text, key)
+		return
+	}
 	if len(target) == 0 {
 		if binding, ok := s.findBinding(message.Address); ok && bindingBackend(binding) == conversation.BackendOpenClaw {
 			s.startOpenClawTurn(ctx, message, text, binding)
@@ -947,12 +1122,15 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 }
 
 func (s *Service) startOpenClawTurn(ctx context.Context, message channels.InboundMessage, text string, binding bindings.Binding) {
+	s.startOpenClawTurnForKey(ctx, message, text, firstNonEmpty(binding.SessionKey, binding.ThreadID))
+}
+
+func (s *Service) startOpenClawTurnForKey(ctx context.Context, message channels.InboundMessage, text, key string) {
 	backend := s.openClawBackend()
 	if backend == nil {
 		s.reject(ctx, message, "OpenClaw 后端尚未配置，请先在设置页测试连接。", "openclaw-unavailable")
 		return
 	}
-	key := firstNonEmpty(binding.SessionKey, binding.ThreadID)
 	detail, err := backend.ReadSession(ctx, key)
 	if err != nil || detail.Key == "" {
 		s.reject(ctx, message, "绑定的 OpenClaw Session 不存在或当前不可用，请重新绑定。", "missing-session")
@@ -1586,6 +1764,29 @@ func (s *Service) openClawBackend() conversation.IConversationBackend {
 	return s.openclaw
 }
 
+func (s *Service) backendForMessage(message channels.InboundMessage) string {
+	if binding, ok := s.findBinding(message.Address); ok {
+		return bindingBackend(binding)
+	}
+	s.mu.Lock()
+	resolver := s.backendResolver
+	s.mu.Unlock()
+	if resolver != nil {
+		if backend := strings.ToLower(strings.TrimSpace(resolver(message.Address.ChannelProfileID))); backend == conversation.BackendOpenClaw || backend == conversation.BackendCodex {
+			return backend
+		}
+	}
+	return conversation.BackendCodex
+}
+
+func (s *Service) targetForMessage(message channels.InboundMessage) string {
+	binding, ok := s.findBinding(message.Address)
+	if !ok {
+		return ""
+	}
+	return firstNonEmpty(binding.SessionKey, binding.ThreadID)
+}
+
 func bindingBackend(binding bindings.Binding) string {
 	if strings.TrimSpace(binding.Backend) == "" {
 		return conversation.BackendCodex
@@ -1605,10 +1806,10 @@ func parseOpenClawSelector(value string) (string, bool) {
 	return "", false
 }
 
-// /bind now carries the backend explicitly.  The legacy oc:/openclaw:
-// selector and an unprefixed Codex Thread remain accepted so existing chats
-// do not lose their bindings during upgrade.
-func parseBindingTarget(value string) (backend, target string) {
+// /bind accepts an explicit backend, the legacy oc:/openclaw: selector, or a
+// number/ID interpreted in the current profile backend. This keeps the two
+// number spaces separate while preserving unprefixed Codex IDs.
+func parseBindingTarget(value string, current ...string) (backend, target string) {
 	value = strings.TrimSpace(value)
 	parts := strings.Fields(value)
 	if len(parts) >= 2 {
@@ -1622,7 +1823,11 @@ func parseBindingTarget(value string) (backend, target string) {
 	if key, ok := parseOpenClawSelector(value); ok {
 		return conversation.BackendOpenClaw, key
 	}
-	return conversation.BackendCodex, value
+	backend = conversation.BackendCodex
+	if len(current) > 0 && strings.EqualFold(strings.TrimSpace(current[0]), conversation.BackendOpenClaw) {
+		backend = conversation.BackendOpenClaw
+	}
+	return backend, value
 }
 
 func (s *Service) send(ctx context.Context, address channels.ChannelAddress, text string) {
@@ -1651,7 +1856,13 @@ func (s *Service) commandRegistry() *commandregistry.Registry {
 }
 
 func (s *Service) runQueryAction(ctx context.Context, message channels.InboundMessage, action string, arguments []string) {
-	if result, handled := s.queryService().ExecuteAction(ctx, action, arguments); handled {
+	if result, handled := s.queryService().ExecuteActionForBackend(ctx, s.backendForMessage(message), s.targetForMessage(message), action, arguments); handled {
+		s.sendQuery(ctx, message.Address, result)
+	}
+}
+
+func (s *Service) runQueryActionForBackend(ctx context.Context, message channels.InboundMessage, backend, target, action string, arguments []string) {
+	if result, handled := s.queryService().ExecuteActionForBackend(ctx, backend, target, action, arguments); handled {
 		s.sendQuery(ctx, message.Address, result)
 	}
 }

@@ -14,7 +14,30 @@ public sealed class CommandItemViewModel(RemoteCommandDefinition model)
     public string DisplayName => Model.DisplayName;
     public string Description => Model.Description;
     public string AliasesDisplay => Model.Aliases is { Count: > 0 } aliases ? string.Join("、", aliases) : "无";
+    public string ChineseName => Model.DisplayName;
+    public string UsageExample => Model.Name switch
+    {
+        "/bind" => "/bind 12",
+        "/thread" => "/thread 12",
+        "/history" => "/history 12 3",
+        "/status" => "/status 12",
+        "/stop" => "/stop 12",
+        _ => Model.Name
+    };
+    public string ChannelSupportDisplay => "支持 QQ / Telegram";
     public string TypeDisplay => Model.BuiltIn ? "系统指令" : "自定义指令";
+    public string CapabilityDisplay => Model.BackendCapability switch
+    {
+        "openclaw" => "OpenClaw 专属",
+        "both" => "Codex + OpenClaw",
+        _ => "Codex 系统"
+    };
+    public string CompatibilityDisplay => Model.BackendCapability switch
+    {
+        "both" => "兼容 Codex 同名指令：是",
+        "openclaw" => "兼容 Codex 同名指令：否",
+        _ => "兼容 OpenClaw 同名指令：否"
+    };
     public string StatusDisplay => Model.Enabled ? "已启用" : "已停用";
     public string LockDisplay => Model.BuiltIn ? (Model.Locked ? "🔒 已锁定" : "🔓 已解锁") : "";
     public Visibility LockVisibility => Model.BuiltIn ? Visibility.Visible : Visibility.Collapsed;
@@ -29,6 +52,7 @@ public sealed class CommandsViewModel : ObservableObject
 {
     private readonly BridgeApiClient _api;
     private readonly LogService _logs;
+    private readonly string _backend;
     private bool _initialized;
     private bool _editorOpen;
     private bool _editingBuiltIn;
@@ -43,10 +67,11 @@ public sealed class CommandsViewModel : ObservableObject
     private bool _enabled = true;
     private string _operationMessage = "";
 
-    public CommandsViewModel(BridgeApiClient api, LogService logs)
+    public CommandsViewModel(BridgeApiClient api, LogService logs, string backend = "codex")
     {
         _api = api;
         _logs = logs;
+        _backend = string.Equals(backend, "openclaw", StringComparison.OrdinalIgnoreCase) ? "openclaw" : "codex";
         RefreshCommand = new AsyncRelayCommand(() => RefreshAsync());
         AddCommand = new RelayCommand(_ => BeginAdd());
         EditCommand = new RelayCommand(value => BeginEdit(value as CommandItemViewModel));
@@ -60,6 +85,13 @@ public sealed class CommandsViewModel : ObservableObject
 
     public ObservableCollection<CommandItemViewModel> Commands { get; } = [];
     public ObservableCollection<RemoteCommandAction> Actions { get; } = [];
+    public bool IsOpenClaw => _backend == "openclaw";
+    public string PageTitle => IsOpenClaw ? "OpenClaw 指令" : "Codex 指令";
+    public string PageDescription => IsOpenClaw
+        ? "只显示可在 OpenClaw 路由中使用的远程指令；运行状态和 Session 由 OpenClaw Gateway 提供。"
+        : "只显示 Codex 路由中可用的远程指令；Codex Thread、运行状态和额度能力保持独立。";
+    public string BackendNotice => IsOpenClaw ? "当前聊天路由到 OpenClaw 时，序号表示 OpenClaw Session；路由到 Codex 时，序号表示 Codex Thread。" : "";
+    public Visibility BackendNoticeVisibility => IsOpenClaw ? Visibility.Visible : Visibility.Collapsed;
     public ICommand RefreshCommand { get; }
     public ICommand AddCommand { get; }
     public ICommand EditCommand { get; }
@@ -93,7 +125,7 @@ public sealed class CommandsViewModel : ObservableObject
     {
         try
         {
-            var response = await _api.GetCommandsAsync(cancellationToken);
+            var response = await _api.GetCommandsForBackendAsync(_backend, cancellationToken);
             Commands.Clear();
             foreach (var item in response.Commands)
             {
@@ -103,7 +135,7 @@ public sealed class CommandsViewModel : ObservableObject
             Actions.Clear();
             foreach (var action in response.Actions) Actions.Add(action);
             _initialized = true;
-            OperationMessage = $"已加载 {Commands.Count} 条指令。QQ 与 Telegram 共用此配置。";
+            OperationMessage = $"已加载 {Commands.Count} 条{PageTitle}；QQ 与 Telegram 共用此配置。";
         }
         catch (Exception exception)
         {
@@ -160,7 +192,7 @@ public sealed class CommandsViewModel : ObservableObject
             else await _api.UpdateCommandAsync(_editingId, input);
             IsEditorOpen = false;
             await RefreshAsync();
-            OperationMessage = "指令已保存。有效配置立即同时用于 QQ 和 Telegram。";
+            OperationMessage = $"指令已保存，{PageTitle} 页面已刷新。有效配置立即同时用于 QQ 和 Telegram。";
         }
         catch (Exception exception)
         {

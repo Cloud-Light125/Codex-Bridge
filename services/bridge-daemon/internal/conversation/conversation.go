@@ -102,3 +102,11 @@ type IConversationBackend interface {
 	SubscribeEvents(func(Event)) func()
 	ConnectionStatus() ConnectionStatus
 }
+
+// NumberedSessionBackend is implemented by backends that expose a persistent
+// user-facing session number space. It deliberately returns the backend's
+// opaque key so callers cannot accidentally send a number to another backend.
+type NumberedSessionBackend interface {
+	IConversationBackend
+	SessionByNumber(context.Context, int) (Session, error)
+}

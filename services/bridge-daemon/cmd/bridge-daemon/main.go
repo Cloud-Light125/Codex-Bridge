@@ -24,10 +24,11 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/mirror"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/openclaw"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/sessionregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
-var version = "1.0.1"
+var version = "1.1.4"
 
 func main() {
 	options := config.Options{Version: version}
@@ -62,6 +63,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "bridge-daemon: open thread numbers:", err)
 		os.Exit(1)
 	}
+	openClawSessionRegistry, err := sessionregistry.New(paths.OpenClawSessionNumbersFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bridge-daemon: open OpenClaw session numbers:", err)
+		os.Exit(1)
+	}
 	commandRegistry, err := commandregistry.New(paths.CommandsFile)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bridge-daemon: open commands:", err)
@@ -82,7 +88,7 @@ func main() {
 		os.Exit(1)
 	}
 	controlService := control.NewService(manager, manager, threadRegistry)
-	openClawService := openclaw.NewService(logger, broker)
+	openClawService := openclaw.NewService(logger, broker, openClawSessionRegistry)
 	profileManager := channelprofiles.NewManager(controlService, manager, bindingRepository, broker, logger, threadRegistry, commandRegistry, openClawService)
 	mirrorService, err := mirror.New(paths.MirrorFile, controlService, manager, threadRegistry, broker, logger,
 		mirror.Target{Status: func() (string, bool) {

@@ -435,10 +435,13 @@ type fakeOpenClawBackend struct {
 
 func (f *fakeOpenClawBackend) Backend() string { return conversation.BackendOpenClaw }
 func (f *fakeOpenClawBackend) ListSessions(context.Context, int) ([]conversation.Session, error) {
-	return []conversation.Session{{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Title: "Main", Status: "idle"}}, nil
+	return []conversation.Session{{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Number: 1, Title: "Main", Status: "idle", UpdatedAt: "2026-08-30T00:00:00Z"}}, nil
+}
+func (f *fakeOpenClawBackend) SessionByNumber(context.Context, int) (conversation.Session, error) {
+	return conversation.Session{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Number: 1, Title: "Main", Status: "idle"}, nil
 }
 func (f *fakeOpenClawBackend) ReadSession(context.Context, string) (conversation.Detail, error) {
-	return conversation.Detail{Session: conversation.Session{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Title: "Main", Status: "idle"}}, nil
+	return conversation.Detail{Session: conversation.Session{Backend: conversation.BackendOpenClaw, Key: "agent:main:main", Number: 1, Title: "Main", Status: "idle", UpdatedAt: "2026-08-30T00:00:00Z"}, Messages: []conversation.Message{{Role: "user", Text: "previous question"}, {Role: "assistant", Text: "previous answer"}}}, nil
 }
 func (f *fakeOpenClawBackend) SendMessage(_ context.Context, key, message string) (conversation.SendResult, error) {
 	f.sends = append(f.sends, key+":"+message)
@@ -481,5 +484,69 @@ func TestQQBotRoutesBoundOpenClawSessionAndFinalOrAbort(t *testing.T) {
 	}
 	if len(adapter.sent) < 2 || !strings.Contains(adapter.sent[len(adapter.sent)-1].Text, "已请求停止 OpenClaw") {
 		t.Fatalf("QQ did not acknowledge OpenClaw stop: %#v", adapter.sent)
+	}
+}
+
+func TestQQOpenClawNumberedCommandsAndCodexIsolation(t *testing.T) {
+	thread := control.ThreadSummary{ThreadID: "codex-thread-1", Number: 1, Title: "Codex one", Status: "idle"}
+	runtime := &fakeRuntime{state: control.RuntimeState{CanSend: true}}
+	service, adapter, repository := newServiceFixture(t, &fakeControl{threads: []control.ThreadSummary{thread}}, runtime)
+	backend := &fakeOpenClawBackend{}
+	service.SetOpenClawBackend(backend)
+	service.SetBackendResolver(func(string) string { return conversation.BackendOpenClaw })
+	openAddress := channels.ChannelAddress{ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c", ChatID: "open"}
+
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "/threads"})
+	if len(adapter.sent) != 1 || !strings.Contains(adapter.sent[0].Text, "#1 Main") || !strings.Contains(adapter.sent[0].Text, "SessionKey：agent:main:main") {
+		t.Fatalf("OpenClaw /threads output=%#v", adapter.sent)
+	}
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "[1] hello"})
+	if len(backend.sends) != 1 || backend.sends[0] != "agent:main:main:hello" {
+		t.Fatalf("bracket number was not routed to OpenClaw: %#v", backend.sends)
+	}
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "/bind 1"})
+	binding, ok := repository.FindAddress("qqbot", "100", "c2c", "open", "")
+	if !ok || binding.Backend != conversation.BackendOpenClaw || binding.TargetID != "agent:main:main" {
+		t.Fatalf("numeric OpenClaw bind=%#v ok=%t", binding, ok)
+	}
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "/unbind"})
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "/bind oc:agent:main:main"})
+	binding, ok = repository.FindAddress("qqbot", "100", "c2c", "open", "")
+	if !ok || binding.Backend != conversation.BackendOpenClaw || binding.SessionKey != "agent:main:main" {
+		t.Fatalf("SessionKey OpenClaw bind=%#v ok=%t", binding, ok)
+	}
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "/current"})
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "/history"})
+	if !strings.Contains(adapter.sent[len(adapter.sent)-2].Text, "Session：#1 Main") || !strings.Contains(adapter.sent[len(adapter.sent)-1].Text, "previous answer") {
+		t.Fatalf("OpenClaw current/history output=%#v", adapter.sent)
+	}
+	unsupported := []string{"/running", "/waiting", "/failed", "/quota", "/cancel"}
+	for _, command := range unsupported {
+		service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: command})
+		if !strings.Contains(adapter.sent[len(adapter.sent)-1].Text, "不适用于 OpenClaw") || runtime.startCount != 0 {
+			t.Fatalf("Codex-only command %s crossed into OpenClaw: %#v", command, adapter.sent[len(adapter.sent)-1])
+		}
+	}
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "[1] second task"})
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: openAddress, UserID: "user", Text: "/stop"})
+	if len(backend.aborts) != 1 || backend.aborts[0] != "agent:main:main:openclaw-run-2" || !strings.Contains(adapter.sent[len(adapter.sent)-1].Text, "已请求停止 OpenClaw") {
+		t.Fatalf("OpenClaw /stop was not routed to the Session: aborts=%#v sent=%#v", backend.aborts, adapter.sent[len(adapter.sent)-1])
+	}
+
+	codexAddress := channels.ChannelAddress{ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c", ChatID: "codex"}
+	numbers, err := threadregistry.New(filepath.Join(t.TempDir(), "thread-numbers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := numbers.Ensure(threadregistry.Metadata{ThreadID: "codex-thread-1", Title: "Codex one", CreatedAt: "2026-08-30T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	service.registry = numbers
+	if _, _, err := repository.UpsertAddress(bindings.CreateRequest{Backend: conversation.BackendCodex, ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c", ChatID: "codex", ThreadID: "codex-thread-1", TargetID: "codex-thread-1"}); err != nil {
+		t.Fatal(err)
+	}
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: codexAddress, UserID: "user", Text: "#1 codex message"})
+	if runtime.startCount != 1 || runtime.lastThreadID != "codex-thread-1" || len(backend.sends) != 2 {
+		t.Fatalf("Codex #1 crossed into OpenClaw or failed: starts=%d thread=%q sends=%#v", runtime.startCount, runtime.lastThreadID, backend.sends)
 	}
 }

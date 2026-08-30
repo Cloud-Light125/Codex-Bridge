@@ -125,3 +125,44 @@ func TestTelegramMenuEligibilityDoesNotLimitBridgeParsing(t *testing.T) {
 		t.Fatal("Bridge did not resolve a command excluded from Telegram menu")
 	}
 }
+
+func TestBackendCapabilitiesFilterCommandsAndHelp(t *testing.T) {
+	registry := NewInMemory()
+	openClaw := registry.ListForBackend(BackendCapabilityOpenClaw)
+	if len(openClaw.Commands) == 0 || len(openClaw.Actions) == 0 {
+		t.Fatal("OpenClaw command projection is empty")
+	}
+	for _, command := range openClaw.Commands {
+		if command.BackendCapability == BackendCapabilityCodex {
+			t.Fatalf("Codex-only command leaked into OpenClaw projection: %#v", command)
+		}
+	}
+	for _, action := range openClaw.Actions {
+		if action.BackendCapability == BackendCapabilityCodex {
+			t.Fatalf("Codex-only action leaked into OpenClaw projection: %#v", action)
+		}
+	}
+	if !registry.ActionSupportsBackend(ActionOpenClawRefresh, BackendCapabilityOpenClaw) || registry.ActionSupportsBackend(ActionAccountQuota, BackendCapabilityOpenClaw) {
+		t.Fatal("backend capability gate returned the wrong result")
+	}
+	if !containsCommand(openClaw.Commands, "/oc-refresh") || containsCommand(openClaw.Commands, "/running") || containsCommand(openClaw.Commands, "/waiting") || containsCommand(openClaw.Commands, "/failed") || containsCommand(openClaw.Commands, "/quota") || containsCommand(openClaw.Commands, "/cancel") {
+		t.Fatalf("unexpected OpenClaw command projection: %#v", openClaw.Commands)
+	}
+	codex := registry.ListForBackend(BackendCapabilityCodex)
+	if containsCommand(codex.Commands, "/oc-refresh") {
+		t.Fatalf("OpenClaw-only command leaked into Codex projection: %#v", codex.Commands)
+	}
+	help := registry.HelpTextForBackend(BackendCapabilityOpenClaw)
+	if !strings.Contains(help, "/threads") || !strings.Contains(help, "/oc-refresh") || strings.Contains(help, "/quota") {
+		t.Fatalf("unexpected OpenClaw help: %s", help)
+	}
+}
+
+func containsCommand(commands []Definition, name string) bool {
+	for _, command := range commands {
+		if command.Name == name {
+			return true
+		}
+	}
+	return false
+}

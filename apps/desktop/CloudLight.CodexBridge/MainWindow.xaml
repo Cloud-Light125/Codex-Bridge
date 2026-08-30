@@ -19,7 +19,8 @@
                     <RadioButton Content="OpenClaw" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsOpenClawPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="openclaw"/>
                     <RadioButton Content="QQ" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsQqPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="qq"/>
                     <RadioButton Content="Telegram" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsTelegramPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="telegram"/>
-                    <RadioButton Content="指令" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsCommandsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="commands"/>
+                    <RadioButton Content="Codex 指令" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsCommandsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="commands"/>
+                    <RadioButton Content="OpenClaw 指令" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsOpenClawCommandsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="openclaw-commands"/>
                     <RadioButton Content="消息同步" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsMirrorPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="mirror"/>
                     <RadioButton Content="备份与恢复" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsBackupPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="backup"/>
                     <Separator Margin="18,12"/>
@@ -27,7 +28,7 @@
                 </StackPanel>
                 <StackPanel Grid.Row="2" Margin="0,0,0,12">
                     <RadioButton Content="设置" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsSettingsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="settings"/>
-                    <TextBlock Text="v1.1.3" Style="{StaticResource SecondaryTextStyle}" Margin="20,8,0,5"/>
+                    <TextBlock Text="v1.1.4" Style="{StaticResource SecondaryTextStyle}" Margin="20,8,0,5"/>
                 </StackPanel>
             </Grid>
         </Border>

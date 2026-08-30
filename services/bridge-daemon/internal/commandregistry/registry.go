@@ -33,6 +33,13 @@ const (
 	ActionThreadCurrent     = "thread.current"
 	ActionThreadStop        = "thread.stop"
 	ActionInteractionCancel = "interaction.cancel"
+	ActionOpenClawRefresh   = "openclaw.sessions.refresh"
+)
+
+const (
+	BackendCapabilityCodex    = "codex"
+	BackendCapabilityOpenClaw = "openclaw"
+	BackendCapabilityBoth     = "both"
 )
 
 var (
@@ -41,9 +48,10 @@ var (
 )
 
 type ActionDefinition struct {
-	ID            string `json:"id"`
-	DisplayName   string `json:"displayName"`
-	TargetSupport bool   `json:"targetSupport"`
+	ID                string `json:"id"`
+	DisplayName       string `json:"displayName"`
+	TargetSupport     bool   `json:"targetSupport"`
+	BackendCapability string `json:"backendCapability"`
 }
 
 type DefaultCommandDefinition struct {
@@ -66,6 +74,7 @@ type Definition struct {
 	Description          string   `json:"description"`
 	ParameterHelp        string   `json:"parameterHelp"`
 	Action               string   `json:"action"`
+	BackendCapability    string   `json:"backendCapability"`
 	BuiltIn              bool     `json:"builtIn"`
 	Locked               bool     `json:"locked"`
 	Enabled              bool     `json:"enabled"`
@@ -134,35 +143,45 @@ type Registry struct {
 
 func DefaultActions() []ActionDefinition {
 	return []ActionDefinition{
-		{ActionBridgeStart, "查看机器人就绪状态", false}, {ActionBridgeHelp, "查看指令帮助", false},
-		{ActionBridgeStatus, "查看 Bridge 状态", true}, {ActionThreadsList, "查看会话列表", false},
-		{ActionThreadInfo, "查看会话详情", true}, {ActionThreadHistory, "查看聊天记录", true},
-		{ActionThreadRunning, "查看正在执行", false}, {ActionThreadWaiting, "查看等待处理", false},
-		{ActionThreadRecent, "查看最近活动", false}, {ActionThreadFailed, "查看失败任务", false},
-		{ActionAccountQuota, "查看额度", false}, {ActionThreadBind, "绑定会话", false},
-		{ActionThreadUnbind, "解除绑定", false}, {ActionThreadCurrent, "查看当前绑定", false},
-		{ActionThreadStop, "停止任务", true}, {ActionInteractionCancel, "取消等待", true},
+		{ID: ActionBridgeStart, DisplayName: "查看机器人就绪状态", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionBridgeHelp, DisplayName: "查看指令帮助", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionBridgeStatus, DisplayName: "查看 Bridge 状态", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
+		{ID: ActionThreadsList, DisplayName: "查看会话列表", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionThreadInfo, DisplayName: "查看会话详情", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
+		{ID: ActionThreadHistory, DisplayName: "查看聊天记录", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
+		{ID: ActionThreadRunning, DisplayName: "查看正在执行", BackendCapability: BackendCapabilityCodex},
+		{ID: ActionThreadWaiting, DisplayName: "查看等待处理", BackendCapability: BackendCapabilityCodex},
+		{ID: ActionThreadRecent, DisplayName: "查看最近活动", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionThreadFailed, DisplayName: "查看失败任务", BackendCapability: BackendCapabilityCodex},
+		{ID: ActionAccountQuota, DisplayName: "查看额度", BackendCapability: BackendCapabilityCodex},
+		{ID: ActionThreadBind, DisplayName: "绑定会话", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionThreadUnbind, DisplayName: "解除绑定", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionThreadCurrent, DisplayName: "查看当前绑定", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionThreadStop, DisplayName: "停止任务", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
+		{ID: ActionInteractionCancel, DisplayName: "取消等待", TargetSupport: true, BackendCapability: BackendCapabilityCodex},
+		{ID: ActionOpenClawRefresh, DisplayName: "刷新 OpenClaw Session", BackendCapability: BackendCapabilityOpenClaw},
 	}
 }
 
 func BuiltInDefaults() []DefaultCommandDefinition {
 	return []DefaultCommandDefinition{
-		{"builtin.start", "/start", "开始使用", "查看机器人是否可用及当前绑定状态", ActionBridgeStart, nil, true, "", "开始使用"},
-		{"builtin.help", "/help", "指令帮助", "查看当前已启用的远程指令", ActionBridgeHelp, []string{"/commands"}, true, "", "查看指令帮助"},
-		{"builtin.status", "/status", "查看状态", "查看 Bridge 与 Codex 连接状态；配合 #编号查看指定会话", ActionBridgeStatus, nil, true, "[聊天编号]", "查看连接状态"},
-		{"builtin.threads", "/threads", "查看会话列表", "查看聊天编号和标题", ActionThreadsList, nil, true, "[页码]", "查看会话列表"},
-		{"builtin.thread", "/thread", "查看会话详情", "查看指定会话的状态、项目、模型和更新时间", ActionThreadInfo, nil, true, "<聊天编号>", "查看会话详情"},
-		{"builtin.history", "/history", "查看聊天记录", "查看指定会话最近几轮聊天记录", ActionThreadHistory, nil, true, "<聊天编号> [数量]", "查看聊天记录"},
-		{"builtin.running", "/running", "查看正在执行", "查看当前正在执行的 Codex 任务", ActionThreadRunning, nil, true, "", "查看正在执行"},
-		{"builtin.waiting", "/waiting", "查看等待处理", "查看等待用户回答或桌面端审批的会话", ActionThreadWaiting, nil, true, "", "查看等待处理"},
-		{"builtin.recent", "/recent", "查看最近活动", "查看最近有活动的会话", ActionThreadRecent, nil, true, "", "查看最近活动"},
-		{"builtin.failed", "/failed", "查看失败任务", "查看最近失败的 Codex 任务", ActionThreadFailed, nil, true, "", "查看失败任务"},
-		{"builtin.quota", "/quota", "查看额度", "查看 Codex 使用额度", ActionAccountQuota, nil, true, "", "查看使用额度"},
-		{"builtin.bind", "/bind", "绑定会话", "将当前远程聊天关联到现有 Codex 会话", ActionThreadBind, nil, true, "<编号或 ID>", "绑定会话"},
-		{"builtin.unbind", "/unbind", "解除绑定", "解除当前远程聊天的会话绑定", ActionThreadUnbind, nil, true, "", "解除绑定"},
-		{"builtin.current", "/current", "查看当前绑定", "查看当前远程聊天绑定的会话", ActionThreadCurrent, nil, true, "", "查看当前绑定"},
-		{"builtin.stop", "/stop", "停止任务", "停止当前聊天或指定会话发起的任务", ActionThreadStop, nil, true, "[聊天编号]", "停止任务"},
-		{"builtin.cancel", "/cancel", "取消等待", "取消当前正在等待的用户输入", ActionInteractionCancel, nil, true, "[聊天编号]", "取消等待"},
+		{ID: "builtin.start", DefaultName: "/start", DefaultDisplayName: "开始使用", DefaultDescription: "查看机器人是否可用及当前绑定状态", DefaultAction: ActionBridgeStart, DefaultEnabled: true, DefaultTelegramMenuLabel: "开始使用"},
+		{ID: "builtin.help", DefaultName: "/help", DefaultDisplayName: "指令帮助", DefaultDescription: "查看当前已启用的远程指令", DefaultAction: ActionBridgeHelp, DefaultAliases: []string{"/commands"}, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看指令帮助"},
+		{ID: "builtin.status", DefaultName: "/status", DefaultDisplayName: "查看状态", DefaultDescription: "查看 Bridge 与当前后端连接状态；配合 #编号查看指定会话", DefaultAction: ActionBridgeStatus, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号]", DefaultTelegramMenuLabel: "查看连接状态"},
+		{ID: "builtin.threads", DefaultName: "/threads", DefaultDisplayName: "查看会话列表", DefaultDescription: "查看当前后端的会话编号、标题和状态", DefaultAction: ActionThreadsList, DefaultEnabled: true, DefaultParameterHelp: "[页码]", DefaultTelegramMenuLabel: "查看会话列表"},
+		{ID: "builtin.thread", DefaultName: "/thread", DefaultDisplayName: "会话详情", DefaultDescription: "查看当前后端指定或当前会话的状态、模型和更新时间", DefaultAction: ActionThreadInfo, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号]", DefaultTelegramMenuLabel: "查看会话详情"},
+		{ID: "builtin.history", DefaultName: "/history", DefaultDisplayName: "聊天记录", DefaultDescription: "查看当前后端指定或当前会话最近几轮聊天记录", DefaultAction: ActionThreadHistory, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号] [数量]", DefaultTelegramMenuLabel: "查看聊天记录"},
+		{ID: "builtin.running", DefaultName: "/running", DefaultDisplayName: "查看正在执行", DefaultDescription: "查看当前正在执行的 Codex 任务", DefaultAction: ActionThreadRunning, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看正在执行"},
+		{ID: "builtin.waiting", DefaultName: "/waiting", DefaultDisplayName: "查看等待处理", DefaultDescription: "查看等待用户回答或桌面端审批的 Codex 会话", DefaultAction: ActionThreadWaiting, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看等待处理"},
+		{ID: "builtin.recent", DefaultName: "/recent", DefaultDisplayName: "最近活动", DefaultDescription: "查看当前后端最近有活动的会话", DefaultAction: ActionThreadRecent, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看最近活动"},
+		{ID: "builtin.failed", DefaultName: "/failed", DefaultDisplayName: "查看失败任务", DefaultDescription: "查看最近失败的 Codex 任务", DefaultAction: ActionThreadFailed, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看失败任务"},
+		{ID: "builtin.quota", DefaultName: "/quota", DefaultDisplayName: "查看额度", DefaultDescription: "查看 Codex 使用额度", DefaultAction: ActionAccountQuota, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看使用额度"},
+		{ID: "builtin.bind", DefaultName: "/bind", DefaultDisplayName: "绑定会话", DefaultDescription: "将当前远程聊天关联到当前后端的会话；也可使用 oc:<SessionKey>", DefaultAction: ActionThreadBind, DefaultEnabled: true, DefaultParameterHelp: "<编号或 ID>", DefaultTelegramMenuLabel: "绑定会话"},
+		{ID: "builtin.unbind", DefaultName: "/unbind", DefaultDisplayName: "解除绑定", DefaultDescription: "解除当前远程聊天的会话绑定", DefaultAction: ActionThreadUnbind, DefaultEnabled: true, DefaultTelegramMenuLabel: "解除绑定"},
+		{ID: "builtin.current", DefaultName: "/current", DefaultDisplayName: "当前绑定", DefaultDescription: "查看当前远程聊天绑定的后端会话", DefaultAction: ActionThreadCurrent, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看当前绑定"},
+		{ID: "builtin.stop", DefaultName: "/stop", DefaultDisplayName: "停止任务", DefaultDescription: "停止当前聊天或指定会话发起的任务", DefaultAction: ActionThreadStop, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号]", DefaultTelegramMenuLabel: "停止任务"},
+		{ID: "builtin.cancel", DefaultName: "/cancel", DefaultDisplayName: "取消等待", DefaultDescription: "取消当前正在等待的 Codex 用户输入", DefaultAction: ActionInteractionCancel, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号]", DefaultTelegramMenuLabel: "取消等待"},
+		{ID: "builtin.openclaw-refresh", DefaultName: "/oc-refresh", DefaultDisplayName: "刷新 OpenClaw Session", DefaultDescription: "OpenClaw 专属：重新从 Gateway 刷新 Session 列表", DefaultAction: ActionOpenClawRefresh, DefaultEnabled: true, DefaultTelegramMenuLabel: "刷新 OpenClaw Session"},
 	}
 }
 
@@ -194,6 +213,29 @@ func (r *Registry) List() ListResponse {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return ListResponse{SchemaVersion: SchemaVersion, Commands: r.effectiveLocked(), Actions: append([]ActionDefinition(nil), r.actions...)}
+}
+
+func (r *Registry) ListForBackend(backend string) ListResponse {
+	backend = normalizeBackendCapability(backend)
+	result := r.List()
+	if backend == "" {
+		return result
+	}
+	filtered := make([]Definition, 0, len(result.Commands))
+	for _, command := range result.Commands {
+		if SupportsBackend(command.BackendCapability, backend) {
+			filtered = append(filtered, command)
+		}
+	}
+	result.Commands = filtered
+	actions := make([]ActionDefinition, 0, len(result.Actions))
+	for _, action := range result.Actions {
+		if SupportsBackend(action.BackendCapability, backend) {
+			actions = append(actions, action)
+		}
+	}
+	result.Actions = actions
+	return result
 }
 
 func (r *Registry) Resolve(text string) (Invocation, bool) {
@@ -389,7 +431,14 @@ func (r *Registry) Restore(id string) (Definition, error) {
 }
 
 func (r *Registry) HelpText() string {
-	list := r.List().Commands
+	return r.helpTextForDefinitions(r.ListForBackend(BackendCapabilityCodex).Commands, BackendCapabilityCodex)
+}
+
+func (r *Registry) HelpTextForBackend(backend string) string {
+	return r.helpTextForDefinitions(r.ListForBackend(backend).Commands, backend)
+}
+
+func (r *Registry) helpTextForDefinitions(list []Definition, backend string) string {
 	lines := []string{"可用指令："}
 	for _, item := range list {
 		if !item.Enabled {
@@ -405,7 +454,11 @@ func (r *Registry) HelpText() string {
 		}
 		lines = append(lines, item.Description)
 	}
-	return strings.Join(append(lines, "", "发送任务：", "#63 继续修改这个功能"), "\n")
+	sample := "#63 继续修改这个功能"
+	if normalizeBackendCapability(backend) == BackendCapabilityOpenClaw {
+		sample = "#12 继续处理这个任务"
+	}
+	return strings.Join(append(lines, "", "发送任务：", sample), "\n")
 }
 
 func (r *Registry) SupportsTarget(action string) bool {
@@ -417,14 +470,56 @@ func (r *Registry) SupportsTarget(action string) bool {
 	return false
 }
 
-func (r *Registry) effectiveLocked() []Definition {
-	return effective(r.defaults, r.overrides, r.customs)
+func (r *Registry) ActionSupportsBackend(action, backend string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, item := range r.actions {
+		if item.ID == action {
+			return SupportsBackend(item.BackendCapability, backend)
+		}
+	}
+	return false
 }
 
-func effective(defaults []DefaultCommandDefinition, overrides map[string]builtInOverride, customs map[string]customRecord) []Definition {
+func SupportsBackend(capability, backend string) bool {
+	capability = normalizeBackendCapability(capability)
+	backend = normalizeBackendCapability(backend)
+	return capability == BackendCapabilityBoth || capability == backend
+}
+
+func normalizeBackendCapability(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case BackendCapabilityCodex:
+		return BackendCapabilityCodex
+	case BackendCapabilityOpenClaw:
+		return BackendCapabilityOpenClaw
+	case BackendCapabilityBoth:
+		return BackendCapabilityBoth
+	default:
+		return ""
+	}
+}
+
+func capabilityForAction(action string, actions []ActionDefinition) string {
+	for _, item := range actions {
+		if item.ID == action {
+			capability := normalizeBackendCapability(item.BackendCapability)
+			if capability != "" {
+				return capability
+			}
+		}
+	}
+	return BackendCapabilityCodex
+}
+
+func (r *Registry) effectiveLocked() []Definition {
+	return effective(r.defaults, r.actions, r.overrides, r.customs)
+}
+
+func effective(defaults []DefaultCommandDefinition, actions []ActionDefinition, overrides map[string]builtInOverride, customs map[string]customRecord) []Definition {
 	result := make([]Definition, 0, len(defaults)+len(customs))
 	for _, item := range defaults {
-		definition := Definition{ID: item.ID, Name: item.DefaultName, DisplayName: item.DefaultDisplayName, Aliases: append([]string{}, item.DefaultAliases...), Description: item.DefaultDescription, ParameterHelp: item.DefaultParameterHelp, Action: item.DefaultAction, BuiltIn: true, Locked: true, Enabled: item.DefaultEnabled, CanRestore: true}
+		definition := Definition{ID: item.ID, Name: item.DefaultName, DisplayName: item.DefaultDisplayName, Aliases: append([]string{}, item.DefaultAliases...), Description: item.DefaultDescription, ParameterHelp: item.DefaultParameterHelp, Action: item.DefaultAction, BackendCapability: capabilityForAction(item.DefaultAction, actions), BuiltIn: true, Locked: true, Enabled: item.DefaultEnabled, CanRestore: true}
 		if override, ok := overrides[item.ID]; ok {
 			definition.Name, definition.DisplayName, definition.Aliases = override.Name, override.DisplayName, append([]string{}, override.Aliases...)
 			definition.Description, definition.ParameterHelp, definition.Enabled, definition.Locked = override.Description, override.ParameterHelp, override.Enabled, override.Locked
@@ -437,6 +532,7 @@ func effective(defaults []DefaultCommandDefinition, overrides map[string]builtIn
 	for _, record := range customs {
 		item := record.Current
 		item.Aliases = append([]string{}, item.Aliases...)
+		item.BackendCapability = capabilityForAction(item.Action, actions)
 		item.BuiltIn, item.Locked, item.CanDelete, item.CanRestore = false, false, true, true
 		applyTelegramEligibility(&item)
 		customList = append(customList, item)
@@ -472,11 +568,12 @@ func (r *Registry) definitionFromMutation(input Mutation, builtIn bool) (Definit
 		return Definition{}, err
 	}
 	applyTelegramEligibility(&definition)
+	definition.BackendCapability = capabilityForAction(definition.Action, r.actions)
 	return definition, nil
 }
 
 func (r *Registry) validateCandidateLocked(overrides map[string]builtInOverride, customs map[string]customRecord) error {
-	return r.validateAllLocked(effective(r.defaults, overrides, customs))
+	return r.validateAllLocked(effective(r.defaults, r.actions, overrides, customs))
 }
 
 func (r *Registry) validateAllLocked(definitions []Definition) error {

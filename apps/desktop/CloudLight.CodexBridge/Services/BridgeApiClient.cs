@@ -87,6 +87,9 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
     public Task<RemoteCommandListResponse> GetCommandsAsync(CancellationToken cancellationToken = default) =>
         GetAsync<RemoteCommandListResponse>("/api/v1/commands", cancellationToken);
 
+    public Task<RemoteCommandListResponse> GetCommandsForBackendAsync(string backend, CancellationToken cancellationToken = default) =>
+        GetAsync<RemoteCommandListResponse>($"/api/v1/commands?backend={Uri.EscapeDataString(backend)}", cancellationToken);
+
     public Task<RemoteCommandDefinition> CreateCommandAsync(RemoteCommandMutation input, CancellationToken cancellationToken = default) =>
         SendJsonAsync<RemoteCommandDefinition>(HttpMethod.Post, "/api/v1/commands", input, cancellationToken);
 

@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.3"
+  #define MyAppVersion "1.1.4"
 #endif
 
 #ifndef SourceDir
@@ -7,7 +7,7 @@
 #endif
 
 #ifndef OutputDir
-  #define OutputDir "..\artifacts\win-x64-1.1.3"
+  #define OutputDir "..\artifacts\win-x64-1.1.4"
 #endif
 
 #ifndef AppIconFile

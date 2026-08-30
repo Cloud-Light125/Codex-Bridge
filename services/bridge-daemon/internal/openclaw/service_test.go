@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/bindings"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/sessionregistry"
 )
 
 type fakeGateway struct {
@@ -219,7 +222,12 @@ func waitForOpenClaw(t *testing.T, service *Service, predicate func(conversation
 func TestServiceConnectsListsSendsFinalAbortsAndReconnects(t *testing.T) {
 	gateway, server := newFakeGateway(t)
 	broker := events.NewBroker()
-	service := NewService(nil, broker)
+	numbersPath := filepath.Join(t.TempDir(), "openclaw-session-numbers.json")
+	numbers, err := sessionregistry.New(numbersPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil, broker, numbers)
 	eventsChannel := make(chan conversation.Event, 16)
 	unsubscribe := service.SubscribeEvents(func(event conversation.Event) { eventsChannel <- event })
 	defer unsubscribe()
@@ -245,8 +253,15 @@ func TestServiceConnectsListsSendsFinalAbortsAndReconnects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list OpenClaw sessions: %v", err)
 	}
-	if len(sessions) != 1 || sessions[0].Key != "agent:main:main" || sessions[0].Title != "Main" {
+	if len(sessions) != 1 || sessions[0].Key != "agent:main:main" || sessions[0].Title != "Main" || sessions[0].Number != 1 {
 		t.Fatalf("unexpected sessions: %#v", sessions)
+	}
+	reloaded, err := sessionregistry.New(numbersPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record, ok := reloaded.BySessionKey("agent:main:main"); !ok || record.Number != 1 {
+		t.Fatalf("session number did not survive registry reload: %#v ok=%t", record, ok)
 	}
 	detail, err := service.ReadSession(t.Context(), "agent:main:main")
 	if err != nil || len(detail.Messages) != 2 || detail.Messages[1].Text != "previous answer" {
@@ -343,4 +358,51 @@ func TestServiceConnectsToConfiguredLocalGateway(t *testing.T) {
 		t.Fatal("local OpenClaw Gateway returned no sessions")
 	}
 	t.Logf("local OpenClaw Gateway connected; sessions=%d", len(sessions))
+}
+
+// This opt-in smoke test exercises the real local Gateway for the acceptance
+// path: list -> stable number -> explicit binding record -> one accepted chat
+// message. It is intentionally skipped unless the caller supplies the token.
+func TestServiceLocalGatewayNumberBindAndSend(t *testing.T) {
+	gatewayURL := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_URL"))
+	token := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN"))
+	if gatewayURL == "" || token == "" {
+		t.Skip("set OPENCLAW_GATEWAY_URL and OPENCLAW_GATEWAY_TOKEN to run the local Gateway message probe")
+	}
+	numbersPath := filepath.Join(t.TempDir(), "openclaw-session-numbers.json")
+	numbers, err := sessionregistry.New(numbersPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil, events.NewBroker(), numbers)
+	if _, err := service.ConfigureConfig(Config{GatewayURL: gatewayURL, Token: token, AutoReconnect: false, Start: true}); err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	waitForOpenClaw(t, service, func(status conversation.ConnectionStatus) bool { return status.Connected })
+	sessions, err := service.ListSessions(t.Context(), 200)
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("real Gateway session list: count=%d err=%v", len(sessions), err)
+	}
+	selected, err := service.SessionByNumber(t.Context(), sessions[0].Number)
+	if err != nil || selected.Key != sessions[0].Key || selected.Number != sessions[0].Number {
+		t.Fatalf("real Gateway number lookup: selected=%#v first=%#v err=%v", selected, sessions[0], err)
+	}
+	repository, err := bindings.NewRepository(filepath.Join(t.TempDir(), "bindings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, _, err := repository.UpsertAddress(bindings.CreateRequest{
+		Backend: conversation.BackendOpenClaw, TargetID: selected.Key, ChannelType: "telegram", ChannelProfileID: "acceptance-profile",
+		ResourceID: "acceptance-resource", AccountID: "acceptance-bot", ConversationType: "default", ConversationID: "acceptance-chat",
+		ChatID: "acceptance-chat", ThreadID: selected.Key, SessionKey: selected.Key,
+	})
+	if err != nil || created.Backend != conversation.BackendOpenClaw || created.TargetID != selected.Key {
+		t.Fatalf("real Gateway binding record: binding=%#v err=%v", created, err)
+	}
+	accepted, err := service.SendMessage(t.Context(), selected.Key, "CloudLight Bridge integration check: reply OK only.")
+	if err != nil || accepted.SessionKey != selected.Key || accepted.RunID == "" {
+		t.Fatalf("real Gateway message send: accepted=%#v err=%v", accepted, err)
+	}
+	t.Logf("real Gateway acceptance passed; session=#%d key=%s runAccepted=true", selected.Number, selected.Key)
 }

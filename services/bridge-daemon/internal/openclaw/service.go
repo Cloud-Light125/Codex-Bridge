@@ -19,6 +19,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/sessionregistry"
 )
 
 var (
@@ -63,6 +64,7 @@ type Service struct {
 	sessions    map[string]conversation.Session
 	runText     map[string]string
 	seenEvents  map[string]time.Time
+	numbers     *sessionregistry.Registry
 	reconnects  int
 	lastTick    time.Time
 	tickEvery   time.Duration
@@ -127,13 +129,20 @@ type ConfigureRequest struct {
 	Start         *bool  `json:"start,omitempty"`
 }
 
-func NewService(logger *bridgelog.SafeLogger, broker *events.Broker) *Service {
+func NewService(logger *bridgelog.SafeLogger, broker *events.Broker, registries ...*sessionregistry.Registry) *Service {
+	var numbers *sessionregistry.Registry
+	if len(registries) > 0 {
+		numbers = registries[0]
+	}
+	if numbers == nil {
+		numbers = sessionregistry.NewInMemory()
+	}
 	return &Service{
 		logger: logger, broker: broker,
 		status:  conversation.ConnectionStatus{Backend: conversation.BackendOpenClaw, State: "not-configured", AutoReconnect: true},
 		pending: make(map[string]pendingRequest), subscribers: make(map[uint64]func(conversation.Event)),
 		sessions: make(map[string]conversation.Session), runText: make(map[string]string),
-		seenEvents: make(map[string]time.Time), tickEvery: defaultTickInterval,
+		seenEvents: make(map[string]time.Time), tickEvery: defaultTickInterval, numbers: numbers,
 	}
 }
 
@@ -531,6 +540,11 @@ func (s *Service) refreshSessions(ctx context.Context, connection *wsConnection)
 		s.logger.Printf("[openclaw] decode sessions.list failed: %v", err)
 		return
 	}
+	sessions, err = s.numberSessions(sessions)
+	if err != nil {
+		s.logger.Printf("[openclaw] persist session numbers failed: %v", err)
+		return
+	}
 	s.mu.Lock()
 	if s.connection != connection {
 		s.mu.Unlock()
@@ -732,6 +746,10 @@ func (s *Service) ListSessions(ctx context.Context, limit int) ([]conversation.S
 	if err != nil {
 		return nil, err
 	}
+	result, err = s.numberSessions(result)
+	if err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	for _, session := range result {
 		s.sessions[session.Key] = session
@@ -739,6 +757,25 @@ func (s *Service) ListSessions(ctx context.Context, limit int) ([]conversation.S
 	s.status.SessionCount = len(s.sessions)
 	s.mu.Unlock()
 	return result, nil
+}
+
+// SessionByNumber resolves a user-facing OpenClaw number only after refreshing
+// the Gateway list. The returned key is the opaque SessionKey that all
+// transport calls must use.
+func (s *Service) SessionByNumber(ctx context.Context, number int) (conversation.Session, error) {
+	if number < 1 {
+		return conversation.Session{}, ErrSessionNotFound
+	}
+	sessions, err := s.ListSessions(ctx, 200)
+	if err != nil {
+		return conversation.Session{}, err
+	}
+	for _, session := range sessions {
+		if session.Number == number {
+			return session, nil
+		}
+	}
+	return conversation.Session{}, ErrSessionNotFound
 }
 
 func (s *Service) ReadSession(ctx context.Context, key string) (conversation.Detail, error) {
@@ -948,6 +985,33 @@ func (s *Service) publishSession(session conversation.Session) {
 	if s.broker != nil {
 		s.broker.PublishScoped(events.OpenClawSessionUpdated, session.Key, "", "", payload)
 	}
+}
+
+func (s *Service) numberSessions(sessions []conversation.Session) ([]conversation.Session, error) {
+	if s.numbers == nil || len(sessions) == 0 {
+		return sessions, nil
+	}
+	metadata := make([]sessionregistry.Metadata, 0, len(sessions))
+	for _, session := range sessions {
+		metadata = append(metadata, sessionregistry.Metadata{
+			SessionKey: session.Key, Title: session.Title, CreatedAt: session.CreatedAt,
+			LastSeenAt: session.UpdatedAt, Status: session.Status,
+		})
+	}
+	records, err := s.numbers.EnsureBatch(metadata)
+	if err != nil {
+		return nil, err
+	}
+	byKey := make(map[string]sessionregistry.Record, len(records))
+	for _, record := range records {
+		byKey[record.SessionKey] = record
+	}
+	for index := range sessions {
+		if record, ok := byKey[sessions[index].Key]; ok {
+			sessions[index].Number = record.Number
+		}
+	}
+	return sessions, nil
 }
 
 func (s *Service) publishConnection(eventType string, payload map[string]any) {

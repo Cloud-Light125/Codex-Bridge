@@ -6,7 +6,7 @@
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
                 <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock Text="远程指令" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="自定义 QQ 和 Telegram 中使用的指令。软件自带指令默认锁定，解锁后可以修改。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,20,0"/></StackPanel>
+                    <StackPanel><TextBlock Text="{Binding PageTitle}" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="{Binding PageDescription}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,20,0"/><TextBlock Text="{Binding BackendNotice}" Visibility="{Binding BackendNoticeVisibility}" Foreground="{DynamicResource AccentBrush}" TextWrapping="Wrap" Margin="0,9,20,0"/></StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"><Button Content="刷新" Command="{Binding RefreshCommand}"/><Button Content="+ 添加指令" Command="{Binding AddCommand}" Style="{StaticResource PrimaryButtonStyle}" Margin="8,0,0,0"/></StackPanel>
                 </Grid>
             </Border>
@@ -30,7 +30,11 @@
                             <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <StackPanel>
                                     <StackPanel Orientation="Horizontal"><TextBlock Text="{Binding Name}" FontFamily="Consolas" FontSize="19" FontWeight="SemiBold"/><Border Style="{StaticResource BadgeStyle}" Margin="10,0,0,0"><TextBlock Text="{Binding TypeDisplay}" FontSize="11"/></Border><Border Style="{StaticResource BadgeStyle}" Margin="6,0,0,0"><TextBlock Text="{Binding StatusDisplay}" FontSize="11"/></Border></StackPanel>
-                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" Margin="0,9,0,0"/><TextBlock Text="{Binding Description}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                    <TextBlock Text="{Binding ChineseName}" FontWeight="SemiBold" Margin="0,9,0,0"/><TextBlock Text="{Binding Description}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                    <TextBlock Text="{Binding UsageExample, StringFormat=示例：{0}}" FontFamily="Consolas" Margin="0,7,0,0"/>
+                                    <TextBlock Text="{Binding ChannelSupportDisplay}" Style="{StaticResource SecondaryTextStyle}" Margin="0,6,0,0"/>
+                                    <TextBlock Text="{Binding CompatibilityDisplay}" Style="{StaticResource SecondaryTextStyle}" Margin="0,3,0,0"/>
+                                    <TextBlock Text="{Binding CapabilityDisplay}" Foreground="{DynamicResource AccentBrush}" Margin="0,3,0,0"/>
                                     <TextBlock Text="{Binding AliasesDisplay, StringFormat=别名：{0}}" Style="{StaticResource SecondaryTextStyle}" Margin="0,6,0,0"/>
                                     <TextBlock Text="{Binding LockDisplay}" Visibility="{Binding LockVisibility}" Margin="0,7,0,0"/>
                                     <TextBlock Text="{Binding Model.TelegramMenuNotice}" Visibility="{Binding TelegramNoticeVisibility}" Foreground="{DynamicResource WarningBrush}" TextWrapping="Wrap" Margin="0,7,0,0"/>

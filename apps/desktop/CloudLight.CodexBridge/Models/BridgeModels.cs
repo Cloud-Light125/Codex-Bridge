@@ -100,8 +100,10 @@ public static class BackendListProjection
     public static IEnumerable<ThreadSummary> CodexThreads(IEnumerable<ThreadSummary>? threads) =>
         (threads ?? []).Where(thread => string.IsNullOrWhiteSpace(thread.Backend) || string.Equals(thread.Backend, "codex", StringComparison.OrdinalIgnoreCase));
 
+    // The OpenClaw page must remain isolated even if an older daemon or test
+    // double accidentally returns a mixed list.
     public static IEnumerable<OpenClawSessionSummary> OpenClawSessions(IEnumerable<OpenClawSessionSummary>? sessions) =>
-        sessions ?? [];
+        (sessions ?? []).Where(session => string.IsNullOrWhiteSpace(session.Backend) || string.Equals(session.Backend, "openclaw", StringComparison.OrdinalIgnoreCase));
 }
 
 public class OpenClawSessionSummary
@@ -110,6 +112,7 @@ public class OpenClawSessionSummary
     public string Key { get; set; } = "";
     public string SessionId { get; set; } = "";
     public string AgentId { get; set; } = "";
+    public int Number { get; set; }
     public string Title { get; set; } = "";
     public string Summary { get; set; } = "";
     public string Cwd { get; set; } = "";
@@ -373,6 +376,7 @@ public sealed class RemoteCommandAction
     public string Id { get; set; } = "";
     public string DisplayName { get; set; } = "";
     public bool TargetSupport { get; set; }
+    public string BackendCapability { get; set; } = "";
 }
 
 public sealed class RemoteCommandDefinition
@@ -384,6 +388,7 @@ public sealed class RemoteCommandDefinition
     public string Description { get; set; } = "";
     public string ParameterHelp { get; set; } = "";
     public string Action { get; set; } = "";
+    public string BackendCapability { get; set; } = "";
     public bool BuiltIn { get; set; }
     public bool Locked { get; set; }
     public bool Enabled { get; set; }

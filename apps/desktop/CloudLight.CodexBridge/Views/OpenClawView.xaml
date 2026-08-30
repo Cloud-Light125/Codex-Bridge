@@ -28,7 +28,7 @@
                         <DataTemplate>
                             <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="12">
                                 <StackPanel>
-                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock FontWeight="SemiBold" TextTrimming="CharacterEllipsis"><Run Text="#"/><Run Text="{Binding Number}"/><Run Text="  "/><Run Text="{Binding Title}"/></TextBlock>
                                     <TextBlock Text="{Binding Key}" FontFamily="Consolas" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
                                     <Grid Margin="0,6,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                         <TextBlock Text="{Binding UpdatedAt}" Foreground="{DynamicResource MutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis"/>
@@ -63,7 +63,7 @@
                     <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="20,14">
                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                             <StackPanel>
-                                <StackPanel Orientation="Horizontal"><TextBlock Text="OpenClaw" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold" FontSize="18" Margin="0,0,10,0"/><TextBlock Text="{Binding SelectedDetail.Title}" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/></StackPanel>
+                                <StackPanel Orientation="Horizontal"><TextBlock Text="OpenClaw" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold" FontSize="18" Margin="0,0,10,0"/><TextBlock FontSize="20" FontWeight="SemiBold" Margin="0,0,8,0"><Run Text="#"/><Run Text="{Binding SelectedDetail.Number}"/></TextBlock><TextBlock Text="{Binding SelectedDetail.Title}" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/></StackPanel>
                                 <TextBlock Text="{Binding SelectedDetail.Key}" FontFamily="Consolas" Style="{StaticResource SecondaryTextStyle}" Margin="0,5,0,0" TextTrimming="CharacterEllipsis"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,7,0,0"><TextBlock Text="{Binding GatewayStatusText}" Foreground="{DynamicResource AccentBrush}"/><TextBlock Text="{Binding CurrentRunText}" Style="{StaticResource SecondaryTextStyle}" Margin="10,0,0,0"/></StackPanel>
                             </StackPanel>

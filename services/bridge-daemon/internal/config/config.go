@@ -20,13 +20,14 @@ type Options struct {
 }
 
 type Paths struct {
-	DataDir           string
-	LogDir            string
-	LogFile           string
-	BindingsFile      string
-	ThreadNumbersFile string
-	MirrorFile        string
-	CommandsFile      string
+	DataDir                    string
+	LogDir                     string
+	LogFile                    string
+	BindingsFile               string
+	ThreadNumbersFile          string
+	OpenClawSessionNumbersFile string
+	MirrorFile                 string
+	CommandsFile               string
 }
 
 func (o Options) Validate() error {
@@ -65,12 +66,13 @@ func UserPaths() (Paths, error) {
 		return Paths{}, fmt.Errorf("create state directory: %w", err)
 	}
 	return Paths{
-		DataDir:           dataDir,
-		LogDir:            logDir,
-		LogFile:           filepath.Join(logDir, "bridge-daemon.log"),
-		BindingsFile:      filepath.Join(dataDir, "bindings.json"),
-		ThreadNumbersFile: filepath.Join(stateDir, "thread-numbers.json"),
-		MirrorFile:        filepath.Join(stateDir, "mirror-state.json"),
-		CommandsFile:      filepath.Join(stateDir, "commands.json"),
+		DataDir:                    dataDir,
+		LogDir:                     logDir,
+		LogFile:                    filepath.Join(logDir, "bridge-daemon.log"),
+		BindingsFile:               filepath.Join(dataDir, "bindings.json"),
+		ThreadNumbersFile:          filepath.Join(stateDir, "thread-numbers.json"),
+		OpenClawSessionNumbersFile: filepath.Join(stateDir, "openclaw-session-numbers.json"),
+		MirrorFile:                 filepath.Join(stateDir, "mirror-state.json"),
+		CommandsFile:               filepath.Join(stateDir, "commands.json"),
 	}, nil
 }

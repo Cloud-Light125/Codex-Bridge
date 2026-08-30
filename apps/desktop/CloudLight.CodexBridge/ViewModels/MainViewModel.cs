@@ -30,7 +30,7 @@ public sealed class MainViewModel : ObservableObject
     private bool _isCodexDiscoveryRetrying;
 
     public MainViewModel(DaemonProcessManager daemon, BridgeApiClient api, SessionsViewModel sessions, OpenClawViewModel openClaw,
-        ChannelProfilesViewModel channelProfiles, CommandsViewModel commands, OverviewViewModel overview, MirrorViewModel mirror, BackupViewModel backup,
+        ChannelProfilesViewModel channelProfiles, CommandsViewModel commands, CommandsViewModel openClawCommands, OverviewViewModel overview, MirrorViewModel mirror, BackupViewModel backup,
         SettingsViewModel settingsViewModel, LogsViewModel logsViewModel, UserSettings settings,
         SettingsService settingsService, LogService logs, CodexDiscoveryService codexDiscoveryService,
         CodexDiscoveryResult codexDiscovery)
@@ -41,6 +41,7 @@ public sealed class MainViewModel : ObservableObject
         OpenClaw = openClaw;
         ChannelProfiles = channelProfiles;
         Commands = commands;
+        OpenClawCommands = openClawCommands;
         Overview = overview;
         Mirror = mirror;
         Backup = backup;
@@ -64,6 +65,7 @@ public sealed class MainViewModel : ObservableObject
     public OpenClawViewModel OpenClaw { get; }
     public ChannelProfilesViewModel ChannelProfiles { get; }
     public CommandsViewModel Commands { get; }
+    public CommandsViewModel OpenClawCommands { get; }
     public OverviewViewModel Overview { get; }
     public MirrorViewModel Mirror { get; }
     public BackupViewModel Backup { get; }
@@ -72,14 +74,15 @@ public sealed class MainViewModel : ObservableObject
     public ICommand NavigateCommand { get; }
     public ICommand RefreshCommand { get; }
     public string CurrentPageKey { get; private set; }
-    public string PageTitle => CurrentPageKey switch { "sessions" => "Codex", "openclaw" => "OpenClaw", "qq" => "QQ", "telegram" => "Telegram", "commands" => "指令管理", "mirror" => "消息同步", "backup" => "备份与恢复", "settings" => "设置", "logs" => "运行日志", _ => "概览" };
-    public string PageDescription => CurrentPageKey switch { "sessions" => "只显示 Codex Thread 与 Codex 消息历史", "openclaw" => "独立查看 OpenClaw Gateway、Session 与消息历史", "qq" => "管理 QQ Bot Profile、Gateway 连接与后端分配", "telegram" => "管理 Telegram Profile、Long Polling 与后端分配", "commands" => "统一管理 QQ 和 Telegram 使用的远程指令", "mirror" => "将 Codex 的最终回答发送到指定渠道", "backup" => "备份或恢复 Codex 与应用数据", "settings" => "管理启动、窗口、外观、OpenClaw 与消息渠道", "logs" => "查看本机运行信息和错误详情", _ => "查看 Codex、OpenClaw、远程渠道与消息同步状态" };
+    public string PageTitle => CurrentPageKey switch { "sessions" => "Codex", "openclaw" => "OpenClaw", "qq" => "QQ", "telegram" => "Telegram", "commands" => "Codex 指令", "openclaw-commands" => "OpenClaw 指令", "mirror" => "消息同步", "backup" => "备份与恢复", "settings" => "设置", "logs" => "运行日志", _ => "概览" };
+    public string PageDescription => CurrentPageKey switch { "sessions" => "只显示 Codex Thread 与 Codex 消息历史", "openclaw" => "独立查看 OpenClaw Gateway、Session 与消息历史", "qq" => "管理 QQ Bot Profile、Gateway 连接与后端分配", "telegram" => "管理 Telegram Profile、Long Polling 与后端分配", "commands" => "只管理 Codex 路由可用的 QQ / Telegram 远程指令", "openclaw-commands" => "只管理 OpenClaw 路由可用的 QQ / Telegram 远程指令", "mirror" => "将 Codex 的最终回答发送到指定渠道", "backup" => "备份或恢复 Codex 与应用数据", "settings" => "管理启动、窗口、外观、OpenClaw 与消息渠道", "logs" => "查看本机运行信息和错误详情", _ => "查看 Codex、OpenClaw、远程渠道与消息同步状态" };
     public bool IsOverviewPage => CurrentPageKey == "overview";
     public bool IsSessionsPage => CurrentPageKey == "sessions";
     public bool IsOpenClawPage => CurrentPageKey == "openclaw";
     public bool IsQqPage => CurrentPageKey == "qq";
     public bool IsTelegramPage => CurrentPageKey == "telegram";
     public bool IsCommandsPage => CurrentPageKey == "commands";
+    public bool IsOpenClawCommandsPage => CurrentPageKey == "openclaw-commands";
     public bool IsMirrorPage => CurrentPageKey == "mirror";
     public bool IsBackupPage => CurrentPageKey == "backup";
     public bool IsSettingsPage => CurrentPageKey == "settings";
@@ -124,6 +127,7 @@ public sealed class MainViewModel : ObservableObject
             await Settings.InitializeOpenClawAsync(_lifetime.Token);
             await OpenClaw.RefreshAsync(_lifetime.Token);
             if (CurrentPageKey == "commands") await Commands.EnsureInitializedAsync(_lifetime.Token);
+            if (CurrentPageKey == "openclaw-commands") await OpenClawCommands.EnsureInitializedAsync(_lifetime.Token);
             _initialized = true;
         }
         catch (Exception exception)
@@ -144,11 +148,12 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(CurrentPageKey));
         OnPropertyChanged(nameof(PageTitle));
         OnPropertyChanged(nameof(PageDescription));
-        OnPropertyChanged(nameof(IsOverviewPage)); OnPropertyChanged(nameof(IsSessionsPage)); OnPropertyChanged(nameof(IsOpenClawPage)); OnPropertyChanged(nameof(IsQqPage)); OnPropertyChanged(nameof(IsTelegramPage)); OnPropertyChanged(nameof(IsCommandsPage));
+        OnPropertyChanged(nameof(IsOverviewPage)); OnPropertyChanged(nameof(IsSessionsPage)); OnPropertyChanged(nameof(IsOpenClawPage)); OnPropertyChanged(nameof(IsQqPage)); OnPropertyChanged(nameof(IsTelegramPage)); OnPropertyChanged(nameof(IsCommandsPage)); OnPropertyChanged(nameof(IsOpenClawCommandsPage));
         OnPropertyChanged(nameof(IsMirrorPage)); OnPropertyChanged(nameof(IsBackupPage)); OnPropertyChanged(nameof(IsSettingsPage)); OnPropertyChanged(nameof(IsLogsPage));
         _settings.LastPage = CurrentPageKey;
         _ = _settingsService.SaveAsync(_settings);
         if (ReferenceEquals(CurrentPage, Commands)) _ = Commands.EnsureInitializedAsync(_lifetime.Token);
+        if (ReferenceEquals(CurrentPage, OpenClawCommands)) _ = OpenClawCommands.EnsureInitializedAsync(_lifetime.Token);
         if (ReferenceEquals(CurrentPage, Mirror)) _ = Settings.RefreshMirrorAsync();
     }
 
@@ -158,11 +163,11 @@ public sealed class MainViewModel : ObservableObject
         "openclaw" => OpenClaw,
         "qq" => SelectChannelPage("qqbot"),
         "telegram" => SelectChannelPage("telegram"),
-        "commands" => Commands, "mirror" => Mirror, "backup" => Backup,
+        "commands" => Commands, "openclaw-commands" => OpenClawCommands, "mirror" => Mirror, "backup" => Backup,
         "settings" => Settings, "logs" => Logs, _ => Overview
     };
     private object SelectChannelPage(string platform) { ChannelProfiles.SelectPlatform(platform); return ChannelProfiles; }
-    private static string NormalizePage(string? key) => key == "channels" ? "telegram" : key is "overview" or "sessions" or "openclaw" or "qq" or "telegram" or "commands" or "mirror" or "backup" or "settings" or "logs" ? key : "overview";
+    private static string NormalizePage(string? key) => key == "channels" ? "telegram" : key is "overview" or "sessions" or "openclaw" or "qq" or "telegram" or "commands" or "openclaw-commands" or "mirror" or "backup" or "settings" or "logs" ? key : "overview";
 
     public async Task RefreshAsync()
     {
@@ -231,6 +236,7 @@ public sealed class MainViewModel : ObservableObject
         await Settings.InitializeOpenClawAsync(_lifetime.Token);
         await OpenClaw.RefreshAsync(_lifetime.Token);
         await Commands.RefreshAsync(_lifetime.Token);
+        await OpenClawCommands.RefreshAsync(_lifetime.Token);
     }
 
     private async Task InitializeRemoteChannelsAsync(bool forceRetry)

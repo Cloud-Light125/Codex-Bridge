@@ -114,7 +114,7 @@ public sealed class OpenClawViewModel : ObservableObject
             var response = await _api.GetOpenClawSessionsAsync(100, cancellationToken);
             var selectedKey = SelectedSession?.Key;
             Sessions.Clear();
-            foreach (var session in BackendListProjection.OpenClawSessions(response.Sessions).OrderByDescending(item => item.UpdatedAt)) Sessions.Add(session);
+            foreach (var session in BackendListProjection.OpenClawSessions(response.Sessions).OrderBy(item => item.Number == 0 ? int.MaxValue : item.Number).ThenBy(item => item.Key)) Sessions.Add(session);
             SelectedSession = string.IsNullOrWhiteSpace(selectedKey) ? null : Sessions.FirstOrDefault(item => item.Key == selectedKey);
             if (SelectedSession is not null && reloadSelected) BeginLoadSession(SelectedSession.Key);
             OnPropertyChanged(nameof(EmptyVisibility));

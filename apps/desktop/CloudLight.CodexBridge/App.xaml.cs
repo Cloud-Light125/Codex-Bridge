@@ -59,7 +59,8 @@ public partial class App : Application
         var api = new BridgeApiClient(logs);
         var sessions = new SessionsViewModel(api, logs);
 		var openClaw = new OpenClawViewModel(api, logs);
-        var commands = new CommandsViewModel(api, logs);
+        var commands = new CommandsViewModel(api, logs, "codex");
+        var openClawCommands = new CommandsViewModel(api, logs, "openclaw");
 		var channelProfiles = new ChannelProfilesViewModel(api, settingsService, settings, logs);
         var startup = new StartupService();
         var settingsViewModel = new SettingsViewModel(settingsService, api, settings, logs, startup, codexDiscoveryService,
@@ -70,7 +71,7 @@ public partial class App : Application
         var overview = new OverviewViewModel(sessions, openClaw, channelProfiles, settingsViewModel);
         var mirror = new MirrorViewModel(settingsViewModel);
         var backup = new BackupViewModel(new BackupService(settingsService, logs: logs), logs);
-		_mainViewModel = new MainViewModel(daemon, api, sessions, openClaw, channelProfiles, commands, overview, mirror, backup,
+		_mainViewModel = new MainViewModel(daemon, api, sessions, openClaw, channelProfiles, commands, openClawCommands, overview, mirror, backup,
             settingsViewModel, logsViewModel, settings, settingsService, logs, codexDiscoveryService, codexDiscovery);
         backup.StopRuntimeAsync = _mainViewModel.PauseRuntimeAsync;
         backup.RestartRuntimeAsync = _mainViewModel.ResumeRuntimeAsync;
