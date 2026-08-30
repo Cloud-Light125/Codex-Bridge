@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Xml.Linq;
 using CloudLight.CodexBridge.Services;
 using CloudLight.CodexBridge.Models;
 using CloudLight.CodexBridge.ViewModels;
@@ -199,6 +200,7 @@ if (args.Contains("--channel-profile-routing-tests", StringComparer.OrdinalIgnor
 if (args.Contains("--qq-profile-app-secret-tests", StringComparer.OrdinalIgnoreCase))
 {
     const string appSecret = "qq-profile-app-secret-test";
+    const string whitespaceSensitiveAppSecret = "  qq-profile-app-secret-test  ";
     var settingsJsonOptions = new JsonSerializerOptions
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -238,6 +240,15 @@ if (args.Contains("--qq-profile-app-secret-tests", StringComparer.OrdinalIgnoreC
     Assert(request.Qq?.AppSecret == appSecret,
         "settings.json 中的 QQ AppSecret 必须能恢复到 Profile 配置请求");
 
+    var emptyPasswordBoxProfile = new ChannelProfileViewModel(new ChannelProfileSettings
+    {
+        Id = "qq-empty-password", Name = "QQ empty PasswordBox", Platform = "qqbot",
+        Qq = new QqProfileSettings { AppId = "10001", AppSecret = appSecret }
+    });
+    emptyPasswordBoxProfile.SetPendingSecret("");
+    Assert(emptyPasswordBoxProfile.ToSettings().Qq.AppSecret == appSecret,
+        "空 PasswordBox 事件不得覆盖已保存的 QQ AppSecret");
+
     var legacyQq = new QqProfileSettings { AppId = "10001" };
     var migrated = await ChannelProfilesViewModel.ResolveQqAppSecretAsync(
         legacyQq,
@@ -266,7 +277,115 @@ if (args.Contains("--qq-profile-app-secret-tests", StringComparer.OrdinalIgnoreC
     Assert(restoredMigrated.Secret == appSecret && migratedDpapiReads == 0,
         "迁移后的 QQ AppSecret 在 DPAPI 文件缺失时仍必须可恢复");
 
-    Console.WriteLine("PASS QQ Profile AppSecret settings persistence and DPAPI migration");
+    var isolatedRoot = Path.Combine(Path.GetTempPath(), $"CloudLight-CodexBridge-Settings-{Guid.NewGuid():N}");
+    var isolatedDataDirectory = Path.Combine(isolatedRoot, "local");
+    var isolatedSettingsFile = Path.Combine(isolatedRoot, "roaming", "settings.json");
+    try
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(isolatedSettingsFile)!);
+        await File.WriteAllTextAsync(isolatedSettingsFile, """
+            {
+              "channelProfilesMigrated": true,
+              "channelProfiles": [
+                {
+                  "id": "qq-from-file",
+                  "name": "QQ from file",
+                  "platform": "qqbot",
+                  "enabled": true,
+                  "qq": { "appId": "10001", "appSecret": "  qq-profile-app-secret-test  " }
+                }
+              ],
+              "windowWidth": "NaN",
+              "windowHeight": "Infinity",
+              "windowLeft": "-Infinity",
+              "windowTop": "NaN"
+            }
+            """);
+
+        var fileSettingsService = new SettingsService(isolatedDataDirectory, isolatedSettingsFile);
+        var fileSettings = await fileSettingsService.LoadAsync();
+        var fileQq = fileSettings.ChannelProfiles.Single(profile => profile.Id == "qq-from-file").Qq;
+        Assert(fileQq.AppSecret == whitespaceSensitiveAppSecret,
+            "SettingsService 必须用生产 JSON 选项保留 QQ AppSecret 的原始字节");
+        Assert(fileSettings.WindowWidth == 1280 && fileSettings.WindowHeight == 800 &&
+               double.IsNaN(fileSettings.WindowLeft) && double.IsNaN(fileSettings.WindowTop),
+            "命名 NaN/Infinity JSON 必须在启动前被规范化为安全的窗口尺寸和自动位置");
+        var fileDpapiReads = 0;
+        var fileRestored = await ChannelProfilesViewModel.ResolveQqAppSecretAsync(
+            fileQq,
+            _ =>
+            {
+                fileDpapiReads++;
+                return Task.FromResult<string?>(null);
+            });
+        Assert(fileRestored.Secret == whitespaceSensitiveAppSecret && !fileRestored.MigratedFromDpapi && fileDpapiReads == 0,
+            "从 settings.json 恢复 QQ AppSecret 时不得依赖或读取旧 DPAPI 文件");
+        await fileSettingsService.SaveAsync(fileSettings);
+        var persistedFileSettings = await File.ReadAllTextAsync(isolatedSettingsFile);
+        Assert(persistedFileSettings.Contains("\"appSecret\": \"  qq-profile-app-secret-test  \"", StringComparison.Ordinal) &&
+               persistedFileSettings.Contains("\"windowLeft\": \"NaN\"", StringComparison.Ordinal),
+            "SettingsService 保存后必须按原样保留 QQ AppSecret 并以受支持的 NaN JSON 表示自动窗口位置");
+    }
+    finally
+    {
+        if (Directory.Exists(isolatedRoot)) Directory.Delete(isolatedRoot, true);
+    }
+
+    Console.WriteLine("PASS QQ Profile AppSecret settings persistence, production settings load, NaN normalization, and DPAPI migration");
+    return;
+}
+
+if (args.Contains("--qq-profile-start-failure-regression-tests", StringComparer.OrdinalIgnoreCase))
+{
+    var responseOptions = new JsonSerializerOptions
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+    var nullProfilesResponse = JsonSerializer.Deserialize<ChannelProfilesResponse>(
+        """{"profiles":null,"routing":null}""", responseOptions)
+        ?? throw new InvalidOperationException("Profile response 不得反序列化为 null");
+    Assert(nullProfilesResponse.Profiles.Count == 0 && nullProfilesResponse.Routing.Codex.QqProfileIds.Count == 0,
+        "null Profile/路由响应不得令桌面状态刷新抛出空集合异常");
+
+    var profile = new ChannelProfileViewModel(new ChannelProfileSettings
+    {
+        Id = "qq-start-failure", Name = "QQ start failure", Platform = "qqbot",
+        Qq = new QqProfileSettings { AppId = "10001", AppSecret = "test-secret" }
+    });
+    profile.ApplyStatus(new ChannelProfileStatus
+    {
+        Id = "qq-start-failure", Platform = "qqbot", State = "stopped", SecretConfigured = true
+    });
+    profile.ApplyOperationFailure("authentication-failed", "QQ 访问凭证请求返回 HTTP 200、错误码 100016：AppID 或 AppSecret 无效或已重置。");
+    Assert(profile.StatusText == "凭据无效" && profile.ConnectionText == "已停止" && profile.LastError.Contains("100016", StringComparison.Ordinal),
+        "Configure 有凭据但 Start 失败时，桌面必须显示 authentication-failed 与真实 LastError");
+
+    var operationError = new BridgeApiException(System.Net.HttpStatusCode.Conflict, "channel_profile_start_failed",
+        "generic start failure", "authentication-failed", "QQ 访问凭证请求返回 HTTP 200、错误码 100016：AppID 或 AppSecret 无效或已重置。");
+    Assert(operationError.CurrentState == "authentication-failed" && operationError.LastError.Contains("100016", StringComparison.Ordinal),
+        "Profile Start HTTP 错误必须把 daemon 的 currentState 和 lastError 传给桌面端");
+
+    profile.ApplyOperationFailure("gateway-failed", "Gateway connection failed");
+    Assert(profile.StatusText == "QQ Gateway 连接失败",
+        "Gateway 失败状态不得显示为“状态未知”");
+
+    Console.WriteLine("PASS QQ Profile Start failure preserves status and LastError");
+    return;
+}
+
+if (args.Contains("--settings-startup-regression-tests", StringComparer.OrdinalIgnoreCase))
+{
+    var repositoryRoot = FindRepositoryRoot();
+    var settingsViewPath = Path.Combine(repositoryRoot, "apps", "desktop", "CloudLight.CodexBridge", "Views", "SettingsView.xaml");
+    var document = XDocument.Load(settingsViewPath);
+    XNamespace presentation = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+    var discoveryRun = document.Descendants(presentation + "Run").SingleOrDefault(element =>
+        element.Attribute("Text")?.Value.Contains("OpenClawDiscoverySource", StringComparison.Ordinal) == true);
+    Assert(discoveryRun is not null &&
+           discoveryRun.Attribute("Text")?.Value.Contains("Mode=OneWay", StringComparison.Ordinal) == true,
+        "OpenClawDiscoverySource 是只读属性；SettingsView 启动绑定必须显式为 OneWay");
+    Console.WriteLine("PASS settings startup binding is OneWay for the read-only OpenClaw discovery source");
     return;
 }
 
@@ -476,6 +595,18 @@ static Dictionary<string, string> Snapshot(params string[] roots)
         foreach (var file in Directory.EnumerateFiles(roots[index], "*", SearchOption.AllDirectories))
             result[$"{index}/{Path.GetRelativePath(roots[index], file).Replace('\\', '/')}"] = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file)));
     return result;
+}
+
+static string FindRepositoryRoot()
+{
+    foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+    {
+        for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "CloudLight.CodexBridge.sln"))) return directory.FullName;
+        }
+    }
+    throw new InvalidOperationException("无法定位包含 CloudLight.CodexBridge.sln 的测试工作区。");
 }
 
 static void Assert(bool condition, string message)

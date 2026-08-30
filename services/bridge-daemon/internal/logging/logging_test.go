@@ -6,9 +6,9 @@ import (
 )
 
 func TestRedactCredentials(t *testing.T) {
-	input := "Authorization: Bearer secret-value token=abc123 password=opaque-password sk-examplecredential123"
+	input := "Authorization: Bearer secret-value token=abc123 password=opaque-password appSecret=qq-app-secret client_secret=qq-client-secret sk-examplecredential123"
 	result := Redact(input)
-	for _, secret := range []string{"secret-value", "abc123", "opaque-password", "sk-examplecredential123"} {
+	for _, secret := range []string{"secret-value", "abc123", "opaque-password", "qq-app-secret", "qq-client-secret", "sk-examplecredential123"} {
 		if strings.Contains(result, secret) {
 			t.Fatalf("redaction leaked %q in %q", secret, result)
 		}

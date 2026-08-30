@@ -123,6 +123,7 @@ type replyState struct {
 type Adapter struct {
 	mu               sync.Mutex
 	writeMu          sync.Mutex
+	sendMu           sync.Mutex
 	config           ConfigureRequest
 	secret           string
 	status           AdapterStatus
@@ -213,8 +214,7 @@ func (a *Adapter) applyConfigurationStatusLocked(config ConfigureRequest) {
 }
 
 func (a *Adapter) SetSecret(secret string) (AdapterStatus, error) {
-	secret = strings.TrimSpace(secret)
-	if secret == "" {
+	if strings.TrimSpace(secret) == "" {
 		return AdapterStatus{}, newError("secret_invalid", "QQ Bot AppSecret is required", nil)
 	}
 	a.mu.Lock()
@@ -380,6 +380,11 @@ func (a *Adapter) SendMessage(ctx context.Context, message channels.OutboundMess
 	if text == "" {
 		return channels.OutboundResult{}, newError("message_send_failed", "QQ message text is empty", nil)
 	}
+	// QQ requires msg_seq to be monotonic for each passive-reply msg_id.  Keep
+	// allocation and HTTP delivery serialized so concurrent progress/final
+	// replies cannot race and reuse the same sequence number.
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
 	a.mu.Lock()
 	if !a.status.Running || a.client == nil {
 		a.mu.Unlock()
@@ -395,12 +400,28 @@ func (a *Adapter) SendMessage(ctx context.Context, message channels.OutboundMess
 	}
 	a.mu.Unlock()
 	result, diagnostic, err := client.sendText(ctx, qqbotConversationType(message.Address.ConversationType), message.Address.ChatID, text, msgID, seq)
+	for err != nil && msgID != "" && isDuplicateReplyError(err) {
+		a.mu.Lock()
+		reply = a.replies[key]
+		if reply == nil || time.Since(reply.CreatedAt) > passiveReplyTTL || reply.Count >= passiveReplyLimit {
+			a.mu.Unlock()
+			break
+		}
+		reply.Count++
+		seq = reply.Count
+		a.mu.Unlock()
+		result, diagnostic, err = client.sendText(ctx, qqbotConversationType(message.Address.ConversationType), message.Address.ChatID, text, msgID, seq)
+	}
 	if err != nil {
 		a.logMessageSendDiagnostic(diagnostic, err)
 		a.recordError(err)
 		a.emit(AdapterEvent{Kind: "action_failed", Code: ClassifyError(err), ConversationType: message.Address.ConversationType, ChatID: message.Address.ChatID, UserID: message.Address.UserID})
 		return channels.OutboundResult{}, err
 	}
+	a.mu.Lock()
+	a.status.LastErrorCode = ""
+	a.status.LastErrorMessage = ""
+	a.mu.Unlock()
 	messageID := strings.TrimSpace(result.ID)
 	if messageID == "" {
 		messageID = strings.TrimSpace(result.MsgID)
@@ -458,6 +479,9 @@ func (a *Adapter) rebuildClientsLocked() {
 		a.mu.Unlock()
 		a.emit(AdapterEvent{Kind: "token_refreshed"})
 	})
+	a.tokens.proxyMode = normalizeProxyMode(a.config.ProxyMode)
+	a.tokens.usingProxy = proxyUsedForURL(a.tokens.proxyMode, a.config.ProxyURL, tokenEndpoint)
+	a.tokens.onDiagnostic = a.logTokenDiagnostic
 	a.client = newOfficialClient(httpClient, a.tokens)
 	a.prepareOfficialClient(a.client, a.config)
 }
@@ -475,12 +499,30 @@ func (a *Adapter) logGatewayDiagnostic(diagnostic gatewayDiagnostic) {
 	if logger == nil {
 		return
 	}
-	logger("QQBot gateway request: host=%s path=%s method=%s authorization_present=%t authorization_scheme=%s token_length=%d http_status=%d qq_code=%d qq_err_code=%d qq_message=%q trace_id=%s network_category=%s proxy_mode=%s using_proxy=%t",
-		diagnostic.RequestHost, diagnostic.RequestPath, diagnostic.RequestMethod,
+	phase := diagnostic.Phase
+	if phase == "" {
+		phase = "gateway-http"
+	}
+	logger("QQBot gateway request: phase=%s host=%s path=%s method=%s authorization_present=%t authorization_scheme=%s token_length=%d http_status=%d qq_code=%d qq_err_code=%d qq_message=%q trace_id=%s network_category=%s proxy_mode=%s using_proxy=%t",
+		phase, diagnostic.RequestHost, diagnostic.RequestPath, diagnostic.RequestMethod,
 		diagnostic.AuthorizationPresent, diagnostic.AuthorizationScheme, diagnostic.TokenLength,
 		diagnostic.HTTPStatus, diagnostic.QQCode, diagnostic.QQErrCode,
 		sanitizeDiagnosticText(diagnostic.QQMessage), sanitizeDiagnosticText(diagnostic.TraceID),
 		diagnostic.NetworkCategory, diagnostic.ProxyMode, diagnostic.UsingProxy)
+}
+
+func (a *Adapter) logTokenDiagnostic(diagnostic tokenDiagnostic) {
+	a.mu.Lock()
+	logger := a.diagnosticLogger
+	a.mu.Unlock()
+	if logger == nil {
+		return
+	}
+	logger("QQBot token request: host=%s path=%s method=%s http_status=%d qq_code=%d qq_err_code=%d qq_message=%q trace_id=%s network_category=%s response_kind=%s proxy_mode=%s using_proxy=%t",
+		diagnostic.RequestHost, diagnostic.RequestPath, diagnostic.RequestMethod,
+		diagnostic.HTTPStatus, diagnostic.QQCode, diagnostic.QQErrCode,
+		sanitizeDiagnosticText(diagnostic.QQMessage), sanitizeDiagnosticText(diagnostic.TraceID),
+		diagnostic.NetworkCategory, diagnostic.ResponseKind, diagnostic.ProxyMode, diagnostic.UsingProxy)
 }
 
 func proxyUsedForURL(mode, rawProxyURL, target string) bool {

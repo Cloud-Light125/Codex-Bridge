@@ -1414,6 +1414,9 @@ func (s *Service) handleAdapterEvent(event AdapterEvent) {
 		return
 	}
 	payload := map[string]any{"channelType": "qqbot"}
+	if profileID := s.channelProfile(); profileID != "" {
+		payload["channelProfileId"] = profileID
+	}
 	if eventType != events.QQBotMessageReceived && eventType != events.QQBotMessageRejected {
 		payload["status"] = s.safeEventStatus()
 	}
@@ -1457,6 +1460,9 @@ func (s *Service) handleAdapterEvent(event AdapterEvent) {
 
 func (s *Service) publishChannel(eventType, code string) {
 	payload := map[string]any{"channelType": "qqbot", "status": s.safeEventStatus()}
+	if profileID := s.channelProfile(); profileID != "" {
+		payload["channelProfileId"] = profileID
+	}
 	if code != "" {
 		payload["code"] = code
 	}
@@ -1465,7 +1471,7 @@ func (s *Service) publishChannel(eventType, code string) {
 
 func (s *Service) safeEventStatus() map[string]any {
 	status := s.transport.QQBotStatus()
-	return map[string]any{
+	payload := map[string]any{
 		"channelType": "qqbot", "configured": status.Configured, "running": status.Running,
 		"connected": status.Connected, "connectionState": status.ConnectionState,
 		"lastConnectedAt": status.LastConnectedAt, "lastHeartbeatAt": status.LastHeartbeatAt,
@@ -1474,6 +1480,10 @@ func (s *Service) safeEventStatus() map[string]any {
 		"allowedGroupCount": status.AllowedGroupCount, "allowedGroupMemberCount": status.AllowedGroupMemberCount,
 		"bindingCount": status.BindingCount,
 	}
+	if profileID := s.channelProfile(); profileID != "" {
+		payload["channelProfileId"] = profileID
+	}
+	return payload
 }
 
 func (s *Service) send(ctx context.Context, address channels.ChannelAddress, text string) bool {
@@ -1487,6 +1497,9 @@ func (s *Service) send(ctx context.Context, address channels.ChannelAddress, tex
 			return false
 		}
 		payload := map[string]any{"channelType": "qqbot", "conversationType": qqbotConversationType(address.ConversationType), "chat": maskID(address.ChatID), "messageId": shortID(result.MessageID), "length": utf8.RuneCountInString(part), "part": index + 1, "parts": len(parts)}
+		if profileID := s.channelProfile(); profileID != "" {
+			payload["channelProfileId"] = profileID
+		}
 		s.broker.Publish(events.MessageSent, payload)
 		s.broker.Publish(events.QQBotMessageSent, payload)
 	}
@@ -1611,6 +1624,9 @@ func (s *Service) publishMessage(eventType string, message channels.InboundMessa
 		"channelType": "qqbot", "conversationType": qqbotConversationType(message.Address.ConversationType),
 		"chat": maskID(message.Address.ChatID), "user": maskID(message.UserID), "messageId": shortID(message.MessageID),
 		"threadId": threadID, "length": utf8.RuneCountInString(message.Text), "routeResult": result,
+	}
+	if profileID := s.channelProfile(); profileID != "" {
+		payload["channelProfileId"] = profileID
 	}
 	s.broker.Publish(eventType, payload)
 	generic := events.MessageRejected

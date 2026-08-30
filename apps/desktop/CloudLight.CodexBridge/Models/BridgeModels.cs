@@ -561,7 +561,12 @@ public sealed class BackendChannelRoutingSettings
 
 public sealed class ChannelProfilesResponse
 {
-	public List<ChannelProfileStatus> Profiles { get; set; } = [];
+	private List<ChannelProfileStatus> _profiles = [];
+	public List<ChannelProfileStatus> Profiles
+	{
+		get => _profiles;
+		set => _profiles = value ?? [];
+	}
 	private BackendChannelRoutingSettings _routing = new();
 	public BackendChannelRoutingSettings Routing
 	{
@@ -895,9 +900,10 @@ public sealed record LogEntry(DateTimeOffset Timestamp, string Source, string Me
     public string Display => $"{Timestamp:HH:mm:ss}  [{Source}]  {Message}";
 }
 
-public sealed class BridgeApiException(HttpStatusCode statusCode, string code, string message, string currentState = "") : Exception(message)
+public sealed class BridgeApiException(HttpStatusCode statusCode, string code, string message, string currentState = "", string lastError = "") : Exception(message)
 {
     public HttpStatusCode StatusCode { get; } = statusCode;
     public string Code { get; } = code;
     public string CurrentState { get; } = currentState;
+	public string LastError { get; } = lastError;
 }

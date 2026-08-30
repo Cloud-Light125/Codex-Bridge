@@ -33,6 +33,7 @@ internal static class UiText
             "disconnected" => "未连接",
             "stopped" or "disabled" => "已停止",
             "failed" or "error" => "失败",
+			"gateway-failed" => "QQ Gateway 连接失败",
             "configured" => "已配置",
             "not-configured" or "unconfigured" => "未配置",
             "reconnecting" or "connecting" => "正在重连",

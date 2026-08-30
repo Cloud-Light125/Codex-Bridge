@@ -232,6 +232,7 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
             var code = "api_error";
             var message = $"本地 API 返回 {(int)response.StatusCode}";
             var currentState = "";
+			var lastError = "";
             try
             {
                 using var document = JsonDocument.Parse(body);
@@ -239,12 +240,13 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
                 if (root.TryGetProperty("code", out var codeValue)) code = codeValue.GetString() ?? code;
                 if (root.TryGetProperty("message", out var messageValue)) message = messageValue.GetString() ?? message;
                 if (root.TryGetProperty("currentState", out var stateValue)) currentState = stateValue.GetString() ?? "";
+				if (root.TryGetProperty("lastError", out var lastErrorValue)) lastError = lastErrorValue.GetString() ?? "";
             }
             catch (JsonException)
             {
                 message = LogService.Redact(body);
             }
-            throw new BridgeApiException(response.StatusCode, code, LogService.Redact(message), currentState);
+			throw new BridgeApiException(response.StatusCode, code, LogService.Redact(message), currentState, LogService.Redact(lastError));
         }
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken)
             ?? throw new JsonException("本地 API 返回了空 JSON。");

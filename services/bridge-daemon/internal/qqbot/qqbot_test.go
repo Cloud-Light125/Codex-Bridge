@@ -3,6 +3,7 @@ package qqbot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -59,6 +60,39 @@ func TestGatewayUsesCurrentEndpointAndPreservesDiagnostics(t *testing.T) {
 	serialized, _ := json.Marshal(diagnostic)
 	if strings.Contains(string(serialized), "sensitive-secret") || strings.Contains(string(serialized), "sensitive-access-token") || strings.Contains(string(serialized), "QQBot sensitive") {
 		t.Fatalf("gateway diagnostic leaked credentials: %s", serialized)
+	}
+}
+
+func TestGateway2xxErrorEnvelopePreservesQqCodes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/token":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "access-token", "expires_in": 7200})
+		case gatewayEndpoint:
+			writer.Header().Set("X-Tps-Trace-Id", "trace-2xx-error")
+			// QQ can encode an error in a successful HTTP response. Exercise the
+			// err_code-only form as well as the normal non-zero code field.
+			_ = json.NewEncoder(writer).Encode(map[string]any{"err_code": 40012001, "message": "gateway is unavailable"})
+		default:
+			t.Fatalf("unexpected request path %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+	provider := NewTokenProvider(server.Client(), "12345", "secret", nil)
+	provider.endpoint = server.URL + "/token"
+	client := newOfficialClient(server.Client(), provider)
+	client.baseURL = server.URL
+	var diagnostic gatewayDiagnostic
+	client.onGatewayDiagnostic = func(value gatewayDiagnostic) { diagnostic = value }
+	_, err := client.gateway(context.Background())
+	if ClassifyError(err) != "gateway_lookup_failed" {
+		t.Fatalf("gateway 2xx error code=%s err=%v", ClassifyError(err), err)
+	}
+	if diagnostic.HTTPStatus != http.StatusOK || diagnostic.QQCode != 40012001 || diagnostic.QQErrCode != 40012001 || diagnostic.QQMessage != "gateway is unavailable" || diagnostic.TraceID != "trace-2xx-error" {
+		t.Fatalf("diagnostic=%#v", diagnostic)
+	}
+	if strings.Contains(err.Error(), "access-token") || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("error leaked credential: %v", err)
 	}
 }
 
@@ -147,7 +181,7 @@ func TestHTTPAndWebSocketUseSameProxyPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		apiRequest := &http.Request{URL: &url.URL{Scheme: "https", Host: "api.sgroup.qq.com"}}
+		apiRequest := &http.Request{URL: &url.URL{Scheme: "https", Host: "api.bot.qq.com"}}
 		wsRequest := &http.Request{URL: &url.URL{Scheme: "wss", Host: "example.gateway.qq.com"}}
 		httpProxy, httpErr := httpClient.Transport.(*http.Transport).Proxy(apiRequest)
 		wsProxy, wsErr := dialer.Proxy(wsRequest)
@@ -197,6 +231,203 @@ func TestTokenProviderCachesSingleFlightAndRefreshes(t *testing.T) {
 	}
 }
 
+func TestCurrentOfficialQQBotEndpointsUseAPIBotDomain(t *testing.T) {
+	if apiBaseProduction != "https://api.bot.qq.com" || tokenEndpoint != "https://api.bot.qq.com/app/getAppAccessToken" || gatewayEndpoint != "/gateway/bot" {
+		t.Fatalf("unexpected QQ Bot endpoints: api=%q token=%q gateway=%q", apiBaseProduction, tokenEndpoint, gatewayEndpoint)
+	}
+}
+
+func TestTokenProviderClassifiesHTTP200QQErrorEnvelopeWithoutLeakingCredentials(t *testing.T) {
+	const secret = "sensitive-app-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/token" {
+			t.Fatalf("unexpected token request %s %s", request.Method, request.URL.Path)
+		}
+		writer.Header().Set("X-Tps-Trace-Id", "token-trace-100016")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"code": 100016, "message": "invalid appid or secret"})
+	}))
+	defer server.Close()
+
+	provider := NewTokenProvider(server.Client(), "12345", secret, nil)
+	provider.endpoint = server.URL + "/token"
+	var diagnostic tokenDiagnostic
+	provider.onDiagnostic = func(value tokenDiagnostic) { diagnostic = value }
+	_, _, err := provider.Token(context.Background(), true)
+	if err == nil || ClassifyError(err) != "qqbot_secret_invalid" {
+		t.Fatalf("error=%v code=%s", err, ClassifyError(err))
+	}
+	var typed *Error
+	if !errors.As(err, &typed) || typed.HTTPStatus != http.StatusOK || typed.QQCode != 100016 || typed.QQMessage != "invalid appid or secret" || typed.TraceID != "token-trace-100016" {
+		t.Fatalf("typed error=%#v", typed)
+	}
+	if diagnostic.HTTPStatus != http.StatusOK || diagnostic.QQCode != 100016 || diagnostic.ResponseKind != "qq-error-envelope" || diagnostic.RequestPath != "/token" {
+		t.Fatalf("diagnostic=%#v", diagnostic)
+	}
+	serialized, _ := json.Marshal(struct {
+		Error      string          `json:"error"`
+		Diagnostic tokenDiagnostic `json:"diagnostic"`
+	}{err.Error(), diagnostic})
+	if strings.Contains(string(serialized), secret) || strings.Contains(string(serialized), "QQBot ") {
+		t.Fatalf("token diagnostic leaked a credential: %s", serialized)
+	}
+	if message := SafeErrorMessage(err); !strings.Contains(message, "HTTP 200") || !strings.Contains(message, "100016") {
+		t.Fatalf("safe message=%q", message)
+	}
+}
+
+func TestTokenProviderPreservesOpaqueSecretAndRedactsRemoteEcho(t *testing.T) {
+	const secret = "  opaque-secret-with-spaces  "
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatalf("decode token request: %v", err)
+		}
+		if body["clientSecret"] != secret {
+			t.Fatalf("clientSecret=%q; want exact opaque value", body["clientSecret"])
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"code": 100016, "message": "remote echo: " + secret})
+	}))
+	defer server.Close()
+
+	provider := NewTokenProvider(server.Client(), "12345", secret, nil)
+	provider.endpoint = server.URL
+	var diagnostic tokenDiagnostic
+	provider.onDiagnostic = func(value tokenDiagnostic) { diagnostic = value }
+	_, _, err := provider.Token(context.Background(), true)
+	if err == nil || ClassifyError(err) != "qqbot_secret_invalid" {
+		t.Fatalf("error=%v code=%s", err, ClassifyError(err))
+	}
+	if strings.Contains(diagnostic.QQMessage, secret) || strings.Contains(diagnostic.QQMessage, "opaque-secret-with-spaces") {
+		t.Fatalf("diagnostic leaked remote secret echo: %q", diagnostic.QQMessage)
+	}
+}
+
+func TestTokenProviderReportsSuccessfulExchangeMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("X-Tps-Trace-Id", "success-trace")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "access-safe", "expires_in": 7200})
+	}))
+	defer server.Close()
+
+	provider := NewTokenProvider(server.Client(), "12345", "secret", nil)
+	provider.endpoint = server.URL
+	var diagnostic tokenDiagnostic
+	provider.onDiagnostic = func(value tokenDiagnostic) { diagnostic = value }
+	if _, _, err := provider.Token(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic.ResponseKind != "success" || diagnostic.HTTPStatus != http.StatusOK || diagnostic.TraceID != "success-trace" || diagnostic.QQCode != 0 || diagnostic.QQErrCode != 0 {
+		t.Fatalf("diagnostic=%#v", diagnostic)
+	}
+}
+
+func TestTokenProviderClassifiesQQErrCodeEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"err_code": 100016, "message": "invalid appid or secret"})
+	}))
+	defer server.Close()
+
+	provider := NewTokenProvider(server.Client(), "12345", "test-app-secret", nil)
+	provider.endpoint = server.URL
+	_, _, err := provider.Token(context.Background(), true)
+	if err == nil || ClassifyError(err) != "qqbot_secret_invalid" {
+		t.Fatalf("error=%v code=%s", err, ClassifyError(err))
+	}
+	if message := SafeErrorMessage(err); !strings.Contains(message, "100016") {
+		t.Fatalf("safe message=%q", message)
+	}
+}
+
+func TestAdapterRetriesDuplicatePassiveReplyWithNextSequence(t *testing.T) {
+	var sends atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/token":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "access-retry", "expires_in": 7200})
+		case "/v2/users/user-ok/messages":
+			attempt := sends.Add(1)
+			var body map[string]any
+			_ = json.NewDecoder(request.Body).Decode(&body)
+			if body["msg_id"] != "message-1" {
+				t.Fatalf("msg_id=%v", body["msg_id"])
+			}
+			if attempt == 1 {
+				if body["msg_seq"] != float64(1) {
+					t.Fatalf("first msg_seq=%v", body["msg_seq"])
+				}
+				writer.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(writer).Encode(map[string]any{"err_code": 40054005, "message": "消息被去重，请检查请求msgseq"})
+				return
+			}
+			if body["msg_seq"] != float64(2) {
+				t.Fatalf("retry msg_seq=%v", body["msg_seq"])
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "reply-2"})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	adapter := NewAdapter(nil)
+	if _, err := adapter.Configure(ConfigureRequest{Enabled: true, AppID: "12345", Environment: "production", ProxyMode: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.SetSecret("test-secret"); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	adapter.tokens.endpoint = server.URL + "/token"
+	adapter.client.baseURL = server.URL
+	adapter.status.Running = true
+	adapter.status.Connected = true
+	adapter.status.GatewayState = "connected"
+	adapter.status.ConnectionState = "connected"
+	address := channels.ChannelAddress{ChannelType: "qqbot", AccountID: "12345", ConversationType: "c2c", ChatID: "user-ok", UserID: "user-ok"}
+	adapter.replies[replyKey(address)] = &replyState{MessageID: "message-1", CreatedAt: time.Now()}
+	adapter.mu.Unlock()
+
+	result, err := adapter.SendMessage(context.Background(), channels.OutboundMessage{Address: address, Text: "reply"})
+	if err != nil || result.MessageID != "reply-2" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if sends.Load() != 2 {
+		t.Fatalf("send attempts=%d; want 2", sends.Load())
+	}
+	status := adapter.QQBotStatus()
+	if status.LastErrorCode != "" || status.LastErrorMessage != "" {
+		t.Fatalf("successful retry left stale error: %#v", status)
+	}
+}
+
+func TestAdapterStartPersistsAuthenticationFailureAfterHTTP200TokenError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("X-Tps-Trace-Id", "start-trace-100016")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"code": 100016, "message": "invalid appid or secret"})
+	}))
+	defer server.Close()
+
+	adapter := NewAdapter(nil)
+	if _, err := adapter.Configure(ConfigureRequest{Enabled: true, AppID: "12345", Environment: "production", GroupTriggerMode: "official-at", CommandPrefix: "/codex", GatewayReconnectEnabled: true}); err != nil {
+		t.Fatalf("configure adapter: %v", err)
+	}
+	if _, err := adapter.SetSecret("sensitive-app-secret"); err != nil {
+		t.Fatalf("set secret: %v", err)
+	}
+	adapter.mu.Lock()
+	adapter.tokens.endpoint = server.URL
+	adapter.mu.Unlock()
+
+	err := adapter.Start(context.Background())
+	if err == nil || ClassifyError(err) != "qqbot_secret_invalid" {
+		t.Fatalf("start error=%v code=%s", err, ClassifyError(err))
+	}
+	status := adapter.QQBotStatus()
+	if status.Running || status.Connected || status.GatewayState != "authentication-failed" || !strings.Contains(status.LastErrorMessage, "100016") {
+		t.Fatalf("status after failed start=%#v", status)
+	}
+}
+
 func TestOfficialGatewayMessagesReconnectAndStop(t *testing.T) {
 	var tokenRequests atomic.Int32
 	var gatewayConnections atomic.Int32
@@ -210,7 +441,7 @@ func TestOfficialGatewayMessagesReconnectAndStop(t *testing.T) {
 		case request.URL.Path == "/token":
 			sequence := tokenRequests.Add(1)
 			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "access-" + string(rune('0'+sequence)), "expires_in": 7200})
-		case request.URL.Path == "/gateway":
+		case request.URL.Path == gatewayEndpoint:
 			if request.Header.Get("Authorization") == "" {
 				t.Error("gateway request omitted authorization")
 			}

@@ -10,8 +10,9 @@ namespace CloudLight.CodexBridge.ViewModels;
 
 // Owns the user-facing profile/routing model.  The daemon owns the live
 // physical transport de-duplication; this view model deliberately stores only
-// metadata and profile options in settings.json.  Credentials stay in the
-// profile-scoped DPAPI services.
+// metadata and profile options in settings.json. Telegram credentials stay in
+// profile-scoped DPAPI; QQ AppSecrets are also persisted in settings.json for
+// restart recovery and remain mirrored to DPAPI for migration compatibility.
 public sealed class ChannelProfilesViewModel : ObservableObject
 {
     private readonly BridgeApiClient _api;
@@ -94,34 +95,90 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         StatusMessage = "正在恢复消息渠道 Profile…";
         try
         {
-            var restoredProfiles = new List<(ChannelProfileViewModel Profile, string? Secret)>();
+            var restoredProfiles = new List<(ChannelProfileViewModel Profile, string? Secret, bool SecretLoadFailed)>();
             var migratedQqSecret = false;
+            var hasWarnings = false;
             foreach (var profile in Profiles)
             {
-                var restored = await LoadSecretAsync(profile, cancellationToken);
-                restoredProfiles.Add((profile, restored.Secret));
-                migratedQqSecret |= restored.MigratedFromDpapi;
+                try
+                {
+                    var restored = await LoadSecretAsync(profile, cancellationToken);
+                    restoredProfiles.Add((profile, restored.Secret, false));
+                    migratedQqSecret |= restored.MigratedFromDpapi;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    // A damaged credential for one channel must not prevent a
+                    // different enabled Profile (for example QQ) from being
+                    // configured and auto-started.
+                    hasWarnings = true;
+                    profile.SetCredentialConfigured(false);
+                    profile.ApplyOperationFailure("authentication-failed", "无法读取已保存的凭据；请在该 Profile 中重新保存凭据。");
+                    restoredProfiles.Add((profile, null, true));
+                    _logs.AddException("channels", $"恢复 {profile.Name} 的已保存凭据失败。", exception);
+                }
             }
             if (migratedQqSecret)
             {
-                PersistProfilesToSettings();
-                await _settingsService.SaveAsync(_settings);
+                try
+                {
+                    PersistProfilesToSettings();
+                    await _settingsService.SaveAsync(_settings);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    hasWarnings = true;
+                    _logs.AddException("channels", "迁移 QQ AppSecret 到 settings.json 失败。", exception);
+                }
             }
-            foreach (var (profile, secret) in restoredProfiles)
+            var configuredProfiles = new List<(ChannelProfileViewModel Profile, bool HasCredential, bool SecretLoadFailed)>();
+            foreach (var (profile, secret, secretLoadFailed) in restoredProfiles)
             {
-                profile.SetCredentialConfigured(!string.IsNullOrWhiteSpace(secret));
-                var status = await _api.ConfigureChannelProfileAsync(profile.Id, profile.ToRequest(secret), cancellationToken);
-                profile.ApplyStatus(status);
+                try
+                {
+                    profile.SetCredentialConfigured(!string.IsNullOrWhiteSpace(secret));
+                    var status = await _api.ConfigureChannelProfileAsync(profile.Id, profile.ToRequest(secret), cancellationToken);
+                    profile.ApplyStatus(status);
+                    if (secretLoadFailed)
+                        profile.ApplyOperationFailure("authentication-failed", "无法读取已保存的凭据；请在该 Profile 中重新保存凭据。");
+                    configuredProfiles.Add((profile, !string.IsNullOrWhiteSpace(secret), secretLoadFailed));
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    hasWarnings = true;
+                    ApplyOperationFailure(profile, exception);
+                    _logs.AddException("channels", $"配置 {profile.Name} 失败。", exception);
+                }
             }
-            await _api.ConfigureChannelRoutingAsync(BuildRouting(), cancellationToken);
-            foreach (var profile in Profiles.Where(profile => profile.Enabled && profile.AutoStart))
+            try
             {
-                var status = await _api.StartChannelProfileAsync(profile.Id, cancellationToken);
-                profile.ApplyStatus(status);
+                await _api.ConfigureChannelRoutingAsync(BuildRouting(), cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                hasWarnings = true;
+                _logs.AddException("channels", "恢复 Channel Profile 路由失败。", exception);
+            }
+            foreach (var (profile, hasCredential, secretLoadFailed) in configuredProfiles.Where(item => item.Profile.Enabled && item.Profile.AutoStart))
+            {
+                if (!hasCredential || secretLoadFailed) continue;
+                try
+                {
+                    var status = await _api.StartChannelProfileAsync(profile.Id, cancellationToken);
+                    profile.ApplyStatus(status);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    hasWarnings = true;
+                    ApplyOperationFailure(profile, exception);
+                    _logs.AddException("channels", $"自动启动 {profile.Name} 失败。", exception);
+                }
             }
             await RefreshAsync(cancellationToken, preserveStatus: true);
             _initialized = true;
-            StatusMessage = "Profile、路由与已保存凭据已恢复。";
+            StatusMessage = hasWarnings
+                ? "Profile 已恢复；部分凭据、路由或连接失败，请查看对应 Profile 的错误信息。"
+                : "Profile、路由与已保存凭据已恢复。";
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -181,10 +238,11 @@ public sealed class ChannelProfilesViewModel : ObservableObject
 
     private void ApplyResponse(ChannelProfilesResponse response)
     {
+        ArgumentNullException.ThrowIfNull(response);
         _settings.ChannelRouting = response.Routing ?? new BackendChannelRoutingSettings();
         foreach (var profile in Profiles)
         {
-            var status = response.Profiles.FirstOrDefault(item => string.Equals(item.Id, profile.Id, StringComparison.OrdinalIgnoreCase));
+            var status = (response.Profiles ?? []).FirstOrDefault(item => string.Equals(item.Id, profile.Id, StringComparison.OrdinalIgnoreCase));
             if (status is not null) profile.ApplyStatus(status);
             profile.CodexAssigned = ContainsRoute(_settings.ChannelRouting.Codex, profile);
             profile.OpenClawAssigned = ContainsRoute(_settings.ChannelRouting.OpenClaw, profile);
@@ -249,6 +307,7 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         }
         catch (Exception exception)
         {
+            ApplyOperationFailure(profile, exception);
             StatusMessage = UiText.UserError(exception, $"保存 {profile.Name}");
             _logs.AddException("channels", "保存渠道 Profile 失败。", exception);
         }
@@ -288,7 +347,23 @@ public sealed class ChannelProfilesViewModel : ObservableObject
             profile.ApplyStatus(await _api.StartChannelProfileAsync(profile.Id));
             StatusMessage = $"已请求启动 {profile.Name}。";
         }
-        catch (Exception exception) { StatusMessage = UiText.UserError(exception, $"启动 {profile.Name}"); }
+        catch (Exception exception)
+        {
+            ApplyOperationFailure(profile, exception);
+            StatusMessage = $"启动 {profile.Name} 失败：{profile.LastError}";
+            _logs.AddException("channels", $"启动 {profile.Name} 失败。", exception);
+        }
+    }
+
+    private static void ApplyOperationFailure(ChannelProfileViewModel profile, Exception exception)
+    {
+        var message = exception is BridgeApiException api && !string.IsNullOrWhiteSpace(api.LastError)
+            ? api.LastError
+            : exception is BridgeApiException bridge && !string.IsNullOrWhiteSpace(bridge.Message)
+                ? bridge.Message
+            : UiText.UserError(exception, $"启动 {profile.Name}");
+		var state = exception is BridgeApiException bridgeState ? bridgeState.CurrentState : "";
+        profile.ApplyOperationFailure(state, message);
     }
 
     private async Task StopProfileAsync(ChannelProfileViewModel? profile)
@@ -368,15 +443,14 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(loadDpapiAsync);
 
-        var storedSecret = settings.AppSecret?.Trim() ?? "";
-        if (storedSecret.Length > 0)
+        var storedSecret = settings.AppSecret ?? "";
+        if (!string.IsNullOrWhiteSpace(storedSecret))
         {
-            settings.AppSecret = storedSecret;
             return (storedSecret, false);
         }
 
-        var legacySecret = (await loadDpapiAsync(cancellationToken))?.Trim() ?? "";
-        if (legacySecret.Length == 0) return (null, false);
+        var legacySecret = await loadDpapiAsync(cancellationToken) ?? "";
+        if (string.IsNullOrWhiteSpace(legacySecret)) return (null, false);
 
         settings.AppSecret = legacySecret;
         return (legacySecret, true);
@@ -386,7 +460,10 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         if (profile.IsTelegram) await new TelegramSecretService(profile.Id).SaveAsync(secret);
         else
         {
-            var appSecret = secret.Trim();
+            // QQ treats AppSecret as an opaque credential. Keep its exact
+            // value identical in settings.json and DPAPI rather than trimming
+            // it on the way to either store.
+            var appSecret = secret;
             await new QqSecretService(profile.Id).SaveAsync(appSecret);
             profile.QqSettings.AppSecret = appSecret;
         }
@@ -455,7 +532,9 @@ public sealed class ChannelProfileViewModel : ObservableObject
 
     public void SetPendingSecret(string value)
     {
-        _pendingSecret = value?.Trim() ?? "";
+        // Preserve QQ credentials exactly. Telegram keeps the historical
+        // whitespace-normalization behavior.
+        _pendingSecret = IsQq ? value ?? "" : value?.Trim() ?? "";
         OnPropertyChanged(nameof(HasPendingSecret));
         OnPropertyChanged(nameof(CredentialSummary));
     }
@@ -480,6 +559,25 @@ public sealed class ChannelProfileViewModel : ObservableObject
         _status = status;
         if (IsTelegram) _credentialConfigured = status.TokenSet;
         else _credentialConfigured = status.SecretConfigured;
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(ConnectionText));
+        OnPropertyChanged(nameof(SharedText));
+        OnPropertyChanged(nameof(CredentialSummary));
+        OnPropertyChanged(nameof(AccountText));
+        OnPropertyChanged(nameof(LastError));
+        OnPropertyChanged(nameof(BindingCountText));
+    }
+
+    // Start/stop failures are returned as HTTP errors, so the normal success
+    // DTO cannot update this view model. Preserve the daemon's current state
+    // and sanitized error immediately; this prevents the UI from rendering an
+    // old "stopped" snapshot as "状态未知" until a later SSE refresh arrives.
+    public void ApplyOperationFailure(string? state, string? error)
+    {
+        _status.State = string.IsNullOrWhiteSpace(state) ? "failed" : state;
+        _status.Running = false;
+        _status.Connected = false;
+        _status.LastError = LogService.Redact(error ?? "");
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(ConnectionText));
         OnPropertyChanged(nameof(SharedText));

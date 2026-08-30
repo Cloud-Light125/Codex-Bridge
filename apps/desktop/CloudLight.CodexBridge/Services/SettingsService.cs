@@ -13,15 +13,28 @@ public sealed class SettingsService
         NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
     };
 
-    public string DataDirectory { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "CloudLight", "CodexBridge");
+    public SettingsService()
+        : this(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CloudLight", "CodexBridge"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CloudLight", "CodexBridge", "settings.json"))
+    {
+    }
+
+    // Kept internal so migration tests can exercise the production load/save
+    // path without reading or modifying the current Windows user's settings.
+    internal SettingsService(string dataDirectory, string settingsFile)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(settingsFile);
+        DataDirectory = dataDirectory;
+        SettingsFile = settingsFile;
+    }
+
+    public string DataDirectory { get; }
 
     public string LogDirectory => Path.Combine(DataDirectory, "logs");
 
-    public string SettingsFile { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "CloudLight", "CodexBridge", "settings.json");
+    public string SettingsFile { get; }
 
     public string LastLoadWarning { get; private set; } = "";
 
@@ -115,6 +128,11 @@ public sealed class SettingsService
 			: "overview";
 		settings.WindowWidth = Math.Clamp(double.IsFinite(settings.WindowWidth) ? settings.WindowWidth : 1280, 1040, 3840);
 		settings.WindowHeight = Math.Clamp(double.IsFinite(settings.WindowHeight) ? settings.WindowHeight : 800, 680, 2160);
+		// WPF uses NaN as the automatic-placement sentinel. Preserve that
+		// sentinel while discarding other named floating-point values from older
+		// settings files so window restoration never receives infinities.
+		settings.WindowLeft = double.IsFinite(settings.WindowLeft) ? settings.WindowLeft : double.NaN;
+		settings.WindowTop = double.IsFinite(settings.WindowTop) ? settings.WindowTop : double.NaN;
 		return settings;
 	}
 
@@ -171,7 +189,10 @@ public sealed class SettingsService
 			profile.Telegram.ProxyUrl = NormalizeProfileProxy(profile.Telegram.ProxyMode, profile.Telegram.ProxyUrl, out var telegramMode);
 			profile.Telegram.ProxyMode = telegramMode;
 			profile.Qq.AppId = profile.Qq.AppId?.Trim() ?? "";
-			profile.Qq.AppSecret = profile.Qq.AppSecret?.Trim() ?? "";
+			// Credentials are opaque values. Do not trim them while loading or
+			// normalizing settings: changing even one byte makes an AppSecret
+			// unusable and obscures the real QQ authentication error.
+			profile.Qq.AppSecret ??= "";
 			profile.Qq.AllowedUserOpenIds = NormalizeOpenIds(profile.Qq.AllowedUserOpenIds);
 			profile.Qq.AllowedGroupOpenIds = NormalizeOpenIds(profile.Qq.AllowedGroupOpenIds);
 			profile.Qq.AllowedGroupMemberOpenIds = NormalizeOpenIds(profile.Qq.AllowedGroupMemberOpenIds);

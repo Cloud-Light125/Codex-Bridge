@@ -25,7 +25,7 @@
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
                 <StackPanel>
                     <TextBlock Text="消息渠道" Style="{StaticResource SectionTitleStyle}"/>
-                    <TextBlock Text="Channel Profile 只保存名称、路由和连接选项；Telegram Token 与 QQ AppSecret 始终保存在本机 DPAPI 安全存储，不会写入 settings.json 或日志。请在侧边栏 QQ / Telegram 页面编辑并保存 Profile。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,0,10"/>
+                    <TextBlock Text="Channel Profile 保存名称、路由和连接选项；Telegram Token 仅保存在本机 DPAPI 安全存储，QQ AppSecret 会保存到 settings.json 并镜像到 DPAPI，均不会写入日志。请在侧边栏 QQ / Telegram 页面编辑并保存 Profile。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,0,10"/>
                     <ItemsControl ItemsSource="{Binding ChannelProfiles.Profiles}">
                         <ItemsControl.ItemTemplate><DataTemplate>
                             <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="2,10">
@@ -52,7 +52,7 @@
                     <TextBlock Text="Password（可选）" Style="{StaticResource FieldLabelStyle}" Margin="0,10,0,5"/><PasswordBox x:Name="OpenClawPasswordBox" PasswordChanged="OpenClawPasswordBox_PasswordChanged" Padding="10,7"/>
                     <StackPanel Orientation="Horizontal" Margin="0,8,0,0"><TextBlock Text="{Binding OpenClawCredentialSummary}" Foreground="{DynamicResource MutedBrush}" VerticalAlignment="Center"/><Button Content="清除已保存凭据" Command="{Binding ClearOpenClawCredentialsCommand}" Margin="14,0,0,0"/></StackPanel>
                     <CheckBox Content="自动发现本机 OpenClawTray Gateway" IsChecked="{Binding OpenClawAutoDiscover}" Margin="0,12,0,5"/><CheckBox Content="Gateway 断线后自动重连" IsChecked="{Binding OpenClawAutoReconnect}"/>
-                    <TextBlock Text="发现来源：" Foreground="{DynamicResource MutedBrush}" Margin="0,9,0,0"><Run Text="{Binding OpenClawDiscoverySource}"/></TextBlock>
+                    <TextBlock Text="发现来源：" Foreground="{DynamicResource MutedBrush}" Margin="0,9,0,0"><Run Text="{Binding OpenClawDiscoverySource, Mode=OneWay}"/></TextBlock>
                 </StackPanel>
             </Border>
             <Expander Header="高级" IsExpanded="False" Margin="0,0,0,16">

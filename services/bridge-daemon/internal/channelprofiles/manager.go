@@ -564,8 +564,7 @@ func (m *Manager) ensureLegacyDefaultRouting(profileID, platform string) {
 }
 
 func (m *Manager) SetDefaultQQSecret(secret string) (qqbot.AdapterStatus, error) {
-	secret = strings.TrimSpace(secret)
-	if secret == "" {
+	if strings.TrimSpace(secret) == "" {
 		return qqbot.AdapterStatus{}, errors.New("QQ Bot AppSecret is required")
 	}
 	m.mu.RLock()
@@ -778,7 +777,7 @@ func (m *Manager) resourceKeyLocked(request ConfigureRequest, previous *profile)
 			return "", errors.New("QQ configuration is required")
 		}
 		if request.QQ.AppSecret != nil {
-			if secret := strings.TrimSpace(*request.QQ.AppSecret); secret != "" {
+			if secret := *request.QQ.AppSecret; strings.TrimSpace(secret) != "" {
 				return "qqbot:" + fingerprint(strings.TrimSpace(request.QQ.AppID)+"\x00"+secret), nil
 			}
 		}

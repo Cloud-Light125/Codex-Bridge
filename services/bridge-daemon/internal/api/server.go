@@ -640,10 +640,27 @@ func (s *Server) profileSetRunning(response http.ResponseWriter, request *http.R
 		if errors.Is(err, channelprofiles.ErrProfileNotFound) {
 			httpStatus, code = http.StatusNotFound, "channel_profile_not_found"
 		}
-		writeError(response, httpStatus, code, bridgelog.Redact(err.Error()))
+		writeProfileOperationError(response, httpStatus, code, status, err)
 		return
 	}
 	writeJSON(response, http.StatusOK, status)
+}
+
+// writeProfileOperationError preserves the daemon's already-updated status on
+// a failed Start/Stop request.  The desktop client can then render the real
+// state and LastError instead of leaving the previous "stopped" snapshot in
+// place after the HTTP error response.
+func writeProfileOperationError(response http.ResponseWriter, httpStatus int, code string, status channelprofiles.ProfileStatus, err error) {
+	message := bridgelog.Redact(err.Error())
+	if status.Platform == channelprofiles.PlatformQQ {
+		message = qqbot.SafeErrorMessage(err)
+	}
+	writeJSON(response, httpStatus, map[string]any{
+		"code":         code,
+		"message":      message,
+		"currentState": status.State,
+		"lastError":    bridgelog.Redact(status.LastError),
+	})
 }
 
 func (s *Server) profileRouting(response http.ResponseWriter, _ *http.Request) {

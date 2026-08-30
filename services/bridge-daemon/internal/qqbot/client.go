@@ -24,6 +24,7 @@ type officialClient struct {
 }
 
 type gatewayDiagnostic struct {
+	Phase                string
 	RequestHost          string
 	RequestPath          string
 	RequestMethod        string
@@ -175,8 +176,24 @@ func (c *officialClient) requestAttempt(parent context.Context, method, path str
 		}
 		return requestErr
 	}
+	// QQ may return a JSON error envelope with HTTP 2xx (the token endpoint
+	// does this and Gateway/API responses can follow the same convention).
+	// Inspect the envelope before decoding the endpoint-specific success DTO so
+	// callers retain the real QQ code/message and diagnostic trace id.
+	var apiBody apiErrorBody
+	if response.StatusCode >= 200 && response.StatusCode < 300 &&
+		json.Unmarshal(raw, &apiBody) == nil && (apiBody.Code != 0 || apiBody.ErrCode != 0) {
+		err := safeAPIError(response.StatusCode, apiBody, c.apiHost(), path, method, auth, response.Header.Get("X-Tps-Trace-Id"))
+		if typed, ok := err.(*Error); ok {
+			typed.ProxyMode = c.proxyMode
+			typed.UsingProxy = c.usingProxy
+		}
+		if path == gatewayEndpoint {
+			c.reportGatewayDiagnostic(err)
+		}
+		return err
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var apiBody apiErrorBody
 		_ = json.Unmarshal(raw, &apiBody)
 		err := safeAPIError(response.StatusCode, apiBody, c.apiHost(), path, method, auth, response.Header.Get("X-Tps-Trace-Id"))
 		if typed, ok := err.(*Error); ok {
@@ -217,6 +234,7 @@ func (c *officialClient) requestAttempt(parent context.Context, method, path str
 	}
 	if path == gatewayEndpoint && c.onGatewayDiagnostic != nil {
 		c.onGatewayDiagnostic(gatewayDiagnostic{
+			Phase:       "gateway-http",
 			RequestHost: c.apiHost(), RequestPath: path, RequestMethod: method,
 			AuthorizationPresent: auth.Present, AuthorizationScheme: auth.Scheme, TokenLength: auth.TokenLength,
 			HTTPStatus: response.StatusCode, TraceID: sanitizeDiagnosticText(response.Header.Get("X-Tps-Trace-Id")),
@@ -238,7 +256,7 @@ func (c *officialClient) reportGatewayDiagnostic(err error) {
 	if c.onGatewayDiagnostic == nil {
 		return
 	}
-	diagnostic := gatewayDiagnostic{RequestHost: c.apiHost(), RequestPath: gatewayEndpoint, RequestMethod: http.MethodGet, ProxyMode: c.proxyMode, UsingProxy: c.usingProxy}
+	diagnostic := gatewayDiagnostic{Phase: "gateway-http", RequestHost: c.apiHost(), RequestPath: gatewayEndpoint, RequestMethod: http.MethodGet, ProxyMode: c.proxyMode, UsingProxy: c.usingProxy}
 	var typed *Error
 	if asQQBotError(err, &typed) {
 		diagnostic.RequestHost = typed.RequestHost

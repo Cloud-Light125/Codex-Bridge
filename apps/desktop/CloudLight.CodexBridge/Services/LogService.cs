@@ -86,7 +86,7 @@ public sealed partial class LogService
     [GeneratedRegex("(?i)(bearer\\s+)[A-Za-z0-9._~+\\-/=]+")]
     private static partial Regex BearerRegex();
 
-    [GeneratedRegex("(?i)((?:api[_-]?key|bot[_-]?token|access[_-]?token|refresh[_-]?token|token|password)[\"']?\\s*[=:]\\s*[\"']?)[^\\s,;\"']+")]
+    [GeneratedRegex("(?i)((?:api[_-]?key|bot[_-]?token|access[_-]?token|refresh[_-]?token|app[_-]?secret|client[_-]?secret|secret|token|password)[\"']?\\s*[=:]\\s*[\"']?)[^\\s,;\"']+")]
     private static partial Regex CredentialRegex();
 
     [GeneratedRegex("\\bsk-[A-Za-z0-9_-]{12,}\\b")]

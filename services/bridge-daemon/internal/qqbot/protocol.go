@@ -6,9 +6,15 @@ import (
 )
 
 const (
-	apiBaseProduction = "https://api.sgroup.qq.com"
-	tokenEndpoint     = "https://bots.qq.com/app/getAppAccessToken"
-	gatewayEndpoint   = "/gateway"
+	// QQ's current official Bot API uses api.bot.qq.com for the access-token
+	// exchange and the HTTP Gateway lookup.  The lookup may return a WebSocket
+	// URL on api.sgroup.qq.com; that host is selected by QQ and is not guessed.
+	apiBaseProduction = "https://api.bot.qq.com"
+	tokenEndpoint     = "https://api.bot.qq.com/app/getAppAccessToken"
+	// The current official Bot API exposes the sharded gateway lookup here.
+	// QQ may return a legacy api.sgroup.qq.com WebSocket URL from this call;
+	// always use the URL in the response rather than constructing one locally.
+	gatewayEndpoint   = "/gateway/bot"
 	intentGroupAndC2C = 1 << 25
 	officialTextLimit = 5000
 

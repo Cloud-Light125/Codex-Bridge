@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -23,7 +24,7 @@ func (a *Adapter) connectGateway(parent context.Context, runID uint64, resume bo
 	a.mu.Unlock()
 	a.emit(AdapterEvent{Kind: "authenticating"})
 
-	_, expiry, err := tokens.Token(parent, false)
+	accessToken, expiry, err := tokens.Token(parent, false)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -46,15 +47,23 @@ func (a *Adapter) connectGateway(parent context.Context, runID uint64, resume bo
 	headers := http.Header{"User-Agent": []string{"CloudLight-Codex-Bridge/1.0.1"}}
 	conn, response, err := dialer.DialContext(ctx, gatewayURL, headers)
 	if err != nil {
-		if response != nil && response.StatusCode == http.StatusTooManyRequests {
-			return nil, 0, newError("rate_limited", "QQ Gateway rate limited the connection", err)
-		}
-		if ctx.Err() != nil {
-			return nil, 0, newError("network_timeout", "QQ Gateway connection timed out", ctx.Err())
-		}
-		category := networkErrorCategory(err)
-		return nil, 0, &Error{Code: category, Message: "Unable to connect to QQ Gateway", RequestHost: gatewayHost(gatewayURL), NetworkCategory: category, ProxyMode: client.proxyMode, UsingProxy: client.usingProxy, Cause: err}
+		return nil, 0, a.gatewayHandshakeError(gatewayURL, response, accessToken, client, err)
 	}
+	handshakeStatus := 0
+	handshakeTraceID := ""
+	if response != nil {
+		handshakeStatus = response.StatusCode
+		handshakeTraceID = response.Header.Get("X-Tps-Trace-Id")
+	}
+	// Record the real WebSocket upgrade status (normally HTTP 101) after the
+	// dialer accepts it.  Keep the same safe auth metadata as failed handshakes:
+	// never write the access token or AppSecret to the daemon log.
+	a.logGatewayDiagnostic(gatewayDiagnostic{
+		Phase: "websocket-handshake", RequestHost: gatewayHost(gatewayURL), RequestPath: gatewayEndpoint,
+		RequestMethod: http.MethodGet, AuthorizationPresent: accessToken != "", AuthorizationScheme: "QQBot",
+		TokenLength: len(accessToken), HTTPStatus: handshakeStatus, TraceID: sanitizeDiagnosticText(handshakeTraceID),
+		ProxyMode: client.proxyMode, UsingProxy: client.usingProxy,
+	})
 	a.mu.Lock()
 	if a.runID != runID || a.runCtx == nil || a.runCtx.Err() != nil {
 		a.mu.Unlock()
@@ -158,6 +167,67 @@ func (a *Adapter) connectGateway(parent context.Context, runID uint64, resume bo
 	a.emit(AdapterEvent{Kind: "connected"})
 	a.emit(AdapterEvent{Kind: "ready"})
 	return conn, interval, nil
+}
+
+// gatewayHandshakeError turns a failed WebSocket upgrade into the same safe
+// transport/protocol metadata used for the preceding /gateway HTTP request.
+// QQ may return an error envelope from the upgrade endpoint, including HTTP
+// 2xx responses; retain its status/code/trace without retaining response body,
+// access token, or AppSecret.
+func (a *Adapter) gatewayHandshakeError(gatewayURL string, response *http.Response, token string, client *officialClient, cause error) error {
+	host := gatewayHost(gatewayURL)
+	status, traceID := 0, ""
+	var body apiErrorBody
+	if response != nil {
+		status = response.StatusCode
+		traceID = response.Header.Get("X-Tps-Trace-Id")
+		if response.Body != nil {
+			raw, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+			_ = response.Body.Close()
+			_ = json.Unmarshal(raw, &body)
+		}
+	}
+	auth := requestAuthMetadata{Present: token != "", Scheme: "QQBot", TokenLength: len(token)}
+	var requestErr *Error
+	if body.Code != 0 || body.ErrCode != 0 {
+		classified := safeAPIError(status, body, host, gatewayEndpoint, http.MethodGet, auth, traceID)
+		if typed, ok := classified.(*Error); ok {
+			requestErr = typed
+			requestErr.ProxyMode = client.proxyMode
+			requestErr.UsingProxy = client.usingProxy
+		}
+	}
+	if requestErr == nil {
+		category := networkErrorCategory(cause)
+		switch status {
+		case http.StatusUnauthorized:
+			category = "gateway_auth_failed"
+		case http.StatusForbidden:
+			category = "gateway_permission_denied"
+		case http.StatusNotFound:
+			category = "gateway_endpoint_not_found"
+		case http.StatusTooManyRequests:
+			category = "rate_limited"
+		case 0:
+		default:
+			category = "gateway_connect_failed"
+		}
+		requestErr = &Error{
+			Code: category, Message: "Unable to connect to QQ Gateway", HTTPStatus: status,
+			RequestHost: host, RequestPath: gatewayEndpoint, RequestMethod: http.MethodGet,
+			AuthorizationPresent: auth.Present, AuthorizationScheme: auth.Scheme, TokenLength: auth.TokenLength,
+			TraceID: sanitizeDiagnosticText(traceID), NetworkCategory: category, ProxyMode: client.proxyMode, UsingProxy: client.usingProxy, Cause: cause,
+		}
+	}
+	a.logGatewayDiagnostic(gatewayDiagnostic{
+		Phase: "websocket-handshake", RequestHost: requestErr.RequestHost, RequestPath: requestErr.RequestPath,
+		RequestMethod: requestErr.RequestMethod, AuthorizationPresent: requestErr.AuthorizationPresent,
+		AuthorizationScheme: requestErr.AuthorizationScheme, TokenLength: requestErr.TokenLength,
+		HTTPStatus: requestErr.HTTPStatus, QQCode: requestErr.QQCode, QQErrCode: requestErr.QQErrCode,
+		QQMessage: requestErr.QQMessage, TraceID: requestErr.TraceID, NetworkCategory: requestErr.NetworkCategory,
+		ProxyMode: requestErr.ProxyMode, UsingProxy: requestErr.UsingProxy,
+	})
+	return requestErr
 }
 
 func (a *Adapter) supervise(ctx context.Context, runID uint64, conn *websocket.Conn, interval time.Duration) {

@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,6 +44,29 @@ func TestProfileRoutingAPIAlwaysReturnsArraysForEmptyRoutes(t *testing.T) {
 			}
 			assertRoutingJSONUsesArrays(t, response.Body.String())
 		})
+	}
+}
+
+func TestProfileOperationErrorPreservesCurrentStateForDesktop(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeProfileOperationError(response, http.StatusConflict, "channel_profile_start_failed", channelprofiles.ProfileStatus{
+		ID: "qq-default", Platform: channelprofiles.PlatformQQ, State: "authentication-failed",
+		LastError: "QQ access token request returned HTTP 200、错误码 100016：AppID 或 AppSecret 无效或已重置。",
+	}, errors.New("QQ authentication failed"))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Code         string `json:"code"`
+		Message      string `json:"message"`
+		CurrentState string `json:"currentState"`
+		LastError    string `json:"lastError"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "channel_profile_start_failed" || body.CurrentState != "authentication-failed" || body.LastError == "" {
+		t.Fatalf("operation error response=%#v", body)
 	}
 }
 

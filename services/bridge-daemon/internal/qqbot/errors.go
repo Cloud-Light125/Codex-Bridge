@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+
+	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 )
 
 type Error struct {
@@ -105,6 +107,9 @@ func networkErrorCategory(err error) string {
 
 func safeAPIError(status int, body apiErrorBody, host, path, method string, auth requestAuthMetadata, traceID string) error {
 	qqCode := body.Code
+	if qqCode == 0 {
+		qqCode = body.ErrCode
+	}
 	qqMessage := sanitizeDiagnosticText(body.Message)
 	if traceID == "" {
 		traceID = body.TraceID
@@ -138,6 +143,9 @@ func safeAPIError(status int, body apiErrorBody, host, path, method string, auth
 		case http.StatusBadRequest:
 			code = "protocol_incompatible"
 		}
+		if qqCode == 40054005 {
+			code = "qqbot_message_duplicate"
+		}
 	}
 	message := qqMessage
 	if message == "" {
@@ -153,7 +161,7 @@ func safeAPIError(status int, body apiErrorBody, host, path, method string, auth
 func SafeErrorMessage(err error) string {
 	var typed *Error
 	_ = errors.As(err, &typed)
-	host := "api.sgroup.qq.com"
+	host := "api.bot.qq.com"
 	if typed != nil && typed.RequestHost != "" {
 		host = typed.RequestHost
 	}
@@ -162,15 +170,26 @@ func SafeErrorMessage(err error) string {
 		detail = "：" + typed.QQMessage
 	}
 	status := 0
+	qqCode := 0
 	if typed != nil {
 		status = typed.HTTPStatus
+		qqCode = typed.QQCode
+		if qqCode == 0 {
+			qqCode = typed.QQErrCode
+		}
 	}
 	switch ClassifyError(err) {
 	case "credentials_missing", "qqbot_credentials_missing":
 		return "缺少 AppID 或 AppSecret，请先保存凭据。"
 	case "appid_invalid", "qqbot_appid_invalid":
+		if typed != nil && qqCode != 0 {
+			return fmt.Sprintf("QQ 访问凭证请求返回 HTTP %d、错误码 %d：AppID 无效、机器人不存在或状态不可用。", status, qqCode)
+		}
 		return "AppID 格式无效，请复制 QQ 开放平台显示的 AppID。"
 	case "secret_invalid", "qqbot_secret_invalid":
+		if typed != nil && qqCode != 0 {
+			return fmt.Sprintf("QQ 访问凭证请求返回 HTTP %d、错误码 %d：AppID 或 AppSecret 无效或已重置。", status, qqCode)
+		}
 		return "AppSecret 无效，请在 QQ 开放平台重新复制或生成。"
 	case "qqbot_auth_failed", "auth_failed":
 		return "QQ 凭据认证失败，请检查 AppID、AppSecret 和机器人状态。"
@@ -182,6 +201,11 @@ func SafeErrorMessage(err error) string {
 		return fmt.Sprintf("QQ Gateway 请求返回 %d：Gateway API 路径与当前协议不兼容%s", status, detail)
 	case "gateway_response_invalid":
 		return "Gateway 返回格式无法解析。"
+	case "gateway_connect_failed":
+		if status > 0 {
+			return fmt.Sprintf("QQ Gateway WebSocket 握手返回 HTTP %d，请检查网络、代理和机器人状态。", status)
+		}
+		return "QQ Gateway WebSocket 握手失败，请检查网络、代理和机器人状态。"
 	case "gateway_lookup_failed", "qqbot_gateway_failed":
 		if status > 0 {
 			return fmt.Sprintf("QQ Gateway 请求返回 HTTP %d%s", status, detail)
@@ -199,6 +223,11 @@ func SafeErrorMessage(err error) string {
 		return fmt.Sprintf("无法连接 %s，请检查网络或代理。", host)
 	case "rate_limited", "qqbot_rate_limited":
 		return "QQ 平台已限流，请稍后再试。"
+	case "qqbot_message_duplicate":
+		if qqCode != 0 {
+			return fmt.Sprintf("QQ 被动回复序号冲突（HTTP %d、错误码 %d），已尝试递增 msg_seq。请重新发送消息以建立新的回复链。", status, qqCode)
+		}
+		return "QQ 被动回复序号冲突，请重新发送消息。"
 	case "permission_not_granted", "intent_not_enabled":
 		return "机器人应用尚未获得群聊/C2C 消息权限，请在 QQ 开放平台启用后重试。"
 	case "protocol_incompatible", "qqbot_protocol_error":
@@ -208,7 +237,16 @@ func SafeErrorMessage(err error) string {
 	}
 }
 
+func isDuplicateReplyError(err error) bool {
+	var typed *Error
+	if !errors.As(err, &typed) || typed == nil {
+		return false
+	}
+	return typed.QQCode == 40054005 || typed.QQErrCode == 40054005
+}
+
 func sanitizeDiagnosticText(value string) string {
+	value = bridgelog.Redact(value)
 	value = strings.Map(func(r rune) rune {
 		if r == '\r' || r == '\n' || r == '\t' || r < 0x20 {
 			return ' '
