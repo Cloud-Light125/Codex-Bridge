@@ -132,7 +132,7 @@ func (p *TokenProvider) fetch(parent context.Context) (string, time.Time, error)
 		return "", time.Time{}, requestErr
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "CloudLight-Codex-Bridge/1.2.0")
+	req.Header.Set("User-Agent", "CloudLight-Codex-Bridge/1.2.1")
 	response, err := p.http.Do(req)
 	if err != nil {
 		category := networkErrorCategory(err)

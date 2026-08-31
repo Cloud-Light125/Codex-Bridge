@@ -16,11 +16,34 @@ import (
 // safely rely on. A missing capability must result in a user-visible error,
 // not a guessed protocol call.
 type AdapterCapabilities struct {
-	CanCreateConversation bool `json:"canCreateConversation"`
-	CanStop               bool `json:"canStop"`
-	CanContinue           bool `json:"canContinue"`
-	CanReportWaitingInput bool `json:"canReportWaitingInput"`
-	CanQueryRunState      bool `json:"canQueryRunState"`
+	CanCreateConversation    bool `json:"canCreateConversation"`
+	CanStop                  bool `json:"canStop"`
+	CanContinue              bool `json:"canContinue"`
+	CanReportWaitingInput    bool `json:"canReportWaitingInput"`
+	CanQueryRunState         bool `json:"canQueryRunState"`
+	SupportsGitActions       bool `json:"supportsGitActions"`
+	SupportsTestAction       bool `json:"supportsTestAction"`
+	SupportsContinue         bool `json:"supportsContinue"`
+	SupportsRetry            bool `json:"supportsRetry"`
+	SupportsCancel           bool `json:"supportsCancel"`
+	SupportsOpenConversation bool `json:"supportsOpenConversation"`
+}
+
+func (c AdapterCapabilities) SupportsContinueAction() bool {
+	return c.SupportsContinue || c.CanContinue
+}
+
+func (c AdapterCapabilities) SupportsRetryAction() bool {
+	// Retry has always been implemented by Task Center on top of the existing
+	// send/resolve adapter path. Keep old adapters compatible while exposing an
+	// explicit capability for new adapters.
+	return c.SupportsRetry || c.SupportsContinueAction()
+}
+
+func (c AdapterCapabilities) SupportsCancelAction() bool { return c.SupportsCancel || c.CanStop }
+
+func (c AdapterCapabilities) SupportsOpenConversationAction() bool {
+	return c.SupportsOpenConversation
 }
 
 type ConversationRef struct {
@@ -86,11 +109,17 @@ func (a *CodexTaskAdapter) Ready() bool {
 
 func (a *CodexTaskAdapter) Capabilities() AdapterCapabilities {
 	return AdapterCapabilities{
-		CanCreateConversation: false,
-		CanStop:               true,
-		CanContinue:           true,
-		CanReportWaitingInput: true,
-		CanQueryRunState:      true,
+		CanCreateConversation:    false,
+		CanStop:                  true,
+		CanContinue:              true,
+		CanReportWaitingInput:    true,
+		CanQueryRunState:         true,
+		SupportsGitActions:       true,
+		SupportsTestAction:       true,
+		SupportsContinue:         true,
+		SupportsRetry:            true,
+		SupportsCancel:           true,
+		SupportsOpenConversation: true,
 	}
 }
 
@@ -118,8 +147,10 @@ func (a *CodexTaskAdapter) ListConversations(ctx context.Context, limit int) ([]
 		if a.runtime != nil {
 			state := a.runtime.RuntimeState(thread.ThreadID)
 			ref.Status = firstNonEmpty(state.State, ref.Status)
-			ref.HasActiveRun = codexStateActive(state.State) || state.PendingInteractionCount > 0 || state.TurnID != ""
-			ref.ActiveRunID = state.TurnID
+			ref.HasActiveRun = codexStateActive(state.State) || state.PendingInteractionCount > 0
+			if ref.HasActiveRun {
+				ref.ActiveRunID = state.TurnID
+			}
 		}
 		result = append(result, ref)
 	}
@@ -174,8 +205,10 @@ func (a *CodexTaskAdapter) ResolveConversation(ctx context.Context, number int, 
 	if a.runtime != nil {
 		state := a.runtime.RuntimeState(targetID)
 		ref.Status = firstNonEmpty(state.State, ref.Status)
-		ref.HasActiveRun = codexStateActive(state.State) || state.PendingInteractionCount > 0 || state.TurnID != ""
-		ref.ActiveRunID = state.TurnID
+		ref.HasActiveRun = codexStateActive(state.State) || state.PendingInteractionCount > 0
+		if ref.HasActiveRun {
+			ref.ActiveRunID = state.TurnID
+		}
 	}
 	return ref, nil
 }
@@ -301,11 +334,15 @@ func (a *OpenClawTaskAdapter) Ready() bool {
 
 func (a *OpenClawTaskAdapter) Capabilities() AdapterCapabilities {
 	return AdapterCapabilities{
-		CanCreateConversation: false,
-		CanStop:               true,
-		CanContinue:           true,
-		CanReportWaitingInput: false,
-		CanQueryRunState:      true,
+		CanCreateConversation:    false,
+		CanStop:                  true,
+		CanContinue:              true,
+		CanReportWaitingInput:    false,
+		CanQueryRunState:         true,
+		SupportsContinue:         true,
+		SupportsRetry:            true,
+		SupportsCancel:           true,
+		SupportsOpenConversation: true,
 	}
 }
 

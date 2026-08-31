@@ -63,6 +63,7 @@ public sealed class MainViewModel : ObservableObject
         _api.EventReceived += OnEventReceived;
         _api.EventStreamConnectionChanged += OnEventStreamConnectionChanged;
         Tasks.ConversationRequested += OnConversationRequested;
+        Overview.TasksRequested += () => Navigate("tasks");
     }
 
     public SessionsViewModel Sessions { get; }

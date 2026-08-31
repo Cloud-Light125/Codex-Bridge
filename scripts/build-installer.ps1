@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.2.0",
+    [string]$Version = "1.2.1",
     [string]$OutputDirectory = "",
     [string]$InnoCompiler = ""
 )
@@ -52,15 +52,12 @@ $defineVersion = '/DMyAppVersion=' + $Version
 $defineSource = '/DSourceDir=' + $resolvedStageDirectory
 $defineOutput = '/DOutputDir=' + $releaseDirectory
 $defineIcon = '/DAppIconFile=' + $iconFile
-$compilerStartInfo = [Diagnostics.ProcessStartInfo]::new()
-$compilerStartInfo.FileName = $InnoCompiler
-$compilerStartInfo.UseShellExecute = $false
-foreach ($argument in @($defineVersion, $defineSource, $defineOutput, $defineIcon, $installerScript)) {
-    $compilerStartInfo.ArgumentList.Add($argument)
-}
-$compilerProcess = [Diagnostics.Process]::Start($compilerStartInfo)
-$compilerProcess.WaitForExit()
-if ($compilerProcess.ExitCode -ne 0) { throw "Inno Setup compilation failed." }
+$compilerArguments = @($defineVersion, $defineSource, $defineOutput, $defineIcon, $installerScript)
+# Use PowerShell's native argument passing so the release script works in both
+# Windows PowerShell 5.1 and PowerShell 7.  ProcessStartInfo.ArgumentList is
+# unavailable in the former, and every path here may contain spaces.
+& $InnoCompiler @compilerArguments
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed." }
 
 $installerPath = Join-Path $releaseDirectory "CloudLight-CodexBridge-Setup-$Version-win-x64.exe"
 if (-not (Test-Path -LiteralPath $installerPath)) {

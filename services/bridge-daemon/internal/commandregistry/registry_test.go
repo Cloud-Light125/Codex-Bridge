@@ -126,6 +126,24 @@ func TestTelegramMenuEligibilityDoesNotLimitBridgeParsing(t *testing.T) {
 	}
 }
 
+func TestTaskActionCommandsAreSharedBuiltIns(t *testing.T) {
+	registry := NewInMemory()
+	for _, input := range []struct {
+		text   string
+		action string
+		count  int
+	}{
+		{"/actions 108", ActionTaskActions, 1},
+		{"/action 108 diff full", ActionTaskAction, 3},
+		{"/confirm A12", ActionTaskConfirm, 1},
+	} {
+		invocation, ok := registry.Resolve(input.text)
+		if !ok || invocation.Definition.Action != input.action || len(invocation.Arguments) != input.count {
+			t.Fatalf("resolve %q: ok=%v action=%q args=%#v", input.text, ok, invocation.Definition.Action, invocation.Arguments)
+		}
+	}
+}
+
 func TestBackendCapabilitiesFilterCommandsAndHelp(t *testing.T) {
 	registry := NewInMemory()
 	openClaw := registry.ListForBackend(BackendCapabilityOpenClaw)

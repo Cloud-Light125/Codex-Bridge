@@ -52,6 +52,28 @@
                         <TextBox Text="{Binding WorkingDirectory, UpdateSourceTrigger=PropertyChanged}"/>
                         <Button Grid.Column="1" Content="选择文件夹" Command="{Binding ChooseDirectoryCommand}" Margin="8,0,0,0"/>
                     </Grid>
+                    <Border Background="{DynamicResource CodeBrush}" Padding="10" Margin="0,12,0,0">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Git 状态" Style="{StaticResource SectionTitleStyle}"/>
+                                <Button Grid.Column="1" Content="刷新 Git" Command="{Binding RefreshGitStatusCommand}"/>
+                            </Grid>
+                            <TextBlock Text="查询固定只读 Git 状态，不会修改工作区。" Style="{StaticResource SecondaryTextStyle}" Margin="0,4,0,8"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Git Repository" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="1" Text="{Binding GitStatus.RepositoryDisplay}"/>
+                                <TextBlock Grid.Column="2" Text="Branch" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="3" Text="{Binding GitStatus.Branch}" TextTrimming="CharacterEllipsis"/>
+                            </Grid>
+                            <Grid Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="Working Tree" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="1" Text="{Binding GitStatus.WorkingTreeDisplay}"/>
+                                <TextBlock Grid.Column="2" Text="最新提交" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="3" Text="{Binding GitStatus.LatestCommit}" TextTrimming="CharacterEllipsis"/>
+                            </Grid>
+                            <TextBlock Text="{Binding GitStatus.Error}" Foreground="{DynamicResource WarningBrush}" TextWrapping="Wrap" Margin="0,8,0,0" Visibility="{Binding GitStatusErrorVisibility}"/>
+                            <TextBlock Text="读取中…" Foreground="{DynamicResource MutedBrush}" Margin="0,8,0,0" Visibility="{Binding GitStatusBusyVisibility}"/>
+                        </StackPanel>
+                    </Border>
                     <TextBlock Text="描述" Style="{StaticResource EyebrowTextStyle}" Margin="0,14,0,4"/>
                     <TextBox Text="{Binding Description, UpdateSourceTrigger=PropertyChanged}" MinHeight="70" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
                     <Grid Margin="0,14,0,0">

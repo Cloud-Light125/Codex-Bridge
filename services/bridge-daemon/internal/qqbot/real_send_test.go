@@ -30,7 +30,7 @@ func TestRealQQMirrorSend(t *testing.T) {
 	client := newOfficialClient(httpClient, NewTokenProvider(httpClient, appID, secret, nil))
 	result, diagnostic, err := client.sendText(
 		context.Background(), conversation, target,
-		"#测试\nCloudLight Codex Bridge 1.2.0 QQ transport probe", "", 0,
+		"#测试\nCloudLight Codex Bridge 1.2.1 QQ transport probe", "", 0,
 	)
 	if err != nil {
 		httpStatus, qqCode, qqErrCode, message, traceID := 0, 0, 0, sanitizeDiagnosticText(err.Error()), ""

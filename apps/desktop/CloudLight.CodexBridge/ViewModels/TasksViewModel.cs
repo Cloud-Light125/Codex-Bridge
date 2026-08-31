@@ -21,6 +21,9 @@ public sealed class TasksViewModel : ObservableObject
     private readonly AsyncRelayCommand _retryCommand;
     private readonly AsyncRelayCommand _cancelCommand;
     private readonly AsyncRelayCommand _answerCommand;
+    private readonly RelayCommand _actionCommand;
+    private readonly RelayCommand _confirmActionCommand;
+    private readonly RelayCommand _cancelActionConfirmationCommand;
     private string _searchText = "";
     private string _statusFilter = "";
     private BridgeTask? _selectedTask;
@@ -33,6 +36,9 @@ public sealed class TasksViewModel : ObservableObject
     private string _taskAnswerText = "";
     private string _errorText = "";
     private bool _busy;
+    private TaskActionModel? _pendingConfirmationAction;
+    private TaskActionResultModel? _actionResult;
+    private readonly Dictionary<int, TaskActionResultModel> _actionResults = [];
 
     public TasksViewModel(BridgeApiClient api, LogService logs, SessionsViewModel sessions, OpenClawViewModel openClaw)
     {
@@ -47,12 +53,18 @@ public sealed class TasksViewModel : ObservableObject
         _retryCommand = new AsyncRelayCommand(RetryAsync, () => !Busy && SelectedTask is { Status: "failed" or "interrupted" });
         _cancelCommand = new AsyncRelayCommand(CancelAsync, () => !Busy && SelectedTask is { Status: "queued" or "routing" or "running" or "waiting-input" });
         _answerCommand = new AsyncRelayCommand(AnswerAsync, () => !Busy && SelectedTask is { Status: "waiting-input" } && !string.IsNullOrWhiteSpace(TaskAnswerText));
+        _actionCommand = new RelayCommand(parameter => _ = ExecuteActionAsync(parameter as TaskActionModel), parameter => !Busy && PendingConfirmationAction is null && parameter is TaskActionModel action && (!action.Id.Equals("continue", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(ContinueText)));
+        _confirmActionCommand = new RelayCommand(_ => _ = ConfirmActionAsync(), _ => !Busy && PendingConfirmationAction is not null);
+        _cancelActionConfirmationCommand = new RelayCommand(_ => CancelActionConfirmation(), _ => PendingConfirmationAction is not null);
         RefreshCommand = _refreshCommand;
         CreateCommand = _createCommand;
         ContinueCommand = _continueCommand;
         RetryCommand = _retryCommand;
         CancelCommand = _cancelCommand;
         AnswerCommand = _answerCommand;
+        ActionCommand = _actionCommand;
+        ConfirmActionCommand = _confirmActionCommand;
+        CancelActionConfirmationCommand = _cancelActionConfirmationCommand;
         OpenConversationCommand = new RelayCommand(_ => OpenConversation());
         sessions.Threads.CollectionChanged += (_, _) => RefreshConversationChoices();
         openClaw.Sessions.CollectionChanged += (_, _) => RefreshConversationChoices();
@@ -62,6 +74,7 @@ public sealed class TasksViewModel : ObservableObject
     public ObservableCollection<BridgeTask> Tasks { get; } = [];
     public ObservableCollection<ProjectModel> Projects { get; } = [];
     public ObservableCollection<ConversationChoice> ConversationChoices { get; } = [];
+    public ObservableCollection<TaskActionModel> AvailableActions { get; } = [];
     public ICollectionView TasksView { get; }
     public ICollectionView ConversationView { get; }
     public ICommand RefreshCommand { get; }
@@ -70,6 +83,9 @@ public sealed class TasksViewModel : ObservableObject
     public ICommand RetryCommand { get; }
     public ICommand CancelCommand { get; }
     public ICommand AnswerCommand { get; }
+    public ICommand ActionCommand { get; }
+    public ICommand ConfirmActionCommand { get; }
+    public ICommand CancelActionConfirmationCommand { get; }
     public ICommand OpenConversationCommand { get; }
     public event Action<string, int>? ConversationRequested;
 
@@ -78,7 +94,12 @@ public sealed class TasksViewModel : ObservableObject
         get => _selectedTask;
         set
         {
-            if (SetProperty(ref _selectedTask, value)) RefreshCommandStates();
+            if (!SetProperty(ref _selectedTask, value)) return;
+            PendingConfirmationAction = null;
+            ActionResult = value is not null && _actionResults.TryGetValue(value.TaskNumber, out var result) ? result : null;
+            AvailableActions.Clear();
+            RefreshCommandStates();
+            if (value is not null) _ = RefreshAvailableActionsAsync(value.TaskNumber);
         }
     }
 
@@ -158,6 +179,37 @@ public sealed class TasksViewModel : ObservableObject
     public Visibility BusyVisibility => Busy ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ErrorVisibility => string.IsNullOrWhiteSpace(ErrorText) ? Visibility.Collapsed : Visibility.Visible;
     public Visibility TaskAnswerVisibility => SelectedTask is { Status: "waiting-input" } && !string.IsNullOrWhiteSpace(SelectedTask.PendingInteractionId) ? Visibility.Visible : Visibility.Collapsed;
+    public TaskActionModel? PendingConfirmationAction
+    {
+        get => _pendingConfirmationAction;
+        private set
+        {
+            if (SetProperty(ref _pendingConfirmationAction, value))
+            {
+                OnPropertyChanged(nameof(ActionConfirmationVisibility));
+                _confirmActionCommand.RaiseCanExecuteChanged();
+                _cancelActionConfirmationCommand.RaiseCanExecuteChanged();
+                _actionCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+    public Visibility ActionConfirmationVisibility => PendingConfirmationAction is null ? Visibility.Collapsed : Visibility.Visible;
+    public TaskActionResultModel? ActionResult
+    {
+        get => _actionResult;
+        private set
+        {
+            if (SetProperty(ref _actionResult, value))
+            {
+                OnPropertyChanged(nameof(ActionResultVisibility));
+                OnPropertyChanged(nameof(ActionResultHeader));
+                OnPropertyChanged(nameof(ActionResultText));
+            }
+        }
+    }
+    public Visibility ActionResultVisibility => ActionResult is null ? Visibility.Collapsed : Visibility.Visible;
+    public string ActionResultHeader => ActionResult is null ? "" : $"{ActionResult.Action} · {ActionResult.TimeDisplay}";
+    public string ActionResultText => ActionResult is null ? "" : string.IsNullOrWhiteSpace(ActionResult.Error) ? ActionResult.Result : $"错误：{ActionResult.Error}";
     public string RunningCount => Tasks.Count(task => task.Status == "running").ToString();
     public string WaitingCount => Tasks.Count(task => task.Status == "waiting-input").ToString();
     public string CompletedCount => Tasks.Count(task => task.Status == "completed").ToString();
@@ -265,6 +317,83 @@ public sealed class TasksViewModel : ObservableObject
         }, "提交回答");
     }
 
+    private async Task RefreshAvailableActionsAsync(int taskNumber)
+    {
+        try
+        {
+            var response = await _api.GetTaskActionsAsync(taskNumber);
+            if (SelectedTask?.TaskNumber != taskNumber) return;
+            AvailableActions.Clear();
+            foreach (var action in response.Actions.Where(action => action.Available)) AvailableActions.Add(action);
+        }
+        catch (Exception exception)
+        {
+            if (SelectedTask?.TaskNumber == taskNumber) AvailableActions.Clear();
+            _logs.Add("tasks", $"读取快捷操作失败：{exception.Message}");
+        }
+    }
+
+    private async Task ExecuteActionAsync(TaskActionModel? action)
+    {
+        if (action is null || SelectedTask is null || Busy) return;
+        if (action.RequiresConfirmation)
+        {
+            PendingConfirmationAction = action;
+            return;
+        }
+        await RunTaskActionAsync(action, false);
+    }
+
+    public async Task ExecuteQuickActionAsync(int taskNumber, string actionId)
+    {
+        var task = Tasks.FirstOrDefault(item => item.TaskNumber == taskNumber);
+        if (task is null || !actionId.Equals("cancel", StringComparison.OrdinalIgnoreCase)) return;
+        SelectedTask = task;
+        await ExecuteActionAsync(new TaskActionModel { Id = actionId, DisplayName = "停止任务" });
+    }
+
+    private async Task ConfirmActionAsync()
+    {
+        var action = PendingConfirmationAction;
+        if (action is null) return;
+        PendingConfirmationAction = null;
+        await RunTaskActionAsync(action, true);
+    }
+
+    private void CancelActionConfirmation() => PendingConfirmationAction = null;
+
+    private async Task RunTaskActionAsync(TaskActionModel action, bool confirmed)
+    {
+        var selected = SelectedTask;
+        if (selected is null) return;
+        await RunMutationAsync(async () =>
+        {
+            var response = await _api.ExecuteTaskActionAsync(selected.TaskNumber, new TaskActionRequest
+            {
+                ActionId = action.Id,
+                Text = action.Id.Equals("continue", StringComparison.OrdinalIgnoreCase) ? ContinueText : "",
+                Full = action.Id.Equals("diff", StringComparison.OrdinalIgnoreCase),
+                Confirmed = confirmed
+            });
+            if (response.Result is not null)
+            {
+                _actionResults[selected.TaskNumber] = response.Result;
+                if (SelectedTask?.TaskNumber == selected.TaskNumber) ActionResult = response.Result;
+                if (action.Id.Equals("open", StringComparison.OrdinalIgnoreCase)) OpenConversation();
+            }
+            if (response.Task is not null)
+            {
+                ContinueText = "";
+                await RefreshAsync();
+                SelectedTask = Tasks.FirstOrDefault(item => item.TaskNumber == response.Task.TaskNumber) ?? response.Task;
+            }
+            else
+            {
+                await RefreshAvailableActionsAsync(selected.TaskNumber);
+            }
+        }, action.DisplayName);
+    }
+
     private void RefreshConversationChoices()
     {
         var selected = NewConversationNumber;
@@ -306,7 +435,7 @@ public sealed class TasksViewModel : ObservableObject
 
     private void RefreshCommandStates()
     {
-        _refreshCommand.RaiseCanExecuteChanged(); _createCommand.RaiseCanExecuteChanged(); _continueCommand.RaiseCanExecuteChanged(); _retryCommand.RaiseCanExecuteChanged(); _cancelCommand.RaiseCanExecuteChanged(); _answerCommand.RaiseCanExecuteChanged();
+        _refreshCommand.RaiseCanExecuteChanged(); _createCommand.RaiseCanExecuteChanged(); _continueCommand.RaiseCanExecuteChanged(); _retryCommand.RaiseCanExecuteChanged(); _cancelCommand.RaiseCanExecuteChanged(); _answerCommand.RaiseCanExecuteChanged(); _actionCommand.RaiseCanExecuteChanged(); _confirmActionCommand.RaiseCanExecuteChanged(); _cancelActionConfirmationCommand.RaiseCanExecuteChanged();
         OnPropertyChanged(nameof(TaskAnswerVisibility));
     }
 

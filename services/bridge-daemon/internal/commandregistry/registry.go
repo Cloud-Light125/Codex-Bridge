@@ -40,6 +40,9 @@ const (
 	ActionTaskNew           = "task.new"
 	ActionTaskContinue      = "task.continue"
 	ActionTaskRetry         = "task.retry"
+	ActionTaskActions       = "task.actions"
+	ActionTaskAction        = "task.action"
+	ActionTaskConfirm       = "task.confirm"
 	ActionProjectsList      = "projects.list"
 	ActionProjectSelect     = "project.select"
 )
@@ -174,6 +177,9 @@ func DefaultActions() []ActionDefinition {
 		{ID: ActionTaskNew, DisplayName: "创建任务", BackendCapability: BackendCapabilityBoth},
 		{ID: ActionTaskContinue, DisplayName: "继续任务", BackendCapability: BackendCapabilityBoth},
 		{ID: ActionTaskRetry, DisplayName: "重试任务", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionTaskActions, DisplayName: "查看任务快捷操作", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionTaskAction, DisplayName: "执行任务快捷操作", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionTaskConfirm, DisplayName: "确认任务快捷操作", BackendCapability: BackendCapabilityBoth},
 		{ID: ActionProjectsList, DisplayName: "查看项目列表", BackendCapability: BackendCapabilityBoth},
 		{ID: ActionProjectSelect, DisplayName: "切换项目上下文", BackendCapability: BackendCapabilityBoth},
 	}
@@ -203,6 +209,9 @@ func BuiltInDefaults() []DefaultCommandDefinition {
 		{ID: "builtin.new", DefaultName: "/new", DefaultDisplayName: "创建任务", DefaultDescription: "按项目创建并启动一个新任务", DefaultAction: ActionTaskNew, DefaultEnabled: true, DefaultParameterHelp: "<项目别名> <任务内容>", DefaultTelegramMenuLabel: "创建任务"},
 		{ID: "builtin.continue", DefaultName: "/continue", DefaultDisplayName: "继续任务", DefaultDescription: "在原任务的 Project 和 Conversation 上创建后续任务", DefaultAction: ActionTaskContinue, DefaultEnabled: true, DefaultParameterHelp: "<任务编号> <任务内容>", DefaultTelegramMenuLabel: "继续任务"},
 		{ID: "builtin.retry", DefaultName: "/retry", DefaultDisplayName: "重试任务", DefaultDescription: "重试失败或中断的任务并保留原任务历史", DefaultAction: ActionTaskRetry, DefaultEnabled: true, DefaultParameterHelp: "<任务编号>", DefaultTelegramMenuLabel: "重试任务"},
+		{ID: "builtin.actions", DefaultName: "/actions", DefaultDisplayName: "任务快捷操作", DefaultDescription: "查看指定 Task 当前由 Backend Capability、状态和 Project 状态决定的可用操作", DefaultAction: ActionTaskActions, DefaultEnabled: true, DefaultParameterHelp: "<任务编号>", DefaultTelegramMenuLabel: "任务快捷操作"},
+		{ID: "builtin.action", DefaultName: "/action", DefaultDisplayName: "执行任务快捷操作", DefaultDescription: "执行指定 Task 的标准快捷操作；高风险操作需要确认", DefaultAction: ActionTaskAction, DefaultEnabled: true, DefaultParameterHelp: "<任务编号> <操作> [参数]", DefaultTelegramMenuLabel: "执行任务快捷操作"},
+		{ID: "builtin.confirm", DefaultName: "/confirm", DefaultDisplayName: "确认快捷操作", DefaultDescription: "确认短期有效的高风险任务快捷操作", DefaultAction: ActionTaskConfirm, DefaultEnabled: true, DefaultParameterHelp: "<action-id>", DefaultTelegramMenuLabel: "确认快捷操作"},
 		{ID: "builtin.projects", DefaultName: "/projects", DefaultDisplayName: "项目列表", DefaultDescription: "查看可用 Project 及默认 Backend", DefaultAction: ActionProjectsList, DefaultEnabled: true, DefaultTelegramMenuLabel: "项目列表"},
 		{ID: "builtin.project", DefaultName: "/project", DefaultDisplayName: "项目上下文", DefaultDescription: "查看或切换当前远程聊天的 Project 上下文", DefaultAction: ActionProjectSelect, DefaultEnabled: true, DefaultParameterHelp: "[项目别名]", DefaultTelegramMenuLabel: "项目上下文"},
 	}

@@ -123,6 +123,7 @@ func (r *TaskRegistry) Create(input TaskInput) (Task, error) {
 		ChannelType: strings.TrimSpace(input.ChannelType), ChannelAccountID: strings.TrimSpace(input.ChannelAccountID),
 		ConversationType: strings.TrimSpace(input.ConversationType), ChatID: strings.TrimSpace(input.ChatID), TopicID: strings.TrimSpace(input.TopicID), UserID: strings.TrimSpace(input.UserID),
 		ParentTaskNumber: input.ParentTaskNumber, RetryOfTaskNumber: input.RetryOfTaskNumber,
+		ActionID: strings.TrimSpace(input.ActionID), ActionSourceTaskNumber: input.ActionSourceTaskNumber,
 		DispatchState: DispatchNotDispatched, Metadata: cloneMetadata(input.Metadata),
 	}
 	if !validBackend(task.Backend) && task.Backend != "" {
@@ -300,6 +301,9 @@ func validateTask(task Task) error {
 	}
 	if task.Backend != "" && !validBackend(task.Backend) {
 		return errors.New("任务 Backend 必须是 codex 或 openclaw")
+	}
+	if task.ActionSourceTaskNumber < 0 {
+		return errors.New("ActionSourceTaskNumber 无效")
 	}
 	return nil
 }

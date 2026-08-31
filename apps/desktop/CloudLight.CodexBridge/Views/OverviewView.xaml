@@ -37,7 +37,23 @@
                         <TextBlock Text="最近活动" Style="{StaticResource SectionTitleStyle}"/>
                         <TextBox Text="{Binding RecentActivity, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" Margin="0,16,0,0"/>
                         <TextBlock Text="最近任务" Style="{StaticResource EyebrowTextStyle}" Margin="0,18,0,4"/>
-                        <TextBox Text="{Binding RecentTasks, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" TextWrapping="Wrap" AcceptsReturn="True" IsReadOnly="True" Height="96" VerticalScrollBarVisibility="Auto"/>
+                        <ItemsControl ItemsSource="{Binding RecentTaskItems}" MaxHeight="180" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="0,6">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Task.NumberLabel}" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                                <TextBlock Text="{Binding Task.Title}" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                                                <TextBlock Text="{Binding Task.StatusDisplay}" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <Button Grid.Column="1" Content="{Binding QuickActionLabel}" Command="{Binding DataContext.QuickTaskActionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" Visibility="{Binding QuickActionVisibility}" Margin="8,0,0,0"/>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
                         <TextBlock Text="首页仅保留运行概况。渠道凭据、同步目标和高级设置分别在对应页面管理。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,18,0,0"/>
                     </StackPanel>
                 </Border>

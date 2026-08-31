@@ -14,6 +14,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/gitquery"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 )
 
@@ -27,10 +28,13 @@ type Service struct {
 	tasks    *TaskRegistry
 	broker   *events.Broker
 	logger   *bridgelog.SafeLogger
+	git      *gitquery.Service
+	actions  *TaskActionRegistry
 
 	mu              sync.RWMutex
 	adapters        map[string]TaskBackendAdapter
 	projectContexts map[string]string
+	pendingActions  map[string]PendingTaskAction
 	started         bool
 	cancel          context.CancelFunc
 	done            chan struct{}
@@ -41,7 +45,8 @@ type Service struct {
 func NewService(projects *ProjectRegistry, tasks *TaskRegistry, broker *events.Broker, logger *bridgelog.SafeLogger, adapters ...TaskBackendAdapter) *Service {
 	service := &Service{
 		projects: projects, tasks: tasks, broker: broker, logger: logger,
-		adapters: make(map[string]TaskBackendAdapter), projectContexts: make(map[string]string), done: make(chan struct{}),
+		git: gitquery.New(), actions: NewTaskActionRegistry(),
+		adapters: make(map[string]TaskBackendAdapter), projectContexts: make(map[string]string), pendingActions: make(map[string]PendingTaskAction), done: make(chan struct{}),
 	}
 	for _, adapter := range adapters {
 		service.SetAdapter(adapter)
@@ -51,6 +56,17 @@ func NewService(projects *ProjectRegistry, tasks *TaskRegistry, broker *events.B
 
 func (s *Service) Projects() *ProjectRegistry { return s.projects }
 func (s *Service) Tasks() *TaskRegistry       { return s.tasks }
+
+func (s *Service) ActionRegistry() *TaskActionRegistry { return s.actions }
+
+func (s *Service) SetGitQueryService(service *gitquery.Service) {
+	if service == nil {
+		return
+	}
+	s.mu.Lock()
+	s.git = service
+	s.mu.Unlock()
+}
 
 func (s *Service) SetAdapter(adapter TaskBackendAdapter) {
 	if adapter == nil {
@@ -221,6 +237,10 @@ func (s *Service) CreateTask(ctx context.Context, input TaskInput) (Task, error)
 func (s *Service) routeAndDispatch(ctx context.Context, task Task, project Project) (Task, error) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
+	return s.routeAndDispatchLocked(ctx, task, project)
+}
+
+func (s *Service) routeAndDispatchLocked(ctx context.Context, task Task, project Project) (Task, error) {
 	// Recovery can be triggered by both the initial daemon start and a backend
 	// connected event. Always re-read the durable record while holding the
 	// dispatch mutex so a second recovery pass cannot resend the same task.
@@ -415,7 +435,7 @@ func (s *Service) CancelTask(ctx context.Context, number int) (Task, error) {
 		return s.latestTask(task), errors.New(message)
 	}
 	adapter, ok := s.Adapter(task.Backend)
-	if !ok || !adapter.Capabilities().CanStop {
+	if !ok || !adapter.Capabilities().SupportsCancelAction() {
 		task.LastError = fmt.Sprintf("%s 不支持安全停止", displayBackend(task.Backend))
 		s.touchTask(task)
 		return task, errors.New(task.LastError)
@@ -472,22 +492,28 @@ func (s *Service) Recover(ctx context.Context) {
 	if s.tasks == nil {
 		return
 	}
-	for _, task := range s.tasks.List(TaskFilter{}) {
-		if !task.IsActive() {
+	for _, candidate := range s.tasks.List(TaskFilter{}) {
+		s.dispatchMu.Lock()
+		task, ok := s.tasks.Get(candidate.TaskNumber)
+		if !ok || !task.IsActive() {
+			s.dispatchMu.Unlock()
 			continue
 		}
 		if task.DispatchState == Dispatching {
 			s.interruptTask(task, "Bridge 重启时任务仍处于 dispatching，无法安全确认是否已发送")
+			s.dispatchMu.Unlock()
 			continue
 		}
 		if (task.Status == StatusQueued || task.Status == StatusRouting) && task.DispatchState == DispatchNotDispatched {
 			if s.projects == nil {
 				s.interruptTask(task, "Project 存储尚未初始化，无法恢复路由")
+				s.dispatchMu.Unlock()
 				continue
 			}
 			project, ok := s.projects.Get(task.ProjectID)
 			if !ok {
 				s.interruptTask(task, "任务所属 Project 不存在，无法恢复路由")
+				s.dispatchMu.Unlock()
 				continue
 			}
 			backend := normalizeBackend(firstNonEmpty(task.Backend, project.DefaultBackend))
@@ -496,37 +522,64 @@ func (s *Service) Recover(ctx context.Context) {
 				if s.logger != nil {
 					s.logger.Printf("[task-recovery] %s backend=%s adapter unavailable; queued recovery deferred", task.NumberLabel(), backend)
 				}
+				s.dispatchMu.Unlock()
 				continue
 			}
 			if readiness, known := adapter.(interface{ Ready() bool }); known && !readiness.Ready() {
 				if s.logger != nil {
 					s.logger.Printf("[task-recovery] %s backend=%s not ready; queued recovery deferred", task.NumberLabel(), backend)
 				}
+				s.dispatchMu.Unlock()
 				continue
 			}
-			_, _ = s.routeAndDispatch(ctx, task, project)
+			_, _ = s.routeAndDispatchLocked(ctx, task, project)
+			s.dispatchMu.Unlock()
 			continue
 		}
 		adapter, ok := s.Adapter(task.Backend)
 		if !ok || !adapter.Capabilities().CanQueryRunState {
 			s.interruptTask(task, "Backend 不支持可靠恢复运行状态")
+			s.dispatchMu.Unlock()
 			continue
 		}
 		if readiness, known := adapter.(interface{ Ready() bool }); known && !readiness.Ready() {
 			if s.logger != nil {
 				s.logger.Printf("[task-recovery] %s backend=%s not ready; recovery deferred", task.NumberLabel(), task.Backend)
 			}
+			s.dispatchMu.Unlock()
 			continue
 		}
 		ref, err := adapter.ResolveConversation(ctx, task.ConversationNumber, task.TargetID)
 		if err != nil {
-			s.interruptTask(task, "Conversation 不存在，无法确认原任务是否仍在运行")
+			if conversationNotFoundError(err) {
+				s.interruptTask(task, "Conversation 不存在，无法确认原任务是否仍在运行")
+			} else if s.logger != nil {
+				s.logger.Printf("[task-recovery] %s backend=%s conversation lookup deferred: %s", task.NumberLabel(), task.Backend, bridgelog.Redact(err.Error()))
+			}
+			s.dispatchMu.Unlock()
 			continue
 		}
 		state, err := adapter.QueryRunState(ctx, ref, task.CurrentRunID)
-		if err != nil || !state.Exists {
-			s.interruptTask(task, "Bridge 重启后无法确认 Backend 运行状态")
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Printf("[task-recovery] %s backend=%s run-state lookup deferred: %s", task.NumberLabel(), task.Backend, bridgelog.Redact(err.Error()))
+			}
+			s.dispatchMu.Unlock()
 			continue
+		}
+		if !state.Exists {
+			s.interruptTask(task, "Bridge 重启后无法确认 Backend 运行状态")
+			s.dispatchMu.Unlock()
+			continue
+		}
+		// A backend event may have completed the task while the state query was
+		// in flight. Re-read before applying recovery so a stale snapshot cannot
+		// overwrite the terminal result or its final text.
+		if latest, exists := s.tasks.Get(task.TaskNumber); !exists || latest.IsTerminal() {
+			s.dispatchMu.Unlock()
+			continue
+		} else {
+			task = latest
 		}
 		if state.Active {
 			task.CurrentRunID = firstNonEmpty(state.RunID, task.CurrentRunID)
@@ -535,10 +588,23 @@ func (s *Service) Recover(ctx context.Context) {
 			} else {
 				s.updateTask(task, StatusRunning, "")
 			}
+			s.dispatchMu.Unlock()
 			continue
 		}
 		s.interruptTask(task, "Backend 已无活动运行，且没有可靠 Final 信号可用于完成任务")
+		s.dispatchMu.Unlock()
 	}
+}
+
+func conversationNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(message, "not found") || strings.Contains(message, "不存在") {
+		return strings.Contains(message, "conversation") || strings.Contains(message, "thread") || strings.Contains(message, "session")
+	}
+	return false
 }
 
 func (s *Service) DeleteProject(id string) (Project, error) {
@@ -725,17 +791,60 @@ func (s *Service) NotificationAddress(task Task) (channels.ChannelAddress, bool)
 // NotificationText is intentionally compact so QQ and Telegram can both use
 // it without duplicating task formatting or exposing the full task payload.
 func (s *Service) NotificationText(task Task) string {
+	actions := s.notificationActions(task)
+	actionText := formatNotificationActions(task, actions)
 	switch task.Status {
 	case StatusWaitingInput:
 		question := firstNonEmpty(task.PendingQuestion, "Backend 正在等待用户输入")
-		return fmt.Sprintf("⏸ %s 正在等待输入\n项目：%s\n问题：%s\n\n使用 /task %d 查看详情", task.NumberLabel(), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), truncateText(question, 800), task.TaskNumber)
+		return fmt.Sprintf("⏸ %s 正在等待输入\n项目：%s\n问题：%s\n%s\n\n使用 /task %d 查看详情", task.NumberLabel(), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), truncateText(question, 800), actionText, task.TaskNumber)
 	case StatusCompleted:
-		return fmt.Sprintf("✅ %s 已完成\n项目：%s\nBackend：%s\n会话：%s\n耗时：%s\n%s\n\n使用 /task %d 查看完整详情\n使用 /continue %d <内容> 继续任务", task.NumberLabel(), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), displayBackend(task.Backend), conversationLabel(task), durationText(task), completionSummaryLine(task), task.TaskNumber, task.TaskNumber)
+		return fmt.Sprintf("✅ %s 已完成\n项目：%s\nBackend：%s\n会话：%s\n耗时：%s\n%s\n%s\n\n使用 /task %d 查看完整详情", task.NumberLabel(), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), displayBackend(task.Backend), conversationLabel(task), durationText(task), completionSummaryLine(task), actionText, task.TaskNumber)
 	case StatusFailed:
-		return fmt.Sprintf("❌ %s 执行失败\n项目：%s\n错误：%s\n\n使用 /task %d 查看详情；/retry %d 重试", task.NumberLabel(), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), truncateText(firstNonEmpty(task.LastError, "Backend 返回失败"), 800), task.TaskNumber, task.TaskNumber)
+		return fmt.Sprintf("❌ %s 执行失败\n项目：%s\n错误：%s\n%s\n\n使用 /task %d 查看详情", task.NumberLabel(), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), truncateText(firstNonEmpty(task.LastError, "Backend 返回失败"), 800), actionText, task.TaskNumber)
 	default:
-		return fmt.Sprintf("%s 状态：%s\n项目：%s\n会话：%s", task.NumberLabel(), displayStatus(task.Status), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), conversationLabel(task))
+		return fmt.Sprintf("%s 状态：%s\n项目：%s\n会话：%s%s", task.NumberLabel(), displayStatus(task.Status), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), conversationLabel(task), actionText)
 	}
+}
+
+func (s *Service) notificationActions(task Task) []TaskActionAvailability {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return s.availableActionsForTask(ctx, task)
+}
+
+func formatNotificationActions(task Task, actions []TaskActionAvailability) string {
+	if len(actions) == 0 {
+		return ""
+	}
+	byID := make(map[string]TaskActionAvailability, len(actions))
+	for _, action := range actions {
+		byID[action.Id] = action
+	}
+	preferred := []string{TaskActionContinue, TaskActionTest, TaskActionCommitPush, TaskActionRetry, TaskActionDiff, TaskActionGitStatus, TaskActionOpen, TaskActionCancel}
+	selected := make([]TaskActionAvailability, 0, 3)
+	for _, id := range preferred {
+		if action, ok := byID[id]; ok {
+			selected = append(selected, action)
+			if len(selected) == 3 {
+				break
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return ""
+	}
+	lines := []string{"\n可用操作："}
+	for _, action := range selected {
+		argument := ""
+		if action.Id == TaskActionContinue {
+			argument = " <说明>"
+		}
+		lines = append(lines, fmt.Sprintf("/action %d %s%s", task.TaskNumber, action.Id, argument))
+	}
+	if len(actions) > len(selected) {
+		lines = append(lines, fmt.Sprintf("使用 /actions %d 查看全部", task.TaskNumber))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *Service) SetProjectContext(address channels.ChannelAddress, projectID string) error {
@@ -796,6 +905,12 @@ func (s *Service) ExecuteRemoteCommand(ctx context.Context, message channels.Inb
 		return s.executeRemoteContinue(ctx, message, invocation.Arguments)
 	case commandregistry.ActionTaskRetry:
 		return s.executeRemoteRetry(ctx, message, invocation.Arguments)
+	case commandregistry.ActionTaskActions:
+		return s.executeRemoteActions(ctx, message, invocation.Arguments)
+	case commandregistry.ActionTaskAction:
+		return s.executeRemoteAction(ctx, message, invocation.Arguments)
+	case commandregistry.ActionTaskConfirm:
+		return s.executeRemoteConfirm(ctx, message, invocation.Arguments)
 	case commandregistry.ActionTaskCancel, commandregistry.ActionInteractionCancel:
 		return s.executeRemoteCancel(ctx, invocation.Arguments)
 	case commandregistry.ActionProjectsList:
@@ -1154,6 +1269,7 @@ func routeErrorMessage(project Project, backend string, err error) string {
 func isTaskAction(action string) bool {
 	return action == commandregistry.ActionTasksList || action == commandregistry.ActionTaskInfo || action == commandregistry.ActionTaskNew ||
 		action == commandregistry.ActionTaskContinue || action == commandregistry.ActionTaskRetry || action == commandregistry.ActionTaskCancel || action == commandregistry.ActionInteractionCancel ||
+		action == commandregistry.ActionTaskActions || action == commandregistry.ActionTaskAction || action == commandregistry.ActionTaskConfirm ||
 		action == commandregistry.ActionProjectsList || action == commandregistry.ActionProjectSelect
 }
 
@@ -1201,12 +1317,19 @@ func formatTaskList(tasks []Task) string {
 }
 
 func formatTaskCreated(task Task) string {
-	return fmt.Sprintf("已创建 %s\n项目：%s\nBackend：%s\n会话：%s\n状态：%s", task.NumberLabel(), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), displayBackend(task.Backend), conversationLabel(task), displayStatus(task.Status))
+	result := fmt.Sprintf("已创建 %s\n项目：%s\nBackend：%s\n会话：%s\n状态：%s", task.NumberLabel(), firstNonEmpty(task.ProjectNameSnapshot, "项目未设置"), displayBackend(task.Backend), conversationLabel(task), displayStatus(task.Status))
+	if task.ActionID != "" {
+		result += fmt.Sprintf("\n来源：T%d → %s", firstNonZero(task.ActionSourceTaskNumber, task.ParentTaskNumber, task.RetryOfTaskNumber), task.ActionID)
+	}
+	return result
 }
 
 func formatTaskDetail(task Task) string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "%s\n状态：%s\n项目：%s\nBackend：%s\n会话：%s\nTarget：%s\n创建：%s\n开始：%s\n完成：%s\n运行：%s\n最近活动：%s\n\n任务：\n%s", task.NumberLabel(), displayStatus(task.Status), firstNonEmpty(task.ProjectNameSnapshot, "项目已删除或未设置"), displayBackend(task.Backend), conversationLabel(task), firstNonEmpty(task.TargetID, "未分配"), displayTime(task.CreatedAt), displayTime(task.StartedAt), displayTime(task.CompletedAt), durationText(task), displayTime(task.LastActivityAt), task.Description)
+	if task.ActionID != "" {
+		fmt.Fprintf(&output, "\n\n快捷操作：%s\n来源任务：T%d", task.ActionID, firstNonZero(task.ActionSourceTaskNumber, task.ParentTaskNumber, task.RetryOfTaskNumber))
+	}
 	if task.Result.FinalText != "" {
 		output.WriteString("\n\n最终结果：\n")
 		output.WriteString(task.Result.FinalText)

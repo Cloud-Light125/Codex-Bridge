@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
@@ -14,14 +15,28 @@ import (
 )
 
 type fakeTaskAdapter struct {
-	backend   string
-	refs      []ConversationRef
-	sent      []string
-	cancelled []string
-	active    bool
-	waiting   bool
-	nextRun   int
-	runID     string
+	backend    string
+	refs       []ConversationRef
+	sent       []string
+	cancelled  []string
+	active     bool
+	waiting    bool
+	nextRun    int
+	runID      string
+	resolveErr error
+	queryErr   error
+}
+
+type blockingTaskAdapter struct {
+	*fakeTaskAdapter
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingTaskAdapter) SendTask(ctx context.Context, ref ConversationRef, text, cwd, origin string) (conversation.SendResult, error) {
+	close(f.started)
+	<-f.release
+	return f.fakeTaskAdapter.SendTask(ctx, ref, text, cwd, origin)
 }
 
 func (f *fakeTaskAdapter) Backend() string { return f.backend }
@@ -32,6 +47,9 @@ func (f *fakeTaskAdapter) ListConversations(context.Context, int) ([]Conversatio
 	return append([]ConversationRef(nil), f.refs...), nil
 }
 func (f *fakeTaskAdapter) ResolveConversation(_ context.Context, number int, target string) (ConversationRef, error) {
+	if f.resolveErr != nil {
+		return ConversationRef{}, f.resolveErr
+	}
 	for _, ref := range f.refs {
 		if (number > 0 && ref.Number == number) || (target != "" && ref.TargetID == target) {
 			return ref, nil
@@ -52,6 +70,9 @@ func (f *fakeTaskAdapter) CancelTask(_ context.Context, ref ConversationRef, run
 	return conversation.AbortResult{Backend: f.backend, SessionKey: ref.TargetID, RunID: runID, Status: "aborted"}, nil
 }
 func (f *fakeTaskAdapter) QueryRunState(context.Context, ConversationRef, string) (RunState, error) {
+	if f.queryErr != nil {
+		return RunState{}, f.queryErr
+	}
 	return RunState{Exists: true, Active: f.active, WaitingInput: f.waiting, RunID: firstNonEmpty(f.runID, "run-1"), State: "running"}, nil
 }
 
@@ -170,6 +191,66 @@ func TestTaskServiceDoesNotResendDispatchingTaskDuringRecovery(t *testing.T) {
 	recovered, _ := tasks.Get(task.TaskNumber)
 	if recovered.Status != StatusInterrupted || len(adapter.sent) != 0 {
 		t.Fatalf("recovered=%#v sent=%#v", recovered, adapter.sent)
+	}
+}
+
+func TestTaskServiceRecoveryCannotOverwriteTaskDuringDispatch(t *testing.T) {
+	adapter := &blockingTaskAdapter{
+		fakeTaskAdapter: &fakeTaskAdapter{backend: BackendCodex, refs: []ConversationRef{{Backend: BackendCodex, Number: 1, TargetID: "thread-1"}}},
+		started:         make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	service, tasks, projects := newTestService(t, adapter)
+	project, err := projects.Create(ProjectInput{Name: "Dispatch race", DefaultBackend: BackendCodex, DefaultConversationNumber: intPointer(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createdCh := make(chan struct {
+		task Task
+		err  error
+	}, 1)
+	go func() {
+		created, createErr := service.CreateTask(context.Background(), TaskInput{ProjectID: project.ProjectID, Description: "dispatch race"})
+		createdCh <- struct {
+			task Task
+			err  error
+		}{task: created, err: createErr}
+	}()
+	select {
+	case <-adapter.started:
+	case <-time.After(time.Second):
+		t.Fatal("task did not reach backend dispatch")
+	}
+
+	recoveryDone := make(chan struct{})
+	go func() {
+		service.Recover(context.Background())
+		close(recoveryDone)
+	}()
+	select {
+	case <-recoveryDone:
+		t.Fatal("recovery bypassed the dispatch mutex")
+	default:
+	}
+
+	close(adapter.release)
+	select {
+	case result := <-createdCh:
+		if result.err != nil || result.task.Status != StatusRunning {
+			t.Fatalf("created task=%#v err=%v", result.task, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("task dispatch did not complete")
+	}
+	select {
+	case <-recoveryDone:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not complete")
+	}
+	recovered, _ := tasks.Get(1)
+	if recovered.Status != StatusRunning || recovered.LastError != "" || len(adapter.sent) != 1 {
+		t.Fatalf("recovery overwrote dispatched task=%#v sent=%#v", recovered, adapter.sent)
 	}
 }
 
@@ -310,6 +391,34 @@ func TestTaskServiceRecoveryReconcilesQueuedRunningWaitingAndMissing(t *testing.
 			t.Fatalf("missing conversation recovery task=%#v", recovered)
 		}
 	})
+}
+
+func TestTaskServiceRecoveryDefersTransientBackendErrors(t *testing.T) {
+	adapter := &fakeTaskAdapter{
+		backend:    BackendCodex,
+		refs:       []ConversationRef{{Backend: BackendCodex, Number: 1, TargetID: "thread-1"}},
+		resolveErr: errors.New("temporary app-server read failure"),
+		runID:      "run-existing",
+	}
+	service, tasks, projects := newTestService(t, adapter)
+	project, _ := projects.Create(ProjectInput{Name: "Transient recovery", DefaultBackend: BackendCodex})
+	created, _ := tasks.Create(TaskInput{ProjectID: project.ProjectID, Backend: BackendCodex, ConversationNumber: 1, TargetID: "thread-1", Description: "transient"})
+	created.Status, created.DispatchState, created.CurrentRunID = StatusRunning, DispatchDispatched, "run-existing"
+	_, _ = tasks.Update(created)
+
+	service.Recover(context.Background())
+	deferred, _ := tasks.Get(created.TaskNumber)
+	if deferred.Status != StatusRunning || deferred.LastError != "" {
+		t.Fatalf("transient lookup changed task=%#v", deferred)
+	}
+
+	adapter.resolveErr = nil
+	adapter.active = true
+	service.Recover(context.Background())
+	recovered, _ := tasks.Get(created.TaskNumber)
+	if recovered.Status != StatusRunning || recovered.CurrentRunID != "run-existing" {
+		t.Fatalf("recovery did not reconcile after transient lookup task=%#v", recovered)
+	}
 }
 
 func TestTaskServiceRemoteCommandsShareCoreHandler(t *testing.T) {

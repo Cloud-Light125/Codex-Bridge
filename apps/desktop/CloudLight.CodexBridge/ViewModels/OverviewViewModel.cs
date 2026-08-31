@@ -1,8 +1,18 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Windows.Input;
 using CloudLight.CodexBridge.Infrastructure;
+using CloudLight.CodexBridge.Models;
 
 namespace CloudLight.CodexBridge.ViewModels;
+
+public sealed class RecentTaskCard(BridgeTask task)
+{
+    public BridgeTask Task { get; } = task;
+    public string QuickActionId => Task.Status == "running" ? "cancel" : Task.Status == "waiting-input" ? "answer" : Task.Status == "completed" ? "continue" : "";
+    public string QuickActionLabel => Task.Status switch { "running" => "停止", "waiting-input" => "回答", "completed" => "继续", _ => "" };
+    public Visibility QuickActionVisibility => string.IsNullOrWhiteSpace(QuickActionId) ? Visibility.Collapsed : Visibility.Visible;
+}
 
 public sealed class OverviewViewModel : ObservableObject
 {
@@ -11,6 +21,7 @@ public sealed class OverviewViewModel : ObservableObject
     private readonly ChannelProfilesViewModel _channelProfiles;
     private readonly SettingsViewModel _settings;
     private readonly TasksViewModel _tasks;
+    private readonly RelayCommand _quickTaskActionCommand;
     private string _codexState = "正在启动";
 
     public OverviewViewModel(SessionsViewModel sessions, OpenClawViewModel openClaw, ChannelProfilesViewModel channelProfiles, SettingsViewModel settings, TasksViewModel tasks)
@@ -20,6 +31,8 @@ public sealed class OverviewViewModel : ObservableObject
         _channelProfiles = channelProfiles;
         _settings = settings;
         _tasks = tasks;
+        _quickTaskActionCommand = new RelayCommand(parameter => _ = ExecuteQuickTaskActionAsync(parameter));
+        QuickTaskActionCommand = _quickTaskActionCommand;
         sessions.Threads.CollectionChanged += OnChanged;
         sessions.PropertyChanged += OnChanged;
         openClaw.Sessions.CollectionChanged += OnChanged;
@@ -46,6 +59,12 @@ public sealed class OverviewViewModel : ObservableObject
             .OrderByDescending(task => task.TaskNumber)
             .Take(5)
             .Select(task => $"{task.NumberLabel} · {FirstNonEmpty(task.Title, task.Description, "未命名任务")} · {task.StatusDisplay}"));
+    public IEnumerable<RecentTaskCard> RecentTaskItems => _tasks.Tasks
+        .OrderByDescending(task => task.TaskNumber)
+        .Take(5)
+        .Select(task => new RecentTaskCard(task));
+    public ICommand QuickTaskActionCommand { get; }
+    public event Action? TasksRequested;
     public string TaskSummary => $"运行中 {_tasks.RunningCount} · 等待输入 {_tasks.WaitingCount} · 已完成 {_tasks.CompletedCount} · 失败 {_tasks.FailedCount}";
 
     private void OnChanged(object? sender, EventArgs e) => NotifyAll();
@@ -61,7 +80,20 @@ public sealed class OverviewViewModel : ObservableObject
         OnPropertyChanged(nameof(MirrorState));
         OnPropertyChanged(nameof(RecentActivity));
         OnPropertyChanged(nameof(RecentTasks));
+        OnPropertyChanged(nameof(RecentTaskItems));
         OnPropertyChanged(nameof(TaskSummary));
+    }
+
+    private async Task ExecuteQuickTaskActionAsync(object? parameter)
+    {
+        if (parameter is not RecentTaskCard card) return;
+        _tasks.SelectedTask = _tasks.Tasks.FirstOrDefault(task => task.TaskNumber == card.Task.TaskNumber);
+        if (card.QuickActionId == "cancel")
+        {
+            await _tasks.ExecuteQuickActionAsync(card.Task.TaskNumber, card.QuickActionId);
+            return;
+        }
+        TasksRequested?.Invoke();
     }
 
 	private static string FirstNonEmpty(params string[] values) => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";

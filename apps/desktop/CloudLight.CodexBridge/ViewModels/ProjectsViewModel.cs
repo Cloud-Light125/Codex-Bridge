@@ -25,6 +25,7 @@ public sealed class ProjectsViewModel : ObservableObject
     private readonly AsyncRelayCommand _refreshCommand;
     private readonly AsyncRelayCommand _saveCommand;
     private readonly AsyncRelayCommand _deleteCommand;
+    private readonly AsyncRelayCommand _gitRefreshCommand;
     private ProjectModel? _selectedProject;
     private string _name = "";
     private string _aliasesText = "";
@@ -38,6 +39,8 @@ public sealed class ProjectsViewModel : ObservableObject
     private string _tagsText = "";
     private string _errorText = "";
     private bool _busy;
+    private bool _gitStatusBusy;
+    private ProjectGitStatusModel _gitStatus = new();
 
     public ProjectsViewModel(BridgeApiClient api, LogService logs, SessionsViewModel sessions, OpenClawViewModel openClaw)
     {
@@ -47,7 +50,8 @@ public sealed class ProjectsViewModel : ObservableObject
         _refreshCommand = new AsyncRelayCommand(RefreshAsync, () => !Busy);
         _saveCommand = new AsyncRelayCommand(SaveAsync, () => !Busy && !string.IsNullOrWhiteSpace(Name));
         _deleteCommand = new AsyncRelayCommand(DeleteAsync, () => !Busy && SelectedProject is not null);
-        RefreshCommand = _refreshCommand; SaveCommand = _saveCommand; DeleteCommand = _deleteCommand;
+        _gitRefreshCommand = new AsyncRelayCommand(RefreshGitStatusAsync, () => !GitStatusBusy && SelectedProject is not null);
+        RefreshCommand = _refreshCommand; SaveCommand = _saveCommand; DeleteCommand = _deleteCommand; RefreshGitStatusCommand = _gitRefreshCommand;
         ChooseDirectoryCommand = new RelayCommand(_ => ChooseDirectory());
         NewCommand = new RelayCommand(_ => NewProject());
         sessions.Threads.CollectionChanged += (_, _) => RefreshConversationChoices();
@@ -60,6 +64,7 @@ public sealed class ProjectsViewModel : ObservableObject
     public ICommand RefreshCommand { get; }
     public ICommand SaveCommand { get; }
     public ICommand DeleteCommand { get; }
+    public ICommand RefreshGitStatusCommand { get; }
     public ICommand ChooseDirectoryCommand { get; }
     public ICommand NewCommand { get; }
 
@@ -69,8 +74,18 @@ public sealed class ProjectsViewModel : ObservableObject
         set
         {
             if (!SetProperty(ref _selectedProject, value)) return;
-            if (value is null) ClearForm(); else LoadForm(value);
+            if (value is null)
+            {
+                ClearForm();
+                GitStatus = new();
+            }
+            else
+            {
+                LoadForm(value);
+                _ = RefreshGitStatusAsync(value.ProjectId);
+            }
             _deleteCommand.RaiseCanExecuteChanged();
+            _gitRefreshCommand.RaiseCanExecuteChanged();
         }
     }
 
@@ -101,6 +116,17 @@ public sealed class ProjectsViewModel : ObservableObject
     public Visibility BusyVisibility => Busy ? Visibility.Visible : Visibility.Collapsed;
     public string ErrorText { get => _errorText; private set { if (SetProperty(ref _errorText, value)) OnPropertyChanged(nameof(ErrorVisibility)); } }
     public Visibility ErrorVisibility => string.IsNullOrWhiteSpace(ErrorText) ? Visibility.Collapsed : Visibility.Visible;
+    public ProjectGitStatusModel GitStatus
+    {
+        get => _gitStatus;
+        private set
+        {
+            if (SetProperty(ref _gitStatus, value)) OnPropertyChanged(nameof(GitStatusErrorVisibility));
+        }
+    }
+    public bool GitStatusBusy { get => _gitStatusBusy; private set { if (SetProperty(ref _gitStatusBusy, value)) { OnPropertyChanged(nameof(GitStatusBusyVisibility)); _gitRefreshCommand.RaiseCanExecuteChanged(); } } }
+    public Visibility GitStatusBusyVisibility => GitStatusBusy ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility GitStatusErrorVisibility => string.IsNullOrWhiteSpace(GitStatus.Error) ? Visibility.Collapsed : Visibility.Visible;
 
     public async Task RefreshAsync()
     {
@@ -121,6 +147,28 @@ public sealed class ProjectsViewModel : ObservableObject
     {
         if (!bridgeEvent.EventType.StartsWith("task.", StringComparison.OrdinalIgnoreCase) && !bridgeEvent.EventType.StartsWith("thread.", StringComparison.OrdinalIgnoreCase) && !bridgeEvent.EventType.StartsWith("openclaw.session", StringComparison.OrdinalIgnoreCase)) return;
         RefreshConversationChoices();
+    }
+
+    public async Task RefreshGitStatusAsync()
+    {
+        if (SelectedProject is not null) await RefreshGitStatusAsync(SelectedProject.ProjectId);
+    }
+
+    private async Task RefreshGitStatusAsync(string projectId)
+    {
+        if (string.IsNullOrWhiteSpace(projectId)) return;
+        GitStatusBusy = true;
+        try
+        {
+            var result = await _api.GetProjectGitStatusAsync(projectId);
+            if (SelectedProject?.ProjectId == projectId) GitStatus = result;
+        }
+        catch (Exception exception)
+        {
+            if (SelectedProject?.ProjectId == projectId) GitStatus = new ProjectGitStatusModel { ProjectId = projectId, Error = exception.Message };
+            _logs.Add("projects", $"读取 Git 状态失败：{exception.Message}");
+        }
+        finally { GitStatusBusy = false; }
     }
 
     private async Task SaveAsync()

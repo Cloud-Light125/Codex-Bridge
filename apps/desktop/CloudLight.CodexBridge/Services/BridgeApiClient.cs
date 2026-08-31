@@ -94,6 +94,9 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
     public Task DeleteProjectAsync(string projectId, CancellationToken cancellationToken = default) =>
         SendNoContentAsync(HttpMethod.Delete, $"/api/v1/projects/{Uri.EscapeDataString(projectId)}", cancellationToken);
 
+    public Task<ProjectGitStatusModel> GetProjectGitStatusAsync(string projectId, CancellationToken cancellationToken = default) =>
+        GetAsync<ProjectGitStatusModel>($"/api/v1/projects/{Uri.EscapeDataString(projectId)}/git-status", cancellationToken);
+
     public async Task<TaskListResponse> GetTasksAsync(string status = "", string search = "", int limit = 100, CancellationToken cancellationToken = default)
     {
         var query = $"?limit={limit}";
@@ -118,6 +121,16 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
 
     public Task<BridgeTask> CancelTaskAsync(int taskNumber, CancellationToken cancellationToken = default) =>
         SendJsonAsync<BridgeTask>(HttpMethod.Post, $"/api/v1/tasks/{taskNumber}/cancel", null, cancellationToken);
+
+    public async Task<TaskActionsResponse> GetTaskActionsAsync(int taskNumber, CancellationToken cancellationToken = default)
+    {
+        var result = await GetAsync<TaskActionsResponse>($"/api/v1/tasks/{taskNumber}/actions", cancellationToken);
+        result.Actions ??= [];
+        return result;
+    }
+
+    public Task<TaskActionResponse> ExecuteTaskActionAsync(int taskNumber, TaskActionRequest input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<TaskActionResponse>(HttpMethod.Post, $"/api/v1/tasks/{taskNumber}/actions", input, cancellationToken);
 
     public Task<BridgeStatus> UpdateSecurityAsync(string sandboxMode, CancellationToken cancellationToken = default) =>
         SendJsonAsync<BridgeStatus>(HttpMethod.Put, "/api/v1/settings/security", new SecuritySettingsRequest { SandboxMode = sandboxMode }, cancellationToken);

@@ -62,12 +62,15 @@ func New(token string, runtimeManager *bridgeruntime.Manager, controlService *co
 	mux.HandleFunc("GET /api/v1/interactions/{interactionId}", server.authorized(server.interaction))
 	mux.HandleFunc("POST /api/v1/interactions/{interactionId}/respond", server.authorized(server.respondInteraction))
 	mux.HandleFunc("GET /api/v1/projects", server.authorized(server.projectList))
+	mux.HandleFunc("GET /api/v1/projects/{projectId}/git-status", server.authorized(server.projectGitStatus))
 	mux.HandleFunc("POST /api/v1/projects", server.authorized(server.projectCreate))
 	mux.HandleFunc("PUT /api/v1/projects/{projectId}", server.authorized(server.projectUpdate))
 	mux.HandleFunc("DELETE /api/v1/projects/{projectId}", server.authorized(server.projectDelete))
 	mux.HandleFunc("GET /api/v1/tasks", server.authorized(server.taskList))
 	mux.HandleFunc("POST /api/v1/tasks", server.authorized(server.taskCreate))
 	mux.HandleFunc("GET /api/v1/tasks/{taskNumber}", server.authorized(server.taskGet))
+	mux.HandleFunc("GET /api/v1/tasks/{taskNumber}/actions", server.authorized(server.taskActions))
+	mux.HandleFunc("POST /api/v1/tasks/{taskNumber}/actions", server.authorized(server.taskAction))
 	mux.HandleFunc("POST /api/v1/tasks/{taskNumber}/continue", server.authorized(server.taskContinue))
 	mux.HandleFunc("POST /api/v1/tasks/{taskNumber}/retry", server.authorized(server.taskRetry))
 	mux.HandleFunc("POST /api/v1/tasks/{taskNumber}/cancel", server.authorized(server.taskCancel))
@@ -475,6 +478,24 @@ func (s *Server) projectCreate(response http.ResponseWriter, request *http.Reque
 	writeJSON(response, http.StatusCreated, project)
 }
 
+func (s *Server) projectGitStatus(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	projectID, ok := pathID(response, request.PathValue("projectId"), "Project")
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
+	defer cancel()
+	status, err := s.tasks.GetProjectGitStatus(ctx, projectID)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, status)
+}
+
 func (s *Server) projectUpdate(response http.ResponseWriter, request *http.Request) {
 	if !s.requireTasks(response) {
 		return
@@ -574,6 +595,58 @@ func (s *Server) taskGet(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(response, http.StatusOK, task)
+}
+
+func (s *Server) taskActions(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	number, ok := taskNumberPath(response, request.PathValue("taskNumber"))
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
+	defer cancel()
+	task, actions, err := s.tasks.AvailableActions(ctx, number)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"taskNumber": task.TaskNumber, "actions": actions})
+}
+
+func (s *Server) taskAction(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	number, ok := taskNumberPath(response, request.PathValue("taskNumber"))
+	if !ok {
+		return
+	}
+	var input taskcenter.TaskActionRequest
+	if !decodeBody(response, request, 64*1024, &input) {
+		return
+	}
+	if strings.TrimSpace(input.ActionID) == "" {
+		writeError(response, http.StatusBadRequest, "action_required", "ActionId 不能为空")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 60*time.Second)
+	defer cancel()
+	result, err := s.tasks.ExecuteAction(ctx, number, input)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	if result.ConfirmationRequired {
+		writeJSON(response, http.StatusConflict, result)
+		return
+	}
+	if result.Task != nil {
+		writeJSON(response, http.StatusAccepted, result)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (s *Server) taskContinue(response http.ResponseWriter, request *http.Request) {
