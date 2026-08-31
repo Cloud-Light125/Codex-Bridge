@@ -18,13 +18,13 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/numberprefix"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
 type Control interface {
@@ -110,7 +110,7 @@ type Service struct {
 	bindings        *bindings.Repository
 	broker          *events.Broker
 	logger          *bridgelog.SafeLogger
-	registry        *threadregistry.Registry
+	registry        any
 	commands        *commandregistry.Registry
 	queries         *bridgequery.Service
 	openclaw        conversation.IConversationBackend
@@ -133,9 +133,9 @@ type Service struct {
 	activeHandlers      int
 }
 
-func NewService(controlService Control, runtime Runtime, repository *bindings.Repository, broker *events.Broker, logger *bridgelog.SafeLogger, registries ...*threadregistry.Registry) *Service {
+func NewService(controlService Control, runtime Runtime, repository *bindings.Repository, broker *events.Broker, logger *bridgelog.SafeLogger, registries ...any) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
-	var registry *threadregistry.Registry
+	var registry any
 	if len(registries) > 0 {
 		registry = registries[0]
 	}
@@ -408,29 +408,49 @@ func (s *Service) HandleMessage(ctx context.Context, message channels.InboundMes
 }
 
 func (s *Service) handleNumbered(ctx context.Context, message channels.InboundMessage, text string) bool {
+	store := conversationregistry.ForAny(s.registry)
+	if store != nil {
+		record, content, recognized, err := store.ParsePrefix(text)
+		if !recognized {
+			return false
+		}
+		if err != nil {
+			s.send(ctx, message.Address, err.Error())
+			return true
+		}
+		if strings.HasPrefix(content, "/") {
+			s.handleTargetCommand(ctx, message, record, content)
+			return true
+		}
+		if record.Backend == conversation.BackendOpenClaw {
+			session, err := s.openClawSessionByNumber(ctx, record.Number)
+			if err != nil {
+				s.send(ctx, message.Address, "指定的 OpenClaw Session 不存在或当前不可用。")
+				return true
+			}
+			if s.answerFreeTextForThread(ctx, message, content, session.Key) {
+				return true
+			}
+			s.startOpenClawTurnForKey(ctx, message, content, session.Key)
+			return true
+		}
+		if record.Backend != conversation.BackendCodex {
+			s.send(ctx, message.Address, "该编号的会话后端不可用。")
+			return true
+		}
+		if s.answerFreeTextForThread(ctx, message, content, record.TargetID) {
+			return true
+		}
+		s.startCodexTurnForThread(ctx, message, content, record.TargetID)
+		return true
+	}
+	// Compatibility for test doubles and embedders that have not supplied a
+	// registry. The daemon always supplies the global registry, so this path is
+	// never used for normal routing.
 	if s.backendForMessage(message) == conversation.BackendOpenClaw {
 		return s.handleOpenClawNumbered(ctx, message, text)
 	}
-	if s.registry == nil {
-		return false
-	}
-	record, content, recognized, err := s.registry.ParsePrefix(text)
-	if !recognized {
-		return false
-	}
-	if err != nil {
-		s.send(ctx, message.Address, err.Error())
-		return true
-	}
-	if strings.HasPrefix(content, "/") {
-		s.handleTargetCommand(ctx, message, record, content)
-		return true
-	}
-	if s.answerFreeTextForThread(ctx, message, content, record.ThreadID) {
-		return true
-	}
-	s.startTurn(ctx, message, content, record.ThreadID)
-	return true
+	return false
 }
 
 func (s *Service) handleOpenClawNumbered(ctx context.Context, message channels.InboundMessage, text string) bool {
@@ -469,6 +489,22 @@ func (s *Service) openClawSessionByNumber(ctx context.Context, number int) (conv
 	backend := s.openClawBackend()
 	if backend == nil {
 		return conversation.Session{}, errors.New("OpenClaw backend unavailable")
+	}
+	if store := conversationregistry.ForAny(s.registry); store != nil {
+		record, ok := store.ByNumber(number)
+		if !ok || record.Backend != conversationregistry.BackendOpenClaw {
+			return conversation.Session{}, errors.New("OpenClaw session number not found")
+		}
+		detail, err := backend.ReadSession(ctx, record.TargetID)
+		if err != nil || detail.Key == "" {
+			if err == nil {
+				err = errors.New("OpenClaw session not found")
+			}
+			return conversation.Session{}, err
+		}
+		detail.Number = record.Number
+		detail.Backend = conversation.BackendOpenClaw
+		return detail.Session, nil
 	}
 	if numbered, ok := backend.(conversation.NumberedSessionBackend); ok {
 		return numbered.SessionByNumber(ctx, number)
@@ -513,7 +549,16 @@ func (s *Service) handleOpenClawTargetCommand(ctx context.Context, message chann
 	}
 }
 
-func (s *Service) handleTargetCommand(ctx context.Context, message channels.InboundMessage, record threadregistry.Record, text string) {
+func (s *Service) handleTargetCommand(ctx context.Context, message channels.InboundMessage, record conversationregistry.Record, text string) {
+	if record.Backend == conversation.BackendOpenClaw {
+		session, err := s.openClawSessionByNumber(ctx, record.Number)
+		if err != nil {
+			s.send(ctx, message.Address, "指定的 OpenClaw Session 不存在或当前不可用。")
+			return
+		}
+		s.handleOpenClawTargetCommand(ctx, message, session, text)
+		return
+	}
 	invocation, found := s.commandRegistry().Resolve(text)
 	if !found {
 		s.send(ctx, message.Address, fmt.Sprintf("#%d 不支持该指令。", record.Number))
@@ -523,19 +568,19 @@ func (s *Service) handleTargetCommand(ctx context.Context, message channels.Inbo
 		s.send(ctx, message.Address, "指令 "+invocation.Definition.Name+" 当前已停用。")
 		return
 	}
-	if !commandregistry.SupportsBackend(invocation.Definition.BackendCapability, conversation.BackendCodex) {
+	if !commandregistry.SupportsBackend(invocation.Definition.BackendCapability, record.Backend) {
 		s.send(ctx, message.Address, "该指令不适用于 Codex。")
 		return
 	}
 	switch invocation.Definition.Action {
 	case commandregistry.ActionBridgeStatus, commandregistry.ActionThreadInfo:
-		s.runQueryAction(ctx, message, commandregistry.ActionThreadInfo, []string{strconv.Itoa(record.Number)})
+		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, commandregistry.ActionThreadInfo, []string{strconv.Itoa(record.Number)})
 	case commandregistry.ActionThreadHistory:
-		s.runQueryAction(ctx, message, commandregistry.ActionThreadHistory, append([]string{strconv.Itoa(record.Number)}, invocation.Arguments...))
+		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, commandregistry.ActionThreadHistory, append([]string{strconv.Itoa(record.Number)}, invocation.Arguments...))
 	case commandregistry.ActionThreadStop:
-		s.stopThread(ctx, message, record.ThreadID)
+		s.stopThread(ctx, message, record.TargetID)
 	case commandregistry.ActionInteractionCancel:
-		s.cancelThreadInteraction(ctx, message, record.ThreadID)
+		s.cancelThreadInteraction(ctx, message, record.TargetID)
 	default:
 		s.send(ctx, message.Address, fmt.Sprintf("指令 %s 不支持 #编号 会话上下文。", invocation.Definition.Name))
 	}
@@ -612,14 +657,21 @@ func (s *Service) listThreads(ctx context.Context, message channels.InboundMessa
 		return
 	}
 	var text strings.Builder
-	text.WriteString("Recent Threads:\n")
+	text.WriteString("Recent [Codex] Threads:\n")
+	store := conversationregistry.ForAny(s.registry)
 	rows := make([]channels.ActionRow, 0, len(threads.Threads))
 	for _, thread := range threads.Threads {
 		label := projectName(thread.CWD) + " · " + shortID(thread.ThreadID)
 		if title := truncateRunes(strings.TrimSpace(thread.Title), 36); title != "" {
 			label += " · " + title
 		}
-		text.WriteString("• " + label + "\n  Updated: " + displayTime(thread.UpdatedAt) + "\n")
+		number := thread.Number
+		if store != nil {
+			if record, ok := store.ByTarget(conversationregistry.BackendCodex, thread.ThreadID); ok {
+				number = record.Number
+			}
+		}
+		text.WriteString(fmt.Sprintf("• [Codex] #%d %s\n  Updated: %s\n", number, label, displayTime(thread.UpdatedAt)))
 		token := s.newCallback(callbackAction{Kind: "bind", Address: message.Address, UserID: message.UserID, ThreadID: thread.ThreadID, Expires: time.Now().Add(5 * time.Minute)})
 		rows = append(rows, channels.ActionRow{Buttons: []channels.Button{{Label: "Bind " + shortID(thread.ThreadID), Value: token}}})
 	}
@@ -643,8 +695,15 @@ func (s *Service) listOpenClawSessions(ctx context.Context, message channels.Inb
 	}
 	var output strings.Builder
 	output.WriteString("[OpenClaw] Current backend Sessions:\n")
+	store := conversationregistry.ForAny(s.registry)
 	for _, session := range sessions {
-		fmt.Fprintf(&output, "\n• %s · %s\n  Session: %s", displayTitle(session.Title), firstNonEmpty(session.Status, "idle"), session.Key)
+		number := session.Number
+		if store != nil {
+			if record, ok := store.ByTarget(conversationregistry.BackendOpenClaw, session.Key); ok {
+				number = record.Number
+			}
+		}
+		fmt.Fprintf(&output, "\n• [OpenClaw] #%d %s · %s\n  Session: %s", number, displayTitle(session.Title), firstNonEmpty(session.Status, "idle"), session.Key)
 	}
 	output.WriteString("\n\nRebind with: /bind openclaw <Session Key>")
 	s.send(ctx, message.Address, output.String())
@@ -678,11 +737,30 @@ func (s *Service) listNumberedThreads(ctx context.Context, message channels.Inbo
 }
 
 func (s *Service) commandThread(ctx context.Context, message channels.InboundMessage, selector, action string) {
+	if record, found, errText := s.globalNumberSelector(selector); errText != "" {
+		s.send(ctx, message.Address, errText)
+		return
+	} else if found {
+		if record.Backend == conversation.BackendOpenClaw {
+			s.commandOpenClawTarget(ctx, message, strconv.Itoa(record.Number), action)
+			return
+		}
+		switch action {
+		case "thread", "status":
+			s.statusThread(ctx, message, record.TargetID)
+		case "stop":
+			s.stopThread(ctx, message, record.TargetID)
+		case "cancel":
+			s.cancelThreadInteraction(ctx, message, record.TargetID)
+		}
+		return
+	}
 	if s.backendForMessage(message) == conversation.BackendOpenClaw {
 		s.commandOpenClawTarget(ctx, message, selector, action)
 		return
 	}
-	if s.registry == nil {
+	store := conversationregistry.ForAny(s.registry)
+	if store == nil {
 		s.send(ctx, message.Address, "聊天编号尚未初始化。")
 		return
 	}
@@ -692,18 +770,18 @@ func (s *Service) commandThread(ctx context.Context, message channels.InboundMes
 		s.send(ctx, message.Address, "请指定聊天编号，例如 /thread 12。")
 		return
 	}
-	record, ok := s.registry.ByNumber(number)
+	record, ok := store.ByNumber(number)
 	if !ok {
 		s.send(ctx, message.Address, fmt.Sprintf("聊天编号 #%d 不存在。", number))
 		return
 	}
 	switch action {
 	case "thread", "status":
-		s.statusThread(ctx, message, record.ThreadID)
+		s.statusThread(ctx, message, record.TargetID)
 	case "stop":
-		s.stopThread(ctx, message, record.ThreadID)
+		s.stopThread(ctx, message, record.TargetID)
 	case "cancel":
-		s.cancelThreadInteraction(ctx, message, record.ThreadID)
+		s.cancelThreadInteraction(ctx, message, record.TargetID)
 	}
 }
 
@@ -785,7 +863,19 @@ func (s *Service) cancelThreadInteraction(ctx context.Context, message channels.
 }
 
 func (s *Service) bind(ctx context.Context, message channels.InboundMessage, selector string) {
-	backendKind, target := parseBindingTarget(selector, s.backendForMessage(message))
+	var backendKind, target string
+	resolvedByRegistry := false
+	if record, found, errText := s.globalNumberSelector(selector); errText != "" {
+		s.send(ctx, message.Address, errText)
+		return
+	} else if found {
+		// A global number carries its own backend and target. Current Profile
+		// routing is only a fallback for unprefixed non-numeric selectors.
+		backendKind, target = record.Backend, record.TargetID
+		resolvedByRegistry = true
+	} else {
+		backendKind, target = parseBindingTarget(selector, s.backendForMessage(message))
+	}
 	if backendKind == conversation.BackendOpenClaw {
 		sessionKey := target
 		backend := s.openClawBackend()
@@ -795,7 +885,12 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, sel
 		}
 		var detail conversation.Detail
 		var err error
-		if prefix, recognized, parseErr := numberprefix.Parse(sessionKey); parseErr != nil {
+		if resolvedByRegistry {
+			// TargetID is opaque. Once the global registry has resolved the
+			// number, do not parse a numeric-looking SessionKey as another
+			// number.
+			detail, err = backend.ReadSession(ctx, sessionKey)
+		} else if prefix, recognized, parseErr := numberprefix.Parse(sessionKey); parseErr != nil {
 			s.send(ctx, message.Address, parseErr.Error())
 			return
 		} else if recognized && prefix.Number > 0 && prefix.Content == "" {
@@ -841,11 +936,13 @@ func (s *Service) bind(ctx context.Context, message channels.InboundMessage, sel
 		return
 	}
 	threadID := target
-	if s.registry != nil {
-		selector := strings.TrimSpace(strings.Trim(threadID, "#[]"))
-		if number, err := strconv.Atoi(selector); err == nil {
-			if record, ok := s.registry.ByNumber(number); ok {
-				threadID = record.ThreadID
+	if !resolvedByRegistry {
+		if store := conversationregistry.ForAny(s.registry); store != nil {
+			selector := strings.TrimSpace(strings.Trim(threadID, "#[]"))
+			if number, err := strconv.Atoi(selector); err == nil {
+				if record, ok := store.ByNumber(number); ok && record.Backend == conversationregistry.BackendCodex {
+					threadID = record.TargetID
+				}
 			}
 		}
 	}
@@ -919,7 +1016,13 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 			s.send(ctx, message.Address, "绑定的 OpenClaw Session 已不可用，请重新绑定。")
 			return
 		}
-		s.send(ctx, message.Address, fmt.Sprintf("Current binding\nBackend: OpenClaw\nProfile: %s\nSession: #%d %s\nSessionKey: %s\nUpdated: %s\nState: %s", firstNonEmpty(binding.ChannelProfileID, "default"), detail.Number, displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
+		number := detail.Number
+		if store := conversationregistry.ForAny(s.registry); store != nil {
+			if record, ok := store.ByTarget(conversationregistry.BackendOpenClaw, detail.Key); ok {
+				number = record.Number
+			}
+		}
+		s.send(ctx, message.Address, fmt.Sprintf("当前绑定：OpenClaw #%d\nCurrent binding\nBackend: OpenClaw\nProfile: %s\nSession: #%d %s\nSessionKey: %s\nUpdated: %s\nState: %s", number, firstNonEmpty(binding.ChannelProfileID, "default"), number, displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
 		return
 	}
 	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
@@ -927,8 +1030,14 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 		s.send(ctx, message.Address, "Bound Thread "+shortID(binding.ThreadID)+" is no longer available. Use /unbind or bind another Thread.")
 		return
 	}
-	s.send(ctx, message.Address, fmt.Sprintf("Current binding\nBackend: Codex\nProfile: %s\nTitle: %s\nThread: %s\nProject: %s\nUpdated: %s\nState: %s\nLatest Turn: %s",
-		firstNonEmpty(binding.ChannelProfileID, "default"), displayTitle(thread.Title), shortID(thread.ThreadID), projectName(thread.CWD), displayTime(thread.UpdatedAt), thread.Runtime.State, latestTurnStatus(thread)))
+	number := thread.Number
+	if store := conversationregistry.ForAny(s.registry); store != nil {
+		if record, ok := store.ByTarget(conversationregistry.BackendCodex, thread.ThreadID); ok {
+			number = record.Number
+		}
+	}
+	s.send(ctx, message.Address, fmt.Sprintf("当前绑定：Codex #%d\nCurrent binding\nBackend: Codex\nProfile: %s\nTitle: %s\nThread: %s\nProject: %s\nUpdated: %s\nState: %s\nLatest Turn: %s",
+		number, firstNonEmpty(binding.ChannelProfileID, "default"), displayTitle(thread.Title), shortID(thread.ThreadID), projectName(thread.CWD), displayTime(thread.UpdatedAt), thread.Runtime.State, latestTurnStatus(thread)))
 }
 
 func (s *Service) status(ctx context.Context, message channels.InboundMessage) {
@@ -1089,6 +1198,13 @@ func (s *Service) startTurn(ctx context.Context, message channels.InboundMessage
 		s.reject(ctx, message, "请指定聊天编号，例如：\n\n#12 修复这个Bug\n\n发送 /threads 查看编号。", "unbound")
 		return
 	}
+	s.startCodexTurnForThread(ctx, message, text, threadID)
+}
+
+// startCodexTurnForThread is the backend-explicit path used by global-number
+// routing. It must not consult the current profile, because a global number
+// may intentionally target Codex while the current profile is OpenClaw.
+func (s *Service) startCodexTurnForThread(ctx context.Context, message channels.InboundMessage, text, threadID string) {
 	thread, err := s.control.ReadThread(ctx, threadID, false)
 	if err != nil || thread.ThreadID == "" {
 		s.reject(ctx, message, "The bound Codex Thread no longer exists. Bind another Thread.", "missing-thread")
@@ -1806,9 +1922,37 @@ func parseOpenClawSelector(value string) (string, bool) {
 	return "", false
 }
 
+func (s *Service) globalNumberSelector(value string) (conversationregistry.Record, bool, string) {
+	store := conversationregistry.ForAny(s.registry)
+	if store == nil {
+		return conversationregistry.Record{}, false, ""
+	}
+	prefix, recognized, err := numberprefix.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return conversationregistry.Record{}, true, err.Error()
+	}
+	if !recognized {
+		return conversationregistry.Record{}, false, ""
+	}
+	if prefix.Number < 1 {
+		if prefix.Explicit {
+			return conversationregistry.Record{}, true, "无效的聊天编号"
+		}
+		return conversationregistry.Record{}, false, ""
+	}
+	if prefix.Content != "" {
+		return conversationregistry.Record{}, false, ""
+	}
+	record, ok := store.ByNumber(prefix.Number)
+	if !ok {
+		return conversationregistry.Record{}, true, fmt.Sprintf("聊天编号 #%d 不存在。", prefix.Number)
+	}
+	return record, true, ""
+}
+
 // /bind accepts an explicit backend, the legacy oc:/openclaw: selector, or a
-// number/ID interpreted in the current profile backend. This keeps the two
-// number spaces separate while preserving unprefixed Codex IDs.
+// global number. Only an unprefixed non-numeric ID falls back to the current
+// profile backend.
 func parseBindingTarget(value string, current ...string) (backend, target string) {
 	value = strings.TrimSpace(value)
 	parts := strings.Fields(value)

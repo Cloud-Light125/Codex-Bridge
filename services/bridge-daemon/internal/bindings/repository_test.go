@@ -179,6 +179,26 @@ func TestRepositoryPersistsOpenClawSessionBinding(t *testing.T) {
 	}
 }
 
+func TestRepositoryMigratesV3OpenClawBindingWithoutLosingBackendOrTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	writeDiskModel(t, path, diskModel{Version: 3, Bindings: []Binding{{
+		ID: "binding-openclaw-old", Backend: "openclaw", TargetID: "agent:main:main", SessionKey: "agent:main:main",
+		ChannelType: "telegram", AccountID: "bot-1", ConversationType: "default", ChatID: "chat-1", Enabled: true,
+		CreatedAt: "2026-01-02T03:04:05Z", UpdatedAt: "2026-01-02T03:04:05Z",
+	}}})
+	repository, err := NewRepository(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, ok := repository.FindAddress("telegram", "bot-1", "default", "chat-1", "")
+	if !ok || found.Backend != "openclaw" || found.TargetID != "agent:main:main" || found.SessionKey != "agent:main:main" || found.ThreadID != "agent:main:main" {
+		t.Fatalf("OpenClaw migration lost explicit backend/target: %#v ok=%t", found, ok)
+	}
+	if _, err := NewRepository(path); err != nil {
+		t.Fatalf("migrated OpenClaw binding could not be reloaded: %v", err)
+	}
+}
+
 func TestRepositoryKeepsBackendAndTargetExplicitAcrossProfiles(t *testing.T) {
 	repository, err := NewRepository(filepath.Join(t.TempDir(), "bindings.json"))
 	if err != nil {

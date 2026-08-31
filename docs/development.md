@@ -11,15 +11,15 @@ go test ./internal/commandregistry ./internal/query ./internal/qqbot ./internal/
 发布构建：
 
 ```powershell
-.\scripts\build.ps1 -Version 1.1.4
+.\scripts\build.ps1 -Version 1.1.5
 ```
 
-输出 `artifacts\win-x64-1.1.4`；若目录已存在脚本会拒绝覆盖。构建不会修改 Codex Sandbox、Approval、Model 或 Reasoning，也不会执行 Git 操作。
+输出 `artifacts\win-x64-1.1.5`；若目录已存在脚本会拒绝覆盖。构建不会修改 Codex Sandbox、Approval、Model 或 Reasoning，也不会执行 Git 操作。
 
 安装 Inno Setup 6/7 后，可构建包含 .NET 桌面运行时的每用户 Windows 安装包：
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 1.1.4
+.\scripts\build-installer.ps1 -Version 1.1.5
 ```
 
 安装包及 SHA-256 文件输出到同一版本目录。安装器不会删除用户的 Codex 或 Bridge 数据，卸载时仅清理程序文件、快捷方式与本应用的 HKCU 开机启动项。
@@ -35,7 +35,7 @@ go test ./internal/commandregistry ./internal/query ./internal/qqbot ./internal/
 3. 获取 AppID。
 4. 获取 AppSecret。
 5. 配置 C2C 和群聊 @机器人消息事件权限。
-6. 启动 `artifacts\win-x64-1.1.4\CloudLight.CodexBridge.exe`。
+6. 启动 `artifacts\win-x64-1.1.5\CloudLight.CodexBridge.exe`。
 7. 打开“远程渠道 → QQ 官方机器人”。
 8. 填写 AppID。
 9. 安全保存 AppSecret，确认 PasswordBox 清空。

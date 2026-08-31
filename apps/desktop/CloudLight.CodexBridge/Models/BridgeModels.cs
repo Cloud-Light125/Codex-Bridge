@@ -123,7 +123,8 @@ public class OpenClawSessionSummary
     public bool? Archived { get; set; }
     public bool HasActiveRun { get; set; }
     public List<string> ActiveRunIds { get; set; } = [];
-
+	public string NumberPrefix => Number > 0 ? $"[OpenClaw] #{Number}" : "[OpenClaw] #?";
+	public string NumberedTitle => $"{NumberPrefix}  {Title}";
 }
 
 public sealed class OpenClawSessionDetail : OpenClawSessionSummary

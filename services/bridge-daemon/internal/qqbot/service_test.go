@@ -14,6 +14,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
@@ -548,5 +549,29 @@ func TestQQOpenClawNumberedCommandsAndCodexIsolation(t *testing.T) {
 	service.HandleMessage(context.Background(), channels.InboundMessage{Address: codexAddress, UserID: "user", Text: "#1 codex message"})
 	if runtime.startCount != 1 || runtime.lastThreadID != "codex-thread-1" || len(backend.sends) != 2 {
 		t.Fatalf("Codex #1 crossed into OpenClaw or failed: starts=%d thread=%q sends=%#v", runtime.startCount, runtime.lastThreadID, backend.sends)
+	}
+}
+
+func TestQQGlobalNumberRoutesAndBindsWithoutCurrentBackend(t *testing.T) {
+	thread := control.ThreadSummary{ThreadID: "codex-thread-1", Title: "Codex one"}
+	service, _, repository := newServiceFixture(t, &fakeControl{threads: []control.ThreadSummary{thread}}, &fakeRuntime{})
+	backend := &fakeOpenClawBackend{}
+	service.SetOpenClawBackend(backend)
+	service.registry = conversationregistry.NewInMemory()
+	if _, err := service.registry.(*conversationregistry.Registry).EnsureBatch([]conversationregistry.Metadata{
+		{Backend: conversationregistry.BackendCodex, TargetID: "codex-thread-1", CreatedAt: "2026-08-31T00:00:01Z"},
+		{Backend: conversationregistry.BackendOpenClaw, TargetID: "agent:main:main", CreatedAt: "2026-08-31T00:00:02Z"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	address := channels.ChannelAddress{ChannelType: "qqbot", AccountID: "100", ConversationType: "c2c", ChatID: "cross-backend"}
+	service.HandleMessage(context.Background(), channels.InboundMessage{Address: address, UserID: "user", Text: "#2 hello"})
+	if len(backend.sends) != 1 || backend.sends[0] != "agent:main:main:hello" {
+		t.Fatalf("global #2 did not route to OpenClaw from the default Codex profile: %#v", backend.sends)
+	}
+	service.bind(context.Background(), channels.InboundMessage{Address: address, UserID: "user"}, "2")
+	binding, ok := repository.FindAddress("qqbot", "100", "c2c", "cross-backend", "")
+	if !ok || binding.Backend != conversation.BackendOpenClaw || binding.TargetID != "agent:main:main" {
+		t.Fatalf("global /bind 2 inferred the current backend or lost target: %#v ok=%t", binding, ok)
 	}
 }

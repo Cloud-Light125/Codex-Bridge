@@ -24,6 +24,7 @@ type Paths struct {
 	LogDir                     string
 	LogFile                    string
 	BindingsFile               string
+	ConversationNumbersFile    string
 	ThreadNumbersFile          string
 	OpenClawSessionNumbersFile string
 	MirrorFile                 string
@@ -70,6 +71,7 @@ func UserPaths() (Paths, error) {
 		LogDir:                     logDir,
 		LogFile:                    filepath.Join(logDir, "bridge-daemon.log"),
 		BindingsFile:               filepath.Join(dataDir, "bindings.json"),
+		ConversationNumbersFile:    filepath.Join(stateDir, "conversation-numbers.json"),
 		ThreadNumbersFile:          filepath.Join(stateDir, "thread-numbers.json"),
 		OpenClawSessionNumbersFile: filepath.Join(stateDir, "openclaw-session-numbers.json"),
 		MirrorFile:                 filepath.Join(stateDir, "mirror-state.json"),

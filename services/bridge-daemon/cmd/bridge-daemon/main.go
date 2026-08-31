@@ -19,16 +19,15 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/config"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/mirror"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/openclaw"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/sessionregistry"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
-var version = "1.1.4"
+var version = "1.1.5"
 
 func main() {
 	options := config.Options{Version: version}
@@ -58,14 +57,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "bridge-daemon: open bindings:", err)
 		os.Exit(1)
 	}
-	threadRegistry, err := threadregistry.New(paths.ThreadNumbersFile)
+	conversationRegistry, err := conversationregistry.New(paths.ConversationNumbersFile, paths.ThreadNumbersFile, paths.OpenClawSessionNumbersFile)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "bridge-daemon: open thread numbers:", err)
-		os.Exit(1)
-	}
-	openClawSessionRegistry, err := sessionregistry.New(paths.OpenClawSessionNumbersFile)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "bridge-daemon: open OpenClaw session numbers:", err)
+		fmt.Fprintln(os.Stderr, "bridge-daemon: open conversation numbers:", err)
 		os.Exit(1)
 	}
 	commandRegistry, err := commandregistry.New(paths.CommandsFile)
@@ -81,16 +75,16 @@ func main() {
 	}
 	address := "http://" + listener.Addr().String()
 	broker := events.NewBroker()
-	manager, err := bridgeruntime.NewManager(options.Version, address, options.CodexPath, options.SandboxMode, broker, logger, threadRegistry)
+	manager, err := bridgeruntime.NewManager(options.Version, address, options.CodexPath, options.SandboxMode, broker, logger, conversationRegistry)
 	if err != nil {
 		logger.Printf("initialize runtime: %v", err)
 		_ = listener.Close()
 		os.Exit(1)
 	}
-	controlService := control.NewService(manager, manager, threadRegistry)
-	openClawService := openclaw.NewService(logger, broker, openClawSessionRegistry)
-	profileManager := channelprofiles.NewManager(controlService, manager, bindingRepository, broker, logger, threadRegistry, commandRegistry, openClawService)
-	mirrorService, err := mirror.New(paths.MirrorFile, controlService, manager, threadRegistry, broker, logger,
+	controlService := control.NewService(manager, manager, conversationRegistry)
+	openClawService := openclaw.NewService(logger, broker, conversationRegistry)
+	profileManager := channelprofiles.NewManager(controlService, manager, bindingRepository, broker, logger, conversationRegistry, commandRegistry, openClawService)
+	mirrorService, err := mirror.New(paths.MirrorFile, controlService, manager, conversationRegistry, broker, logger,
 		mirror.Target{Status: func() (string, bool) {
 			return profileManager.TelegramMirrorTarget()
 		}, Send: func(ctx context.Context, message channels.OutboundMessage) (channels.OutboundResult, error) {

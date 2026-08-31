@@ -19,6 +19,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
@@ -593,5 +594,43 @@ func TestTelegramNumberedPrefixUsesOpenClawOrCodexNamespace(t *testing.T) {
 	}
 	if runtime.starts != 1 || len(backend.sends) != 1 {
 		t.Fatalf("Telegram number spaces crossed: starts=%d sends=%#v", runtime.starts, backend.sends)
+	}
+}
+
+func TestTelegramGlobalNumberRoutesAndBindsWithoutCurrentBackend(t *testing.T) {
+	repository, err := bindings.NewRepository(filepath.Join(t.TempDir(), "bindings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{state: control.RuntimeState{CanSend: true}}
+	service := NewService(&fakeControl{thread: control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "codex-thread-1", Title: "Codex one"}}}, runtime, repository, events.NewBroker(), nil)
+	defer service.Close(context.Background())
+	backend := &fakeOpenClawBackend{}
+	service.SetOpenClawBackend(backend)
+	service.SetBackendResolver(func(string) string { return conversation.BackendOpenClaw })
+	service.registry = conversationregistry.NewInMemory()
+	if _, err := service.registry.(*conversationregistry.Registry).EnsureBatch([]conversationregistry.Metadata{
+		{Backend: conversationregistry.BackendCodex, TargetID: "codex-thread-1", CreatedAt: "2026-08-31T00:00:01Z"},
+		{Backend: conversationregistry.BackendOpenClaw, TargetID: "agent:main:main", CreatedAt: "2026-08-31T00:00:02Z"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	address := channels.ChannelAddress{ChannelType: "telegram", AccountID: "bot", ConversationType: "default", ChatID: "cross-backend"}
+	if !service.handleNumbered(context.Background(), channels.InboundMessage{Address: address, UserID: "user"}, "[2] hello") {
+		t.Fatal("Telegram did not recognize the global bracket number")
+	}
+	if len(backend.sends) != 1 || backend.sends[0] != "agent:main:main:hello" {
+		t.Fatalf("global [2] did not route to OpenClaw from the current OpenClaw profile: %#v", backend.sends)
+	}
+	if !service.handleNumbered(context.Background(), channels.InboundMessage{Address: address, UserID: "user"}, "#1 codex") {
+		t.Fatal("Telegram did not recognize the global Codex hash number")
+	}
+	if runtime.starts != 1 || len(backend.sends) != 1 {
+		t.Fatalf("global #1 followed the current OpenClaw profile instead of Codex: starts=%d sends=%#v", runtime.starts, backend.sends)
+	}
+	service.bind(context.Background(), channels.InboundMessage{Address: address, UserID: "user"}, "2")
+	binding, ok := repository.FindAddress("telegram", "bot", "default", "cross-backend", "")
+	if !ok || binding.Backend != conversation.BackendOpenClaw || binding.TargetID != "agent:main:main" {
+		t.Fatalf("global /bind 2 inferred the current backend or lost target: %#v ok=%t", binding, ok)
 	}
 }

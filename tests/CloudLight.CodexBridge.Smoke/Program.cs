@@ -441,10 +441,12 @@ await File.WriteAllTextAsync(Path.Combine(codex, "state.json"), "{\"ok\":true}")
 await File.WriteAllBytesAsync(Path.Combine(codex, "nested", "test.db"), Enumerable.Range(0, 4096).Select(value => (byte)(value % 251)).ToArray());
 await File.WriteAllTextAsync(Path.Combine(codex, "cache", "models.json"), "runtime");
 await File.WriteAllTextAsync(Path.Combine(codex, "tmp", "arg0", "active", ".lock"), "runtime");
-await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "bindings.json"), "[{\"id\":\"binding-a\"}]");
+await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "bindings.json"), "{\"version\":4,\"bindings\":[{\"id\":\"binding-a\",\"backend\":\"openclaw\",\"targetId\":\"agent:main:main\"}]}");
 await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "commands.json"), "{\"schemaVersion\":1,\"commands\":[]}");
 await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "mirror-state.json"), "{\"cursor\":9}");
 await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "thread-numbers.json"), "{\"thread-a\":41}");
+await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "openclaw-session-numbers.json"), "{\"version\":1,\"nextNumber\":2,\"sessions\":[{\"sessionKey\":\"agent:main:main\",\"number\":1}]}");
+await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "conversation-numbers.json"), "{\"version\":1,\"nextNumber\":3,\"conversations\":[{\"number\":1,\"backend\":\"codex\",\"targetId\":\"thread-a\"},{\"number\":2,\"backend\":\"openclaw\",\"targetId\":\"agent:main:main\"}]}");
 await File.WriteAllBytesAsync(Path.Combine(bridgeLocal, "secrets", "qqbot-app-secret.dat"), [1, 2, 3, 4]);
 await File.WriteAllBytesAsync(Path.Combine(bridgeLocal, "secrets", "telegram-token.dat"), [5, 6, 7, 8]);
 await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "logs", "bridge-daemon.log"), "runtime");
@@ -455,7 +457,7 @@ var service = new BackupService(settings, codex, bridgeLocal, bridgeRoaming);
 var backupPath = Path.Combine(backups, "roundtrip.clcbak");
 var result = await service.CreateBackupAsync(backupPath, true, true);
 Assert(result.IsComplete, "备份必须完整成功");
-Assert(result.Manifest.FileCount == 11, $"预期 11 个持久化文件，实际 {result.Manifest.FileCount}");
+Assert(result.Manifest.FileCount == 13, $"预期 13 个持久化文件，实际 {result.Manifest.FileCount}");
 Assert(result.Manifest.ExcludedRuntimeFiles.Any(path => path.Contains("cache", StringComparison.OrdinalIgnoreCase)), "cache 必须在创建阶段排除");
 Assert(result.Manifest.ExcludedRuntimeFiles.Any(path => path.Contains("tmp", StringComparison.OrdinalIgnoreCase)), "tmp/lock 必须在创建阶段排除");
 Assert(result.Manifest.ExcludedRuntimeFiles.Any(path => path.Contains("logs", StringComparison.OrdinalIgnoreCase)), "日志必须在创建阶段排除");
@@ -524,7 +526,10 @@ var partialRestore = await service.RestoreAsync(damagedSettings, new RestoreOpti
 Assert(partialRestore.IsPartial, "单个 JSON 损坏必须返回部分恢复报告");
 Assert(partialRestore.SucceededModules.Contains(BackupModules.Bindings) && partialRestore.SucceededModules.Contains(BackupModules.Commands), "损坏应用设置不得阻止 bindings/commands 恢复");
 Assert((await File.ReadAllTextAsync(Path.Combine(bridgeRoaming, "settings.json"))).Contains("keepCurrent"), "损坏的 settings.json 不得覆盖当前设置");
-Assert((await File.ReadAllTextAsync(Path.Combine(bridgeLocal, "bindings.json"))).Contains("binding-a"), "有效 bindings 必须继续恢复");
+var restoredBindings = await File.ReadAllTextAsync(Path.Combine(bridgeLocal, "bindings.json"));
+Assert(restoredBindings.Contains("binding-a") && restoredBindings.Contains("openclaw") && restoredBindings.Contains("agent:main:main"), "有效 bindings 必须恢复 backend/targetId");
+var restoredConversationNumbers = await File.ReadAllTextAsync(Path.Combine(bridgeLocal, "data", "conversation-numbers.json"));
+Assert(restoredConversationNumbers.Contains("openclaw") && restoredConversationNumbers.Contains("agent:main:main"), "全局 conversation registry 必须恢复 backend/targetId");
 
 var legacy = Path.Combine(backups, "legacy-failed-files.clcbak");
 File.Copy(backupPath, legacy);

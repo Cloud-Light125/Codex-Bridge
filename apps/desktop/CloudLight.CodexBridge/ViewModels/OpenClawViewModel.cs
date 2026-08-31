@@ -8,10 +8,10 @@ using CloudLight.CodexBridge.Services;
 
 namespace CloudLight.CodexBridge.ViewModels;
 
-// This view model is intentionally independent from SessionsViewModel.  Codex
-// threads and OpenClaw sessions have different APIs, runtime semantics, and
-// identifiers; keeping the state separate prevents either list or event stream
-// from being rendered as the other backend.
+// This view model is intentionally independent from SessionsViewModel. Codex
+// threads and OpenClaw sessions have different APIs and runtime semantics;
+// their shared global number is rendered with an explicit backend label while
+// keeping each list and event stream isolated.
 public sealed class OpenClawViewModel : ObservableObject
 {
     private readonly BridgeApiClient _api;

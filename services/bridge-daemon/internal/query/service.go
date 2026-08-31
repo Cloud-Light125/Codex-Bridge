@@ -14,10 +14,10 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/numberprefix"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
 var HelpText = commandregistry.NewInMemory().HelpText()
@@ -46,7 +46,7 @@ type Result struct {
 type Service struct {
 	control  Control
 	runtime  Runtime
-	registry *threadregistry.Registry
+	registry any
 	commands *commandregistry.Registry
 	openclaw conversation.IConversationBackend
 	now      func() time.Time
@@ -58,7 +58,7 @@ func (s *Service) SetOpenClawBackend(backend conversation.IConversationBackend) 
 	s.openclaw = backend
 }
 
-func New(controlService Control, runtime Runtime, registry *threadregistry.Registry, commandRegistries ...*commandregistry.Registry) *Service {
+func New(controlService Control, runtime Runtime, registry any, commandRegistries ...*commandregistry.Registry) *Service {
 	commands := commandregistry.NewInMemory()
 	if len(commandRegistries) > 0 && commandRegistries[0] != nil {
 		commands = commandRegistries[0]
@@ -182,16 +182,23 @@ func (s *Service) threads(ctx context.Context, arguments []string) string {
 		}
 	}
 	var output strings.Builder
+	store := conversationregistry.ForAny(s.registry)
 	if len(list.Threads) > 0 {
 		s.hydrateActivities(ctx, list.Threads)
 		fmt.Fprintf(&output, "[Codex] 会话 · 第 %d 页\n\n", page)
 	}
 	for _, thread := range list.Threads {
+		number := thread.Number
+		if store != nil {
+			if record, ok := store.ByTarget(conversationregistry.BackendCodex, thread.ThreadID); ok {
+				number = record.Number
+			}
+		}
 		state := s.runtime.RuntimeState(thread.ThreadID).State
 		if state == "" {
 			state = thread.Status
 		}
-		fmt.Fprintf(&output, "#%d %s · %s\n", thread.Number, displayTitle(thread.Title), statusChinese(state))
+		fmt.Fprintf(&output, "#%d %s · %s\n", number, displayTitle(thread.Title), statusChinese(state))
 	}
 	if output.Len() == 0 {
 		if page == 1 {
@@ -235,6 +242,14 @@ func (s *Service) openClawThreads(ctx context.Context, arguments []string) strin
 	}
 	// A backend may return sessions in activity order. The number, rather than
 	// that order, is the stable user-facing selector, so list it numerically.
+	store := conversationregistry.ForAny(s.registry)
+	if store != nil {
+		for index := range sessions {
+			if record, ok := store.ByTarget(conversationregistry.BackendOpenClaw, sessions[index].Key); ok {
+				sessions[index].Number = record.Number
+			}
+		}
+	}
 	sort.SliceStable(sessions, func(i, j int) bool {
 		if sessions[i].Number == sessions[j].Number {
 			return sessions[i].Key < sessions[j].Key
@@ -384,29 +399,44 @@ func (s *Service) openClawRefresh(ctx context.Context, arguments []string) strin
 
 func (s *Service) resolveOpenClawSession(ctx context.Context, arguments []string, target string) (conversation.Session, string) {
 	selector := strings.TrimSpace(target)
+	selectorIsTarget := len(arguments) == 0 && selector != ""
 	if len(arguments) > 0 {
 		selector = strings.TrimSpace(arguments[0])
 	}
 	if selector == "" {
 		return conversation.Session{}, "当前聊天尚未绑定 OpenClaw Session，请先使用 /threads 或 /bind。"
 	}
-	for _, prefix := range []string{"oc:", "openclaw:"} {
-		if strings.HasPrefix(strings.ToLower(selector), prefix) {
-			selector = strings.TrimSpace(selector[len(prefix):])
-			break
+	if !selectorIsTarget {
+		for _, prefix := range []string{"oc:", "openclaw:"} {
+			if strings.HasPrefix(strings.ToLower(selector), prefix) {
+				selector = strings.TrimSpace(selector[len(prefix):])
+				selectorIsTarget = true
+				break
+			}
 		}
 	}
-	if parsed, recognized, err := numberprefix.Parse(selector); err != nil {
-		return conversation.Session{}, err.Error()
-	} else if recognized && parsed.Number > 0 {
-		if parsed.Content != "" {
-			return conversation.Session{}, "请只指定一个 OpenClaw Session 编号。"
+	if !selectorIsTarget {
+		if parsed, recognized, err := numberprefix.Parse(selector); err != nil {
+			return conversation.Session{}, err.Error()
+		} else if recognized && parsed.Number > 0 {
+			if parsed.Content != "" {
+				return conversation.Session{}, "请只指定一个 OpenClaw Session 编号。"
+			}
+			if store := conversationregistry.ForAny(s.registry); store != nil {
+				record, ok := store.ByNumber(parsed.Number)
+				if !ok {
+					return conversation.Session{}, fmt.Sprintf("聊天编号 #%d 不存在。", parsed.Number)
+				}
+				if record.Backend != conversationregistry.BackendOpenClaw {
+					return conversation.Session{}, fmt.Sprintf("聊天编号 #%d 属于 Codex，不是 OpenClaw。", parsed.Number)
+				}
+			}
+			session, err := s.openClawByNumber(ctx, parsed.Number)
+			if err != nil {
+				return conversation.Session{}, fmt.Sprintf("OpenClaw 会话编号 #%d 不存在。", parsed.Number)
+			}
+			return session, ""
 		}
-		session, err := s.openClawByNumber(ctx, parsed.Number)
-		if err != nil {
-			return conversation.Session{}, fmt.Sprintf("OpenClaw 会话编号 #%d 不存在。", parsed.Number)
-		}
-		return session, ""
 	}
 	if s.openclaw == nil {
 		return conversation.Session{}, "当前后端是 OpenClaw，但 Gateway 尚未配置。"
@@ -421,6 +451,22 @@ func (s *Service) resolveOpenClawSession(ctx context.Context, arguments []string
 func (s *Service) openClawByNumber(ctx context.Context, number int) (conversation.Session, error) {
 	if s.openclaw == nil {
 		return conversation.Session{}, errors.New("OpenClaw backend is unavailable")
+	}
+	if store := conversationregistry.ForAny(s.registry); store != nil {
+		if record, ok := store.ByNumber(number); !ok || record.Backend != conversationregistry.BackendOpenClaw {
+			return conversation.Session{}, errors.New("OpenClaw session number not found")
+		} else {
+			detail, err := s.openclaw.ReadSession(ctx, record.TargetID)
+			if err != nil {
+				return conversation.Session{}, err
+			}
+			if detail.Key == "" {
+				return conversation.Session{}, errors.New("OpenClaw session not found")
+			}
+			detail.Number = record.Number
+			detail.Backend = conversation.BackendOpenClaw
+			return detail.Session, nil
+		}
 	}
 	if numbered, ok := s.openclaw.(conversation.NumberedSessionBackend); ok {
 		return numbered.SessionByNumber(ctx, number)
@@ -445,7 +491,10 @@ func (s *Service) threadInfo(ctx context.Context, arguments []string) string {
 	if message != "" {
 		return message
 	}
-	detail, err := s.control.ReadThread(ctx, record.ThreadID, false)
+	if record.Backend != conversationregistry.BackendCodex {
+		return fmt.Sprintf("聊天编号 #%d 属于 OpenClaw，请按 OpenClaw 会话方式查询。", record.Number)
+	}
+	detail, err := s.control.ReadThread(ctx, record.TargetID, false)
 	if err != nil || detail.ThreadID == "" {
 		return fmt.Sprintf("聊天编号 #%d 当前不可用。", record.Number)
 	}
@@ -490,7 +539,10 @@ func (s *Service) history(ctx context.Context, arguments []string) Result {
 	if message != "" {
 		return one(message)
 	}
-	detail, err := s.control.ReadThread(ctx, record.ThreadID, true)
+	if record.Backend != conversationregistry.BackendCodex {
+		return one(fmt.Sprintf("聊天编号 #%d 属于 OpenClaw，请按 OpenClaw 会话方式查询。", record.Number))
+	}
+	detail, err := s.control.ReadThread(ctx, record.TargetID, true)
 	if err != nil || detail.ThreadID == "" {
 		return one(fmt.Sprintf("聊天编号 #%d 当前不可用。", record.Number))
 	}
@@ -846,7 +898,7 @@ func (s *Service) hydrateActivities(ctx context.Context, threads []control.Threa
 	wait.Wait()
 }
 
-func (s *Service) resolve(value string) (threadregistry.Record, string) {
+func (s *Service) resolve(value string) (conversationregistry.Record, string) {
 	selector := strings.TrimSpace(value)
 	if strings.HasPrefix(selector, "[") && strings.HasSuffix(selector, "]") {
 		selector = strings.TrimSpace(selector[1 : len(selector)-1])
@@ -854,14 +906,15 @@ func (s *Service) resolve(value string) (threadregistry.Record, string) {
 	selector = strings.TrimPrefix(selector, "#")
 	number, err := strconv.Atoi(selector)
 	if err != nil || number < 1 {
-		return threadregistry.Record{}, "请指定聊天编号，例如 /thread 63。"
+		return conversationregistry.Record{}, "请指定聊天编号，例如 /thread 63。"
 	}
-	if s.registry == nil {
-		return threadregistry.Record{}, "聊天编号尚未初始化。"
+	store := conversationregistry.ForAny(s.registry)
+	if store == nil {
+		return conversationregistry.Record{}, "聊天编号尚未初始化。"
 	}
-	record, ok := s.registry.ByNumber(number)
+	record, ok := store.ByNumber(number)
 	if !ok {
-		return threadregistry.Record{}, fmt.Sprintf("聊天编号 #%d 不存在。", number)
+		return conversationregistry.Record{}, fmt.Sprintf("聊天编号 #%d 不存在。", number)
 	}
 	return record, ""
 }

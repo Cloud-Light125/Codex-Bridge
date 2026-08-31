@@ -26,7 +26,6 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/qqbot"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/telegram"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
 const (
@@ -147,7 +146,7 @@ type Manager struct {
 	bindings  *bindings.Repository
 	broker    *events.Broker
 	logger    *bridgelog.SafeLogger
-	registry  *threadregistry.Registry
+	registry  any
 	commands  *commandregistry.Registry
 	openclaw  conversation.IConversationBackend
 	profiles  map[string]*profile
@@ -156,7 +155,7 @@ type Manager struct {
 	routing   BackendRouting
 }
 
-func NewManager(controlService *control.Service, runtimeManager *bridgeruntime.Manager, repository *bindings.Repository, broker *events.Broker, logger *bridgelog.SafeLogger, registry *threadregistry.Registry, commands *commandregistry.Registry, openclaw conversation.IConversationBackend) *Manager {
+func NewManager(controlService *control.Service, runtimeManager *bridgeruntime.Manager, repository *bindings.Repository, broker *events.Broker, logger *bridgelog.SafeLogger, registry any, commands *commandregistry.Registry, openclaw conversation.IConversationBackend) *Manager {
 	return &Manager{
 		control: controlService, runtime: runtimeManager, bindings: repository, broker: broker, logger: logger, registry: registry,
 		commands: commands, openclaw: openclaw, profiles: make(map[string]*profile), resources: make(map[string]*resource), byID: make(map[string]*resource),

@@ -16,10 +16,10 @@ import (
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
 type MessageTypes struct {
@@ -97,7 +97,7 @@ type Service struct {
 	path              string
 	model             diskModel
 	control           Control
-	registry          *threadregistry.Registry
+	registry          any
 	broker            *events.Broker
 	logger            *bridgelog.SafeLogger
 	telegram          Target
@@ -134,7 +134,7 @@ func DefaultConfig() Config {
 	return Config{Enabled: false, RequireThreadNumber: true, Messages: MessageTypes{Assistant: true, RequestUserInput: true, Error: true}, QQ: QQConfig{ConversationType: "c2c"}}
 }
 
-func New(path string, controlService Control, _ Runtime, registry *threadregistry.Registry, broker *events.Broker, logger *bridgelog.SafeLogger, telegram, qq Target) (*Service, error) {
+func New(path string, controlService Control, _ Runtime, registry any, broker *events.Broker, logger *bridgelog.SafeLogger, telegram, qq Target) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{path: path, control: controlService, registry: registry, broker: broker, logger: logger, telegram: telegram, qq: qq, ctx: ctx, cancel: cancel, done: make(chan struct{}), turnOrigins: map[string]string{}, retry: map[string]bool{}, syncLocks: map[string]*sync.Mutex{}, pendingSync: map[string]string{}, rolloutFinals: map[string]rolloutFinal{}, observedFinals: map[string]bool{}, resolvedFinals: map[string]bool{}, completedFinals: map[string]bool{}, model: diskModel{Version: 1, Config: DefaultConfig(), Cursors: map[string]Cursor{}, LiveDelivered: map[string]liveCursor{}, Finals: map[string]finalRecord{}}}
 	if err := s.load(); err != nil {
@@ -308,6 +308,10 @@ func (s *Service) handleEvent(event events.Event) {
 }
 
 func (s *Service) baselineAll() {
+	store := conversationregistry.ForCodex(s.registry)
+	if store == nil {
+		return
+	}
 	cursor := ""
 	summaries := []control.ThreadSummary{}
 	for page := 0; page < 100; page++ {
@@ -323,11 +327,11 @@ func (s *Service) baselineAll() {
 		}
 		cursor = list.NextCursor
 	}
-	metadata := make([]threadregistry.Metadata, 0, len(summaries))
+	metadata := make([]conversationregistry.Metadata, 0, len(summaries))
 	for _, thread := range summaries {
-		metadata = append(metadata, threadregistry.Metadata{ThreadID: thread.ThreadID, Title: thread.Title, CWD: thread.CWD, CreatedAt: thread.CreatedAt, LastSeenAt: thread.UpdatedAt})
+		metadata = append(metadata, conversationregistry.Metadata{Backend: conversationregistry.BackendCodex, TargetID: thread.ThreadID, Title: thread.Title, CWD: thread.CWD, CreatedAt: thread.CreatedAt, LastSeenAt: thread.UpdatedAt})
 	}
-	_, _ = s.registry.EnsureBatch(metadata)
+	_, _ = store.EnsureBatchBackend(conversationregistry.BackendCodex, metadata)
 	for _, thread := range summaries {
 		ctx, cancel := context.WithTimeout(s.ctx, 8*time.Second)
 		detail, err := s.control.ReadThread(ctx, thread.ThreadID, true)
@@ -436,6 +440,10 @@ func (s *Service) scheduleQuickChecks(threadID, turnID string) {
 func (s *Service) syncThread(threadID string) { s.syncThreadSource(threadID, "scanner", "") }
 
 func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
+	store := conversationregistry.ForCodex(s.registry)
+	if store == nil {
+		return
+	}
 	lock := s.threadSyncLock(threadID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -450,11 +458,11 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 			return
 		}
 		detail.ThreadID = threadID
-		if record, ok := s.registry.ByThreadID(threadID); ok {
+		if record, ok := store.ByTarget(conversationregistry.BackendCodex, threadID); ok {
 			detail.Title, detail.Number = record.Title, record.Number
 		}
 	}
-	_, _ = s.registry.Ensure(threadregistry.Metadata{ThreadID: detail.ThreadID, Title: detail.Title, CWD: detail.CWD, CreatedAt: detail.CreatedAt, LastSeenAt: detail.UpdatedAt})
+	_, _ = store.EnsureBackend(conversationregistry.BackendCodex, conversationregistry.Metadata{Backend: conversationregistry.BackendCodex, TargetID: detail.ThreadID, Title: detail.Title, CWD: detail.CWD, CreatedAt: detail.CreatedAt, LastSeenAt: detail.UpdatedAt})
 	messages := visibleMessages(detail, s.originForTurn)
 	if expectedTurnID != "" {
 		for _, message := range messages {
@@ -614,8 +622,12 @@ func (s *Service) retryFailed() {
 	}
 }
 func (s *Service) retryAll() {
-	for _, record := range s.registry.List() {
-		threadID := record.ThreadID
+	store := conversationregistry.ForCodex(s.registry)
+	if store == nil {
+		return
+	}
+	for _, record := range store.ListBackend(conversationregistry.BackendCodex) {
+		threadID := record.TargetID
 		s.triggerSync(threadID, "scanner", "")
 	}
 }
@@ -661,7 +673,11 @@ func (s *Service) sendVisible(ctx context.Context, detail control.ThreadDetail, 
 	return s.sendFinalPlatform(ctx, platform, header, message.Text)
 }
 func (s *Service) header(threadID, title string) string {
-	record, ok := s.registry.ByThreadID(threadID)
+	store := conversationregistry.ForCodex(s.registry)
+	if store == nil {
+		return ""
+	}
+	record, ok := store.ByTarget(conversationregistry.BackendCodex, threadID)
 	if !ok {
 		return ""
 	}
@@ -862,7 +878,11 @@ func (s *Service) sendInteraction(event events.Event) {
 	if !ok {
 		return
 	}
-	record, ok := s.registry.ByThreadID(event.ThreadID)
+	store := conversationregistry.ForCodex(s.registry)
+	if store == nil {
+		return
+	}
+	record, ok := store.ByTarget(conversationregistry.BackendCodex, event.ThreadID)
 	if !ok {
 		return
 	}
@@ -892,7 +912,11 @@ func (s *Service) sendInteraction(event events.Event) {
 }
 
 func (s *Service) sendExceptional(kind, threadID, turnID, text string) {
-	record, ok := s.registry.ByThreadID(threadID)
+	store := conversationregistry.ForCodex(s.registry)
+	if store == nil {
+		return
+	}
+	record, ok := store.ByTarget(conversationregistry.BackendCodex, threadID)
 	if !ok {
 		return
 	}

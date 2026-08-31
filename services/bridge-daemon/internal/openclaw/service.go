@@ -17,9 +17,9 @@ import (
 	"github.com/gorilla/websocket"
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversation"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/sessionregistry"
 )
 
 var (
@@ -64,7 +64,7 @@ type Service struct {
 	sessions    map[string]conversation.Session
 	runText     map[string]string
 	seenEvents  map[string]time.Time
-	numbers     *sessionregistry.Registry
+	numbers     any
 	reconnects  int
 	lastTick    time.Time
 	tickEvery   time.Duration
@@ -129,13 +129,13 @@ type ConfigureRequest struct {
 	Start         *bool  `json:"start,omitempty"`
 }
 
-func NewService(logger *bridgelog.SafeLogger, broker *events.Broker, registries ...*sessionregistry.Registry) *Service {
-	var numbers *sessionregistry.Registry
+func NewService(logger *bridgelog.SafeLogger, broker *events.Broker, registries ...any) *Service {
+	var numbers any
 	if len(registries) > 0 {
 		numbers = registries[0]
 	}
 	if numbers == nil {
-		numbers = sessionregistry.NewInMemory()
+		numbers = conversationregistry.NewInMemory()
 	}
 	return &Service{
 		logger: logger, broker: broker,
@@ -766,6 +766,24 @@ func (s *Service) SessionByNumber(ctx context.Context, number int) (conversation
 	if number < 1 {
 		return conversation.Session{}, ErrSessionNotFound
 	}
+	store := conversationregistry.ForOpenClaw(s.numbers)
+	if store != nil {
+		record, ok := store.ByNumber(number)
+		if !ok || record.Backend != conversationregistry.BackendOpenClaw {
+			return conversation.Session{}, ErrSessionNotFound
+		}
+		sessions, err := s.ListSessions(ctx, 200)
+		if err != nil {
+			return conversation.Session{}, err
+		}
+		for _, session := range sessions {
+			if session.Key == record.TargetID {
+				session.Number = record.Number
+				return session, nil
+			}
+		}
+		return conversation.Session{}, ErrSessionNotFound
+	}
 	sessions, err := s.ListSessions(ctx, 200)
 	if err != nil {
 		return conversation.Session{}, err
@@ -988,23 +1006,24 @@ func (s *Service) publishSession(session conversation.Session) {
 }
 
 func (s *Service) numberSessions(sessions []conversation.Session) ([]conversation.Session, error) {
-	if s.numbers == nil || len(sessions) == 0 {
+	store := conversationregistry.ForOpenClaw(s.numbers)
+	if store == nil || len(sessions) == 0 {
 		return sessions, nil
 	}
-	metadata := make([]sessionregistry.Metadata, 0, len(sessions))
+	metadata := make([]conversationregistry.Metadata, 0, len(sessions))
 	for _, session := range sessions {
-		metadata = append(metadata, sessionregistry.Metadata{
-			SessionKey: session.Key, Title: session.Title, CreatedAt: session.CreatedAt,
+		metadata = append(metadata, conversationregistry.Metadata{
+			Backend: conversationregistry.BackendOpenClaw, TargetID: session.Key, Title: session.Title, CreatedAt: session.CreatedAt,
 			LastSeenAt: session.UpdatedAt, Status: session.Status,
 		})
 	}
-	records, err := s.numbers.EnsureBatch(metadata)
+	records, err := store.EnsureBatchBackend(conversationregistry.BackendOpenClaw, metadata)
 	if err != nil {
 		return nil, err
 	}
-	byKey := make(map[string]sessionregistry.Record, len(records))
+	byKey := make(map[string]conversationregistry.Record, len(records))
 	for _, record := range records {
-		byKey[record.SessionKey] = record
+		byKey[record.TargetID] = record
 	}
 	for index := range sessions {
 		if record, ok := byKey[sessions[index].Key]; ok {

@@ -12,11 +12,11 @@ import (
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/appserver"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/security"
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
 )
 
 const (
@@ -77,7 +77,7 @@ type Manager struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	interactions *interactions.Store
-	registry     *threadregistry.Registry
+	registry     any
 
 	stateMu  sync.RWMutex
 	states   map[string]control.RuntimeState
@@ -98,7 +98,7 @@ type Manager struct {
 	connectionCancel     context.CancelFunc
 }
 
-func NewManager(version, listenAddress, codexPath, sandboxMode string, broker *events.Broker, logger *bridgelog.SafeLogger, registry *threadregistry.Registry) (*Manager, error) {
+func NewManager(version, listenAddress, codexPath, sandboxMode string, broker *events.Broker, logger *bridgelog.SafeLogger, registry any) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	parsedSandboxMode, err := security.ParseSandboxMode(sandboxMode)
 	if err != nil {
@@ -255,11 +255,12 @@ func (m *Manager) run() {
 }
 
 func (m *Manager) initializeThreadRegistry(client *appserver.Client) {
-	if m.registry == nil {
+	store := conversationregistry.ForCodex(m.registry)
+	if store == nil {
 		return
 	}
 	cursor := ""
-	metadata := []threadregistry.Metadata{}
+	metadata := []conversationregistry.Metadata{}
 	for page := 0; page < 100; page++ {
 		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
 		raw, err := client.ThreadList(ctx, 100, cursor)
@@ -270,14 +271,14 @@ func (m *Manager) initializeThreadRegistry(client *appserver.Client) {
 		}
 		list := control.NormalizeThreadList(raw)
 		for _, thread := range list.Threads {
-			metadata = append(metadata, threadregistry.Metadata{ThreadID: thread.ThreadID, Title: thread.Title, CWD: thread.CWD, CreatedAt: thread.CreatedAt, LastSeenAt: thread.UpdatedAt})
+			metadata = append(metadata, conversationregistry.Metadata{Backend: conversationregistry.BackendCodex, TargetID: thread.ThreadID, Title: thread.Title, CWD: thread.CWD, CreatedAt: thread.CreatedAt, LastSeenAt: thread.UpdatedAt})
 		}
 		if strings.TrimSpace(list.NextCursor) == "" || list.NextCursor == cursor {
 			break
 		}
 		cursor = list.NextCursor
 	}
-	if _, err := m.registry.EnsureBatch(metadata); err != nil {
+	if _, err := store.EnsureBatchBackend(conversationregistry.BackendCodex, metadata); err != nil {
 		m.logger.Printf("persist thread numbers: %v", err)
 	}
 }

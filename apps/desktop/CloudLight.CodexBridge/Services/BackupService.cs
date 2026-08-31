@@ -493,7 +493,7 @@ public sealed class BackupService
     {
         FormatVersion = CurrentFormatVersion,
         CreatedAt = DateTimeOffset.Now,
-        AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.1.4",
+        AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.1.5",
         CodexVersion = TryGetCodexVersion(),
         MachineName = Environment.MachineName,
         CodexHome = CodexHome,
@@ -864,7 +864,9 @@ public sealed class BackupService
             return new FileClassification("指令配置", BackupModules.Commands, true, false);
         if (path.Equals("bridge/local/data/mirror-state.json", StringComparison.OrdinalIgnoreCase))
             return new FileClassification("消息同步配置", BackupModules.MessageSync, true, false);
-        if (path.Equals("bridge/local/data/thread-numbers.json", StringComparison.OrdinalIgnoreCase))
+        if (path.Equals("bridge/local/data/conversation-numbers.json", StringComparison.OrdinalIgnoreCase) ||
+            path.Equals("bridge/local/data/thread-numbers.json", StringComparison.OrdinalIgnoreCase) ||
+            path.Equals("bridge/local/data/openclaw-session-numbers.json", StringComparison.OrdinalIgnoreCase))
             return new FileClassification("会话编号状态", BackupModules.ThreadState, true, false);
         if (path.Contains("/secrets/qq", StringComparison.OrdinalIgnoreCase))
             return new FileClassification("QQ 凭据", BackupModules.Qq, true, false);

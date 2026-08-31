@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"cloudlight.dev/codexbridge/bridge-daemon/internal/threadregistry"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 )
 
 var ErrUnavailable = errors.New("Codex app-server is unavailable")
@@ -22,10 +22,10 @@ type RuntimeStateProvider interface {
 type Service struct {
 	reader   ThreadReader
 	states   RuntimeStateProvider
-	registry *threadregistry.Registry
+	registry any
 }
 
-func NewService(reader ThreadReader, states RuntimeStateProvider, registry *threadregistry.Registry) *Service {
+func NewService(reader ThreadReader, states RuntimeStateProvider, registry any) *Service {
 	return &Service{reader: reader, states: states, registry: registry}
 }
 
@@ -35,20 +35,23 @@ func (s *Service) ListThreads(ctx context.Context, limit int, cursor string) (Th
 		return ThreadList{}, err
 	}
 	result := normalizeThreadList(raw)
-	if s.registry != nil {
-		metadata := make([]threadregistry.Metadata, 0, len(result.Threads))
+	store := conversationregistry.ForCodex(s.registry)
+	if store != nil {
+		metadata := make([]conversationregistry.Metadata, 0, len(result.Threads))
 		for _, thread := range result.Threads {
 			metadata = append(metadata, threadMetadata(thread))
 		}
-		_, _ = s.registry.EnsureBatch(metadata)
+		if _, err := store.EnsureBatchBackend(conversationregistry.BackendCodex, metadata); err != nil {
+			return ThreadList{}, err
+		}
 	}
-	if s.states != nil {
-		for index := range result.Threads {
-			if s.registry != nil {
-				if record, ok := s.registry.ByThreadID(result.Threads[index].ThreadID); ok {
-					result.Threads[index].Number = record.Number
-				}
+	for index := range result.Threads {
+		if store != nil {
+			if record, ok := store.ByTarget(conversationregistry.BackendCodex, result.Threads[index].ThreadID); ok {
+				result.Threads[index].Number = record.Number
 			}
+		}
+		if s.states != nil {
 			result.Threads[index].Status = s.states.RuntimeState(result.Threads[index].ThreadID).State
 		}
 	}
@@ -61,8 +64,11 @@ func (s *Service) ReadThread(ctx context.Context, threadID string, includeTurns 
 		return ThreadDetail{}, err
 	}
 	detail := normalizeThreadDetail(raw)
-	if s.registry != nil && detail.ThreadID != "" {
-		record, _ := s.registry.Ensure(threadMetadata(detail.ThreadSummary))
+	if store := conversationregistry.ForCodex(s.registry); store != nil && detail.ThreadID != "" {
+		record, err := store.EnsureBackend(conversationregistry.BackendCodex, threadMetadata(detail.ThreadSummary))
+		if err != nil {
+			return ThreadDetail{}, err
+		}
 		detail.Number = record.Number
 	}
 	if s.states != nil {
@@ -74,8 +80,8 @@ func (s *Service) ReadThread(ctx context.Context, threadID string, includeTurns 
 	return detail, nil
 }
 
-func threadMetadata(thread ThreadSummary) threadregistry.Metadata {
-	return threadregistry.Metadata{ThreadID: thread.ThreadID, Title: thread.Title, CWD: thread.CWD, CreatedAt: thread.CreatedAt, LastSeenAt: firstSeen(thread.UpdatedAt)}
+func threadMetadata(thread ThreadSummary) conversationregistry.Metadata {
+	return conversationregistry.Metadata{Backend: conversationregistry.BackendCodex, TargetID: thread.ThreadID, Title: thread.Title, CWD: thread.CWD, CreatedAt: thread.CreatedAt, LastSeenAt: firstSeen(thread.UpdatedAt)}
 }
 
 func firstSeen(value string) string {
