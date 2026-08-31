@@ -76,6 +76,7 @@ public static class BackupModules
     public const string Commands = "commands";
     public const string MessageSync = "message-sync";
     public const string ThreadState = "thread-state";
+    public const string TaskCenter = "task-center";
     public const string Sessions = "sessions";
     public const string OtherPersistentData = "other-persistent-data";
     public const string RuntimeExcluded = "runtime-excluded";

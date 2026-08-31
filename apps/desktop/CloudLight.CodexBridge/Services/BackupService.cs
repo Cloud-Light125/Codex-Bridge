@@ -482,6 +482,7 @@ public sealed class BackupService
         BackupModules.Commands => "指令配置",
         BackupModules.MessageSync => "消息同步配置",
         BackupModules.ThreadState => "会话编号状态",
+        BackupModules.TaskCenter => "任务与项目",
         BackupModules.Sessions => "Codex 会话与历史",
         BackupModules.OtherPersistentData => "其他持久化数据",
         BackupModules.RuntimeExcluded => "运行时文件（已跳过）",
@@ -493,7 +494,7 @@ public sealed class BackupService
     {
         FormatVersion = CurrentFormatVersion,
         CreatedAt = DateTimeOffset.Now,
-        AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.1.5",
+        AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.2.0",
         CodexVersion = TryGetCodexVersion(),
         MachineName = Environment.MachineName,
         CodexHome = CodexHome,
@@ -864,6 +865,9 @@ public sealed class BackupService
             return new FileClassification("指令配置", BackupModules.Commands, true, false);
         if (path.Equals("bridge/local/data/mirror-state.json", StringComparison.OrdinalIgnoreCase))
             return new FileClassification("消息同步配置", BackupModules.MessageSync, true, false);
+        if (path.Equals("bridge/local/data/tasks.json", StringComparison.OrdinalIgnoreCase) ||
+            path.Equals("bridge/local/data/projects.json", StringComparison.OrdinalIgnoreCase))
+            return new FileClassification("任务与项目", BackupModules.TaskCenter, true, false);
         if (path.Equals("bridge/local/data/conversation-numbers.json", StringComparison.OrdinalIgnoreCase) ||
             path.Equals("bridge/local/data/thread-numbers.json", StringComparison.OrdinalIgnoreCase) ||
             path.Equals("bridge/local/data/openclaw-session-numbers.json", StringComparison.OrdinalIgnoreCase))
@@ -970,7 +974,7 @@ public sealed class BackupService
         module == BackupModules.Sessions ? options.RestoreCodex :
         module == BackupModules.ApplicationSettings || module == BackupModules.Qq || module == BackupModules.Telegram ||
         module == BackupModules.Bindings || module == BackupModules.Commands || module == BackupModules.MessageSync ||
-        module == BackupModules.ThreadState ? options.RestoreBridge : options.RestoreCodex || options.RestoreBridge;
+        module == BackupModules.ThreadState || module == BackupModules.TaskCenter ? options.RestoreBridge : options.RestoreCodex || options.RestoreBridge;
 
     private static int GetModuleSortOrder(string module) => module switch
     {
@@ -982,7 +986,8 @@ public sealed class BackupService
         BackupModules.Commands => 5,
         BackupModules.MessageSync => 6,
         BackupModules.ThreadState => 7,
-        BackupModules.Sessions => 8,
+        BackupModules.TaskCenter => 8,
+        BackupModules.Sessions => 9,
         _ => 9
     };
 

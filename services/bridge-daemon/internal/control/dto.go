@@ -49,6 +49,7 @@ type RuntimeState struct {
 
 type StartTurnRequest struct {
 	Text              string  `json:"text"`
+	CWD               string  `json:"cwd,omitempty"`
 	CollaborationMode string  `json:"collaborationMode"`
 	Model             *string `json:"model"`
 	ReasoningEffort   *string `json:"reasoningEffort"`

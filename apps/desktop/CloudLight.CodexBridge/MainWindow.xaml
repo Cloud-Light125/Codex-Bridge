@@ -15,6 +15,8 @@
                 <StackPanel Grid.Row="1">
                     <TextBlock Text="工作区" Style="{StaticResource EyebrowTextStyle}" Margin="20,10,0,8"/>
                     <RadioButton Content="概览" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsOverviewPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="overview"/>
+                    <RadioButton Content="任务中心" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsTasksPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="tasks"/>
+                    <RadioButton Content="项目工作区" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsProjectsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="projects"/>
                     <RadioButton Content="Codex" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsSessionsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="sessions"/>
                     <RadioButton Content="OpenClaw" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsOpenClawPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="openclaw"/>
                     <RadioButton Content="QQ" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsQqPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="qq"/>
@@ -28,7 +30,7 @@
                 </StackPanel>
                 <StackPanel Grid.Row="2" Margin="0,0,0,12">
                     <RadioButton Content="设置" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsSettingsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="settings"/>
-                    <TextBlock Text="v1.1.5" Style="{StaticResource SecondaryTextStyle}" Margin="20,8,0,5"/>
+                    <TextBlock Text="v1.2.0" Style="{StaticResource SecondaryTextStyle}" Margin="20,8,0,5"/>
                 </StackPanel>
             </Grid>
         </Border>

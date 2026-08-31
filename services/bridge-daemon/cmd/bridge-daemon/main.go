@@ -25,9 +25,10 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/mirror"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/openclaw"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/taskcenter"
 )
 
-var version = "1.1.5"
+var version = "1.2.0"
 
 func main() {
 	options := config.Options{Version: version}
@@ -75,6 +76,26 @@ func main() {
 	}
 	address := "http://" + listener.Addr().String()
 	broker := events.NewBroker()
+	projectRegistry, err := taskcenter.NewProjectRegistry(paths.ProjectsFile)
+	if err != nil {
+		logger.Printf("initialize projects: %v", err)
+		_ = listener.Close()
+		os.Exit(1)
+	}
+	taskRegistry, err := taskcenter.NewTaskRegistry(paths.TasksFile)
+	if err != nil {
+		logger.Printf("initialize tasks: %v", err)
+		_ = listener.Close()
+		os.Exit(1)
+	}
+	if warning := projectRegistry.LoadWarning(); warning != "" {
+		logger.Printf("[projects] %s", warning)
+		broker.Publish(events.Error, map[string]any{"category": "projects", "message": warning})
+	}
+	if warning := taskRegistry.LoadWarning(); warning != "" {
+		logger.Printf("[tasks] %s", warning)
+		broker.Publish(events.Error, map[string]any{"category": "tasks", "message": warning})
+	}
 	manager, err := bridgeruntime.NewManager(options.Version, address, options.CodexPath, options.SandboxMode, broker, logger, conversationRegistry)
 	if err != nil {
 		logger.Printf("initialize runtime: %v", err)
@@ -83,7 +104,12 @@ func main() {
 	}
 	controlService := control.NewService(manager, manager, conversationRegistry)
 	openClawService := openclaw.NewService(logger, broker, conversationRegistry)
+	taskService := taskcenter.NewService(projectRegistry, taskRegistry, broker, logger,
+		taskcenter.NewCodexTaskAdapter(controlService, manager, conversationRegistry),
+		taskcenter.NewOpenClawTaskAdapter(openClawService, conversationRegistry),
+	)
 	profileManager := channelprofiles.NewManager(controlService, manager, bindingRepository, broker, logger, conversationRegistry, commandRegistry, openClawService)
+	profileManager.SetTaskService(taskService)
 	mirrorService, err := mirror.New(paths.MirrorFile, controlService, manager, conversationRegistry, broker, logger,
 		mirror.Target{Status: func() (string, bool) {
 			return profileManager.TelegramMirrorTarget()
@@ -103,6 +129,7 @@ func main() {
 	}
 	server := api.New(options.Token, manager, controlService, bindingRepository, broker, logger, profileManager, mirrorService, commandRegistry)
 	server.SetOpenClawBackend(openClawService)
+	server.SetTaskService(taskService)
 
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.Serve(listener) }()
@@ -120,6 +147,24 @@ func main() {
 	logger.Printf("bridge-daemon ready on %s (pid=%d)", address, os.Getpid())
 	broker.Publish(events.DaemonStarted, map[string]any{"address": address, "pid": os.Getpid()})
 	manager.Start()
+	taskService.Start()
+	go func() {
+		// Backend connection startup is asynchronous. Retry recovery for a
+		// bounded window; adapters defer work while disconnected, and the
+		// dispatch mutex makes overlapping connection-triggered passes idempotent.
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			taskService.Recover(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -149,6 +194,7 @@ func main() {
 		logger.Printf("channel profiles shutdown: %v", err)
 	}
 	cancelProfiles()
+	taskService.Close()
 	if err := openClawService.Close(); err != nil {
 		logger.Printf("OpenClaw shutdown: %v", err)
 	}

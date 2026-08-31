@@ -78,6 +78,47 @@ public sealed class BridgeApiClient(LogService logs) : IDisposable
     public Task<PendingInteraction> RespondInteractionAsync(string interactionId, InteractionResponse input, CancellationToken cancellationToken = default) =>
         SendJsonAsync<PendingInteraction>(HttpMethod.Post, $"/api/v1/interactions/{Uri.EscapeDataString(interactionId)}/respond", input, cancellationToken);
 
+    public async Task<ProjectListResponse> GetProjectsAsync(CancellationToken cancellationToken = default)
+    {
+        var result = await GetAsync<ProjectListResponse>("/api/v1/projects", cancellationToken);
+        result.Projects ??= [];
+        return result;
+    }
+
+    public Task<ProjectModel> CreateProjectAsync(ProjectInput input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<ProjectModel>(HttpMethod.Post, "/api/v1/projects", input, cancellationToken);
+
+    public Task<ProjectModel> UpdateProjectAsync(string projectId, ProjectInput input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<ProjectModel>(HttpMethod.Put, $"/api/v1/projects/{Uri.EscapeDataString(projectId)}", input, cancellationToken);
+
+    public Task DeleteProjectAsync(string projectId, CancellationToken cancellationToken = default) =>
+        SendNoContentAsync(HttpMethod.Delete, $"/api/v1/projects/{Uri.EscapeDataString(projectId)}", cancellationToken);
+
+    public async Task<TaskListResponse> GetTasksAsync(string status = "", string search = "", int limit = 100, CancellationToken cancellationToken = default)
+    {
+        var query = $"?limit={limit}";
+        if (!string.IsNullOrWhiteSpace(status)) query += $"&status={Uri.EscapeDataString(status)}";
+        if (!string.IsNullOrWhiteSpace(search)) query += $"&search={Uri.EscapeDataString(search)}";
+        var result = await GetAsync<TaskListResponse>($"/api/v1/tasks{query}", cancellationToken);
+        result.Tasks ??= [];
+        return result;
+    }
+
+    public Task<BridgeTask> GetTaskAsync(int taskNumber, CancellationToken cancellationToken = default) =>
+        GetAsync<BridgeTask>($"/api/v1/tasks/{taskNumber}", cancellationToken);
+
+    public Task<BridgeTask> CreateTaskAsync(TaskInput input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<BridgeTask>(HttpMethod.Post, "/api/v1/tasks", input, cancellationToken);
+
+    public Task<BridgeTask> ContinueTaskAsync(int taskNumber, TaskInput input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<BridgeTask>(HttpMethod.Post, $"/api/v1/tasks/{taskNumber}/continue", input, cancellationToken);
+
+    public Task<BridgeTask> RetryTaskAsync(int taskNumber, TaskInput input, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<BridgeTask>(HttpMethod.Post, $"/api/v1/tasks/{taskNumber}/retry", input, cancellationToken);
+
+    public Task<BridgeTask> CancelTaskAsync(int taskNumber, CancellationToken cancellationToken = default) =>
+        SendJsonAsync<BridgeTask>(HttpMethod.Post, $"/api/v1/tasks/{taskNumber}/cancel", null, cancellationToken);
+
     public Task<BridgeStatus> UpdateSecurityAsync(string sandboxMode, CancellationToken cancellationToken = default) =>
         SendJsonAsync<BridgeStatus>(HttpMethod.Put, "/api/v1/settings/security", new SecuritySettingsRequest { SandboxMode = sandboxMode }, cancellationToken);
 

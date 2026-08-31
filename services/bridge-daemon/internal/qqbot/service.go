@@ -24,6 +24,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/numberprefix"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/taskcenter"
 )
 
 const (
@@ -74,6 +75,7 @@ type turnRoute struct {
 	SessionKey string
 	ThreadID   string
 	TurnID     string
+	TaskNumber int
 	Revoked    bool
 }
 
@@ -83,6 +85,7 @@ type interactionFlow struct {
 	UserID        string
 	ThreadID      string
 	TurnID        string
+	TaskNumber    int
 	InteractionID string
 	Questions     []interactions.Question
 	Index         int
@@ -101,6 +104,7 @@ type Service struct {
 	commands        *commandregistry.Registry
 	queries         *bridgequery.Service
 	openclaw        conversation.IConversationBackend
+	taskService     *taskcenter.Service
 	backendResolver func(string) string
 
 	ctx    context.Context
@@ -197,6 +201,12 @@ func (s *Service) SetOpenClawBackend(backend conversation.IConversationBackend) 
 	if s.queries != nil {
 		s.queries.SetOpenClawBackend(backend)
 	}
+	s.mu.Unlock()
+}
+
+func (s *Service) SetTaskService(service *taskcenter.Service) {
+	s.mu.Lock()
+	s.taskService = service
 	s.mu.Unlock()
 }
 
@@ -517,7 +527,7 @@ func (s *Service) handleTargetCommand(ctx context.Context, message channels.Inbo
 		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, commandregistry.ActionThreadHistory, append([]string{strconv.Itoa(record.Number)}, invocation.Arguments...))
 	case commandregistry.ActionThreadStop:
 		s.stopThread(ctx, message, record.TargetID)
-	case commandregistry.ActionInteractionCancel:
+	case commandregistry.ActionTaskCancel, commandregistry.ActionInteractionCancel:
 		s.cancelThreadInteraction(ctx, message, record.TargetID)
 	default:
 		s.send(ctx, message.Address, fmt.Sprintf("指令 %s 不支持 #编号 会话上下文。", invocation.Definition.Name))
@@ -533,6 +543,19 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 	if !invocation.Definition.Enabled {
 		s.send(ctx, message.Address, "指令 "+invocation.Definition.Name+" 当前已停用。")
 		return
+	}
+	s.mu.Lock()
+	tasks := s.taskService
+	s.mu.Unlock()
+	if tasks != nil {
+		if result, handled, err := tasks.ExecuteRemoteCommand(ctx, message, invocation); handled {
+			if err != nil {
+				s.send(ctx, message.Address, "任务操作失败："+err.Error())
+			} else {
+				s.send(ctx, message.Address, result)
+			}
+			return
+		}
 	}
 	backend := s.backendForMessage(message)
 	target := s.targetForMessage(message)
@@ -568,6 +591,14 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 			s.commandThread(ctx, message, argument, "stop")
 		} else {
 			s.stopTurn(ctx, message)
+		}
+	case commandregistry.ActionTaskCancel:
+		if backend == conversation.BackendOpenClaw {
+			s.send(ctx, message.Address, bridgequery.NotApplicableText(backend))
+		} else if argument != "" {
+			s.commandThread(ctx, message, argument, "cancel")
+		} else {
+			s.cancelInteraction(ctx, message)
 		}
 	case commandregistry.ActionInteractionCancel:
 		if argument != "" {
@@ -1438,12 +1469,18 @@ func qqbotRelevantEvent(eventType string) bool {
 		events.OpenClawDisconnected, events.OpenClawMessageDelta, events.OpenClawMessageCompleted,
 		events.OpenClawMessageAborted, events.OpenClawMessageFailed:
 		return true
+	case events.TaskWaitingInput, events.TaskCompleted, events.TaskFailed:
+		return true
 	default:
 		return false
 	}
 }
 
 func (s *Service) handleEvent(event events.Event) {
+	if event.EventType == events.TaskWaitingInput || event.EventType == events.TaskCompleted || event.EventType == events.TaskFailed {
+		s.handleTaskNotification(event)
+		return
+	}
 	if event.EventType == events.CodexDisconnected {
 		s.finishRoutesForBackend(conversation.BackendCodex)
 		return
@@ -1475,6 +1512,69 @@ func (s *Service) handleEvent(event events.Event) {
 	}
 	switch event.EventType {
 	case events.TurnCompleted, events.TurnFailed, events.TurnInterrupted:
+		s.removeRoute(route)
+	}
+}
+
+func (s *Service) handleTaskNotification(event events.Event) {
+	s.mu.Lock()
+	tasks := s.taskService
+	profileID := s.channelProfileID
+	s.mu.Unlock()
+	if tasks == nil {
+		return
+	}
+	task, ok := taskcenter.TaskFromEvent(event)
+	if !ok || !strings.EqualFold(task.ChannelType, "qqbot") || (task.ChannelProfileID != "" && task.ChannelProfileID != profileID) {
+		return
+	}
+	address, ok := tasks.NotificationAddress(task)
+	if !ok {
+		return
+	}
+	if task.Status == taskcenter.StatusWaitingInput && attachTaskInteraction(s, task, address) {
+		return
+	}
+	if task.Status == taskcenter.StatusCompleted || task.Status == taskcenter.StatusFailed {
+		s.removeTaskRoute(task)
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	s.send(ctx, address, tasks.NotificationText(task))
+}
+
+// attachTaskInteraction hands a Task-created Codex interaction to the same
+// guarded QQ flow used by ordinary bound turns. This keeps multi-question
+// parsing and user/Address authorization in one existing implementation.
+func attachTaskInteraction(s *Service, task taskcenter.Task, address channels.ChannelAddress) bool {
+	if task.Backend != conversation.BackendCodex || task.TargetID == "" || task.CurrentRunID == "" || task.PendingInteractionID == "" {
+		return false
+	}
+	route := &turnRoute{Address: address, UserID: firstNonEmpty(task.UserID, address.UserID), Backend: conversation.BackendCodex, SessionKey: task.TargetID, ThreadID: task.TargetID, TurnID: task.CurrentRunID, TaskNumber: task.TaskNumber}
+	key := routeMapKey(route.Backend, route.SessionKey, route.TurnID)
+	s.mu.Lock()
+	if existing := s.routes[key]; existing != nil {
+		if !sameAddress(existing.Address, address) || existing.UserID != route.UserID {
+			s.mu.Unlock()
+			return false
+		}
+		route = existing
+	} else {
+		s.routes[key] = route
+	}
+	s.mu.Unlock()
+	s.handleInteractionEvent(events.Event{EventType: events.InteractionRequested, ThreadID: task.TargetID, TurnID: task.CurrentRunID, Payload: map[string]any{"interaction": map[string]any{"id": task.PendingInteractionID}}})
+	return true
+}
+
+func (s *Service) removeTaskRoute(task taskcenter.Task) {
+	if task.TargetID == "" || task.CurrentRunID == "" {
+		return
+	}
+	s.mu.Lock()
+	route := s.routes[routeMapKey(task.Backend, task.TargetID, task.CurrentRunID)]
+	s.mu.Unlock()
+	if route != nil {
 		s.removeRoute(route)
 	}
 }
@@ -1540,11 +1640,11 @@ func (s *Service) handleInteractionEvent(event events.Event) {
 	ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
 	defer cancel()
 	if interaction.Kind != interactions.KindUserInput {
-		s.send(ctx, route.Address, "Codex 正在请求审批。为保证安全，请在 WPF 中允许或拒绝；QQ 不会自动处理审批。")
+		s.send(ctx, route.Address, taskInteractionPrefix(route.TaskNumber)+"Codex 正在请求审批。为保证安全，请在 WPF 中允许或拒绝；QQ 不会自动处理审批。")
 		return
 	}
 	if len(interaction.Questions) == 0 {
-		s.send(ctx, route.Address, "Codex 请求了用户输入，但该问题需要在 WPF 中处理。")
+		s.send(ctx, route.Address, taskInteractionPrefix(route.TaskNumber)+"Codex 请求了用户输入，但该问题需要在 WPF 中处理。")
 		return
 	}
 	expires, err := time.Parse(time.RFC3339Nano, interaction.ExpiresAt)
@@ -1553,6 +1653,7 @@ func (s *Service) handleInteractionEvent(event events.Event) {
 	}
 	flow := &interactionFlow{
 		Expires: expires, Address: route.Address, UserID: route.UserID, ThreadID: route.ThreadID, TurnID: route.TurnID,
+		TaskNumber:    route.TaskNumber,
 		InteractionID: id, Questions: append([]interactions.Question(nil), interaction.Questions...), Answers: make(map[string][]string),
 	}
 	s.mu.Lock()
@@ -1579,9 +1680,10 @@ func (s *Service) presentQuestion(ctx context.Context, interactionID string) {
 	question := flow.Questions[flow.Index]
 	address := flow.Address
 	position, total := flow.Index+1, len(flow.Questions)
+	taskNumber := flow.TaskNumber
 	s.mu.Unlock()
 	var prompt strings.Builder
-	fmt.Fprintf(&prompt, "Codex 需要你的输入（%d/%d）\n", position, total)
+	fmt.Fprintf(&prompt, "%sCodex 需要你的输入（%d/%d）\n", taskInteractionPrefix(taskNumber), position, total)
 	if strings.TrimSpace(question.Header) != "" {
 		prompt.WriteString(strings.TrimSpace(question.Header) + "\n")
 	}
@@ -1601,6 +1703,13 @@ func (s *Service) presentQuestion(ctx context.Context, interactionID string) {
 		prompt.WriteString("\n请直接回复文本。")
 	}
 	s.send(ctx, address, prompt.String())
+}
+
+func taskInteractionPrefix(number int) string {
+	if number < 1 {
+		return ""
+	}
+	return fmt.Sprintf("T%d：", number)
 }
 
 func (s *Service) finishAllRoutes(_ string) {

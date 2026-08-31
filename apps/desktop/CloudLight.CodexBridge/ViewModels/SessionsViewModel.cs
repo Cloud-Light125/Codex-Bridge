@@ -212,6 +212,15 @@ public sealed class SessionsViewModel : ObservableObject
         }
     }
 
+    public async Task SelectThreadByNumberAsync(int number, CancellationToken cancellationToken = default)
+    {
+        if (number < 1) return;
+        if (Threads.All(thread => thread.Number != number))
+            await RefreshAsync(cancellationToken, reloadSelected: false);
+        var thread = Threads.FirstOrDefault(item => item.Number == number);
+        if (thread is not null) SelectedThread = thread;
+    }
+
     public void ApplyEvent(BridgeEvent bridgeEvent)
     {
         if (bridgeEvent.EventType.StartsWith("openclaw.", StringComparison.OrdinalIgnoreCase)) return;

@@ -62,16 +62,18 @@ public partial class App : Application
         var commands = new CommandsViewModel(api, logs, "codex");
         var openClawCommands = new CommandsViewModel(api, logs, "openclaw");
 		var channelProfiles = new ChannelProfilesViewModel(api, settingsService, settings, logs);
+        var tasks = new TasksViewModel(api, logs, sessions, openClaw);
+        var projects = new ProjectsViewModel(api, logs, sessions, openClaw);
         var startup = new StartupService();
         var settingsViewModel = new SettingsViewModel(settingsService, api, settings, logs, startup, codexDiscoveryService,
             new OpenClawSecretService(), new OpenClawDiscoveryService(logs));
 		settingsViewModel.ChannelProfiles = channelProfiles;
         settingsViewModel.UpdateDiscovery(codexDiscovery);
         var logsViewModel = new LogsViewModel(logs, settingsService.LogDirectory);
-        var overview = new OverviewViewModel(sessions, openClaw, channelProfiles, settingsViewModel);
+        var overview = new OverviewViewModel(sessions, openClaw, channelProfiles, settingsViewModel, tasks);
         var mirror = new MirrorViewModel(settingsViewModel);
         var backup = new BackupViewModel(new BackupService(settingsService, logs: logs), logs);
-		_mainViewModel = new MainViewModel(daemon, api, sessions, openClaw, channelProfiles, commands, openClawCommands, overview, mirror, backup,
+		_mainViewModel = new MainViewModel(daemon, api, sessions, openClaw, channelProfiles, commands, openClawCommands, overview, tasks, projects, mirror, backup,
             settingsViewModel, logsViewModel, settings, settingsService, logs, codexDiscoveryService, codexDiscovery);
         backup.StopRuntimeAsync = _mainViewModel.PauseRuntimeAsync;
         backup.RestartRuntimeAsync = _mainViewModel.ResumeRuntimeAsync;

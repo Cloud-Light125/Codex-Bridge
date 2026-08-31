@@ -3,7 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel MaxWidth="1180" HorizontalAlignment="Left">
-            <UniformGrid Columns="4" Margin="0,0,0,16">
+            <UniformGrid Columns="5" Margin="0,0,0,16">
                 <Border Style="{StaticResource MetricCardStyle}" Margin="0,0,12,0">
                     <StackPanel><TextBlock Text="Codex" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding CodexState}" Style="{StaticResource MetricValueStyle}"/><TextBlock Text="{Binding SessionCount}" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
                 </Border>
@@ -15,6 +15,9 @@
                 </Border>
                 <Border Style="{StaticResource MetricCardStyle}">
                     <StackPanel><TextBlock Text="消息同步" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding MirrorState}" Style="{StaticResource MetricValueStyle}"/><TextBlock Text="每次任务只发送最终回答" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
+                </Border>
+                <Border Style="{StaticResource MetricCardStyle}" Margin="12,0,0,0">
+                    <StackPanel><TextBlock Text="任务中心" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding TaskSummary}" Style="{StaticResource MetricValueStyle}" TextWrapping="Wrap"/><TextBlock Text="统一任务状态" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
                 </Border>
             </UniformGrid>
             <Grid>
@@ -33,6 +36,8 @@
                     <StackPanel>
                         <TextBlock Text="最近活动" Style="{StaticResource SectionTitleStyle}"/>
                         <TextBox Text="{Binding RecentActivity, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" Margin="0,16,0,0"/>
+                        <TextBlock Text="最近任务" Style="{StaticResource EyebrowTextStyle}" Margin="0,18,0,4"/>
+                        <TextBox Text="{Binding RecentTasks, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" TextWrapping="Wrap" AcceptsReturn="True" IsReadOnly="True" Height="96" VerticalScrollBarVisibility="Auto"/>
                         <TextBlock Text="首页仅保留运行概况。渠道凭据、同步目标和高级设置分别在对应页面管理。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,18,0,0"/>
                     </StackPanel>
                 </Border>

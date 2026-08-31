@@ -177,6 +177,9 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 
 	payload := threadPayload(raw)
 	cwd := textValue(payload["cwd"])
+	if strings.TrimSpace(request.CWD) != "" {
+		cwd = strings.TrimSpace(request.CWD)
+	}
 	trace := m.beginTurnTrace(threadID, initial)
 	m.logger.Printf("rpcTrace stage=thread/resume-request selectedThreadId=%s requestThreadId=%s", threadID, threadID)
 	resumeRaw, err := client.ThreadResume(ctx, threadID, cwd)

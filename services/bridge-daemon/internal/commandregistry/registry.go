@@ -33,7 +33,15 @@ const (
 	ActionThreadCurrent     = "thread.current"
 	ActionThreadStop        = "thread.stop"
 	ActionInteractionCancel = "interaction.cancel"
+	ActionTaskCancel        = "task.cancel"
 	ActionOpenClawRefresh   = "openclaw.sessions.refresh"
+	ActionTasksList         = "tasks.list"
+	ActionTaskInfo          = "task.info"
+	ActionTaskNew           = "task.new"
+	ActionTaskContinue      = "task.continue"
+	ActionTaskRetry         = "task.retry"
+	ActionProjectsList      = "projects.list"
+	ActionProjectSelect     = "project.select"
 )
 
 const (
@@ -158,8 +166,16 @@ func DefaultActions() []ActionDefinition {
 		{ID: ActionThreadUnbind, DisplayName: "解除绑定", BackendCapability: BackendCapabilityBoth},
 		{ID: ActionThreadCurrent, DisplayName: "查看当前绑定", BackendCapability: BackendCapabilityBoth},
 		{ID: ActionThreadStop, DisplayName: "停止任务", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
-		{ID: ActionInteractionCancel, DisplayName: "取消等待", TargetSupport: true, BackendCapability: BackendCapabilityCodex},
+		{ID: ActionInteractionCancel, DisplayName: "取消等待输入", TargetSupport: true, BackendCapability: BackendCapabilityCodex},
+		{ID: ActionTaskCancel, DisplayName: "取消任务", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
 		{ID: ActionOpenClawRefresh, DisplayName: "刷新 OpenClaw Session", BackendCapability: BackendCapabilityOpenClaw},
+		{ID: ActionTasksList, DisplayName: "查看任务列表", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionTaskInfo, DisplayName: "查看任务详情", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionTaskNew, DisplayName: "创建任务", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionTaskContinue, DisplayName: "继续任务", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionTaskRetry, DisplayName: "重试任务", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionProjectsList, DisplayName: "查看项目列表", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionProjectSelect, DisplayName: "切换项目上下文", BackendCapability: BackendCapabilityBoth},
 	}
 }
 
@@ -180,8 +196,15 @@ func BuiltInDefaults() []DefaultCommandDefinition {
 		{ID: "builtin.unbind", DefaultName: "/unbind", DefaultDisplayName: "解除绑定", DefaultDescription: "解除当前远程聊天的会话绑定", DefaultAction: ActionThreadUnbind, DefaultEnabled: true, DefaultTelegramMenuLabel: "解除绑定"},
 		{ID: "builtin.current", DefaultName: "/current", DefaultDisplayName: "当前绑定", DefaultDescription: "查看当前远程聊天绑定的后端会话", DefaultAction: ActionThreadCurrent, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看当前绑定"},
 		{ID: "builtin.stop", DefaultName: "/stop", DefaultDisplayName: "停止任务", DefaultDescription: "停止当前聊天或指定会话发起的任务", DefaultAction: ActionThreadStop, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号]", DefaultTelegramMenuLabel: "停止任务"},
-		{ID: "builtin.cancel", DefaultName: "/cancel", DefaultDisplayName: "取消等待", DefaultDescription: "取消当前正在等待的 Codex 用户输入", DefaultAction: ActionInteractionCancel, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号]", DefaultTelegramMenuLabel: "取消等待"},
+		{ID: "builtin.cancel", DefaultName: "/cancel", DefaultDisplayName: "取消任务", DefaultDescription: "提供任务编号时取消 Task；不提供编号时保留当前会话的等待输入取消行为", DefaultAction: ActionTaskCancel, DefaultEnabled: true, DefaultParameterHelp: "[任务编号]", DefaultTelegramMenuLabel: "取消任务"},
 		{ID: "builtin.openclaw-refresh", DefaultName: "/oc-refresh", DefaultDisplayName: "刷新 OpenClaw Session", DefaultDescription: "OpenClaw 专属：重新从 Gateway 刷新 Session 列表", DefaultAction: ActionOpenClawRefresh, DefaultEnabled: true, DefaultTelegramMenuLabel: "刷新 OpenClaw Session"},
+		{ID: "builtin.tasks", DefaultName: "/tasks", DefaultDisplayName: "任务列表", DefaultDescription: "查看 Task Center 中的任务；可按 running、waiting、failed、completed 筛选", DefaultAction: ActionTasksList, DefaultEnabled: true, DefaultParameterHelp: "[状态]", DefaultTelegramMenuLabel: "任务列表"},
+		{ID: "builtin.task", DefaultName: "/task", DefaultDisplayName: "任务详情", DefaultDescription: "查看指定任务的状态、会话、结果和摘要", DefaultAction: ActionTaskInfo, DefaultEnabled: true, DefaultParameterHelp: "<任务编号>", DefaultTelegramMenuLabel: "任务详情"},
+		{ID: "builtin.new", DefaultName: "/new", DefaultDisplayName: "创建任务", DefaultDescription: "按项目创建并启动一个新任务", DefaultAction: ActionTaskNew, DefaultEnabled: true, DefaultParameterHelp: "<项目别名> <任务内容>", DefaultTelegramMenuLabel: "创建任务"},
+		{ID: "builtin.continue", DefaultName: "/continue", DefaultDisplayName: "继续任务", DefaultDescription: "在原任务的 Project 和 Conversation 上创建后续任务", DefaultAction: ActionTaskContinue, DefaultEnabled: true, DefaultParameterHelp: "<任务编号> <任务内容>", DefaultTelegramMenuLabel: "继续任务"},
+		{ID: "builtin.retry", DefaultName: "/retry", DefaultDisplayName: "重试任务", DefaultDescription: "重试失败或中断的任务并保留原任务历史", DefaultAction: ActionTaskRetry, DefaultEnabled: true, DefaultParameterHelp: "<任务编号>", DefaultTelegramMenuLabel: "重试任务"},
+		{ID: "builtin.projects", DefaultName: "/projects", DefaultDisplayName: "项目列表", DefaultDescription: "查看可用 Project 及默认 Backend", DefaultAction: ActionProjectsList, DefaultEnabled: true, DefaultTelegramMenuLabel: "项目列表"},
+		{ID: "builtin.project", DefaultName: "/project", DefaultDisplayName: "项目上下文", DefaultDescription: "查看或切换当前远程聊天的 Project 上下文", DefaultAction: ActionProjectSelect, DefaultEnabled: true, DefaultParameterHelp: "[项目别名]", DefaultTelegramMenuLabel: "项目上下文"},
 	}
 }
 

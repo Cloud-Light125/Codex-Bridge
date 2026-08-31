@@ -11,7 +11,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>CloudLight.CodexBridge</AssemblyName>
     <RootNamespace>CloudLight.CodexBridge</RootNamespace>
-	<Version>1.1.5</Version>
+	<Version>1.2.0</Version>
     <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>

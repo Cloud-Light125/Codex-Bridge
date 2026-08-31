@@ -27,6 +27,8 @@ type Paths struct {
 	ConversationNumbersFile    string
 	ThreadNumbersFile          string
 	OpenClawSessionNumbersFile string
+	TasksFile                  string
+	ProjectsFile               string
 	MirrorFile                 string
 	CommandsFile               string
 }
@@ -74,6 +76,8 @@ func UserPaths() (Paths, error) {
 		ConversationNumbersFile:    filepath.Join(stateDir, "conversation-numbers.json"),
 		ThreadNumbersFile:          filepath.Join(stateDir, "thread-numbers.json"),
 		OpenClawSessionNumbersFile: filepath.Join(stateDir, "openclaw-session-numbers.json"),
+		TasksFile:                  filepath.Join(stateDir, "tasks.json"),
+		ProjectsFile:               filepath.Join(stateDir, "projects.json"),
 		MirrorFile:                 filepath.Join(stateDir, "mirror-state.json"),
 		CommandsFile:               filepath.Join(stateDir, "commands.json"),
 	}, nil

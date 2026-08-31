@@ -547,6 +547,133 @@ public sealed class BackendChannelRouteSettings
 	}
 }
 
+public sealed class ProjectListResponse
+{
+    public List<ProjectModel> Projects { get; set; } = [];
+}
+
+public sealed class ProjectModel
+{
+    public string ProjectId { get; set; } = "";
+    public string Name { get; set; } = "";
+    public List<string> Aliases { get; set; } = [];
+    public string WorkingDirectory { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string DefaultBackend { get; set; } = "codex";
+    public int? DefaultConversationNumber { get; set; }
+    public bool AutoCreateConversation { get; set; }
+    public string ReuseStrategy { get; set; } = "default";
+    public bool Enabled { get; set; } = true;
+    public List<string> Tags { get; set; } = [];
+    public string CreatedAt { get; set; } = "";
+    public string UpdatedAt { get; set; } = "";
+    public string AliasText => string.Join(", ", Aliases);
+    public string BackendDisplay => DefaultBackend.Equals("openclaw", StringComparison.OrdinalIgnoreCase) ? "OpenClaw" : "Codex";
+}
+
+public sealed class ProjectInput
+{
+    public string Name { get; set; } = "";
+    public List<string> Aliases { get; set; } = [];
+    public string WorkingDirectory { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string DefaultBackend { get; set; } = "codex";
+    public int? DefaultConversationNumber { get; set; }
+    public bool AutoCreateConversation { get; set; }
+    public string ReuseStrategy { get; set; } = "default";
+    public bool? Enabled { get; set; } = true;
+    public List<string> Tags { get; set; } = [];
+}
+
+public sealed class TaskListResponse
+{
+    public List<BridgeTask> Tasks { get; set; } = [];
+}
+
+public sealed class BridgeTask
+{
+    public string TaskId { get; set; } = "";
+    public int TaskNumber { get; set; }
+    public string Title { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string ProjectId { get; set; } = "";
+    public string ProjectNameSnapshot { get; set; } = "";
+    public string Backend { get; set; } = "";
+    public int ConversationNumber { get; set; }
+    public string TargetId { get; set; } = "";
+    public string Status { get; set; } = "";
+    public string CreatedAt { get; set; } = "";
+    public string StartedAt { get; set; } = "";
+    public string CompletedAt { get; set; } = "";
+    public string LastActivityAt { get; set; } = "";
+    public string CreatedFrom { get; set; } = "";
+    public string ChannelProfileId { get; set; } = "";
+    public string ConversationId { get; set; } = "";
+    public string CurrentRunId { get; set; } = "";
+    public int ParentTaskNumber { get; set; }
+    public int RetryOfTaskNumber { get; set; }
+    public string DispatchState { get; set; } = "";
+    public string PendingInteractionId { get; set; } = "";
+    public string PendingQuestion { get; set; } = "";
+    public TaskSummaryModel Summary { get; set; } = new();
+    public TaskResultModel Result { get; set; } = new();
+    public string LastError { get; set; } = "";
+    public Dictionary<string, string> Metadata { get; set; } = [];
+    public string NumberLabel => TaskNumber > 0 ? $"T{TaskNumber}" : "T?";
+    public string BackendDisplay => Backend.Equals("openclaw", StringComparison.OrdinalIgnoreCase) ? "OpenClaw" : "Codex";
+    public string ConversationDisplay => ConversationNumber > 0 ? $"[{BackendDisplay}] #{ConversationNumber}" : string.IsNullOrWhiteSpace(TargetId) ? "未分配" : $"[{BackendDisplay}] {TargetId}";
+    public string StatusDisplay => Status switch
+    {
+        "queued" => "排队中", "routing" => "路由中", "running" => "运行中", "waiting-input" => "等待输入",
+        "completed" => "已完成", "failed" => "失败", "cancelled" => "已取消", "interrupted" => "已中断", _ => Status
+    };
+    public string CreatedAtDisplay => UiText.LocalDateTime(CreatedAt);
+    public string StartedAtDisplay => UiText.LocalDateTime(StartedAt);
+    public string CompletedAtDisplay => UiText.LocalDateTime(CompletedAt);
+    public string LastActivityAtDisplay => UiText.LocalDateTime(LastActivityAt);
+    public string DurationDisplay => !string.IsNullOrWhiteSpace(Result.Duration) ? Result.Duration : !string.IsNullOrWhiteSpace(Summary.Duration) ? Summary.Duration : Status is "running" or "waiting-input" ? "进行中" : "—";
+    public string SummaryText => string.Join(Environment.NewLine, new[]
+    {
+        ChangedFilesText(), BuildResultsText(), TestResultsText(), string.IsNullOrWhiteSpace(Summary.GitSummary) ? "" : $"Git：{Summary.GitSummary}",
+    }.Where(text => !string.IsNullOrWhiteSpace(text)));
+    private string ChangedFilesText() => Summary.ChangedFiles.Count == 0 ? "" : $"修改：{string.Join(", ", Summary.ChangedFiles)}";
+    private string BuildResultsText() => Summary.BuildResults.Count == 0 ? "" : $"构建：{string.Join("；", Summary.BuildResults)}";
+    private string TestResultsText() => Summary.TestResults.Count == 0 ? "" : $"测试：{string.Join("；", Summary.TestResults)}";
+}
+
+public sealed class TaskSummaryModel
+{
+    public List<string> ChangedFiles { get; set; } = [];
+    public List<string> BuildResults { get; set; } = [];
+    public List<string> TestResults { get; set; } = [];
+    public string GitSummary { get; set; } = "";
+    public string Duration { get; set; } = "";
+}
+
+public sealed class TaskResultModel
+{
+    public bool Success { get; set; }
+    public string FinalText { get; set; } = "";
+    public List<string> ChangedFiles { get; set; } = [];
+    public List<string> BuildResults { get; set; } = [];
+    public List<string> TestResults { get; set; } = [];
+    public string GitSummary { get; set; } = "";
+    public string Duration { get; set; } = "";
+}
+
+public sealed class TaskInput
+{
+    public string Title { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string ProjectId { get; set; } = "";
+    public string Backend { get; set; } = "";
+    public int ConversationNumber { get; set; }
+    public string TargetId { get; set; } = "";
+    public string CreatedFrom { get; set; } = "desktop";
+    public int ParentTaskNumber { get; set; }
+    public int RetryOfTaskNumber { get; set; }
+}
+
 public sealed class BackendChannelRoutingSettings
 {
 	private BackendChannelRouteSettings _codex = new();

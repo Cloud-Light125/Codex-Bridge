@@ -145,11 +145,11 @@ func TestBackendCapabilitiesFilterCommandsAndHelp(t *testing.T) {
 	if !registry.ActionSupportsBackend(ActionOpenClawRefresh, BackendCapabilityOpenClaw) || registry.ActionSupportsBackend(ActionAccountQuota, BackendCapabilityOpenClaw) {
 		t.Fatal("backend capability gate returned the wrong result")
 	}
-	if !containsCommand(openClaw.Commands, "/oc-refresh") || containsCommand(openClaw.Commands, "/running") || containsCommand(openClaw.Commands, "/waiting") || containsCommand(openClaw.Commands, "/failed") || containsCommand(openClaw.Commands, "/quota") || containsCommand(openClaw.Commands, "/cancel") {
+	if !containsCommand(openClaw.Commands, "/oc-refresh") || !containsCommand(openClaw.Commands, "/tasks") || !containsCommand(openClaw.Commands, "/new") || !containsCommand(openClaw.Commands, "/project") || containsCommand(openClaw.Commands, "/running") || containsCommand(openClaw.Commands, "/waiting") || containsCommand(openClaw.Commands, "/failed") || containsCommand(openClaw.Commands, "/quota") || !containsCommand(openClaw.Commands, "/cancel") {
 		t.Fatalf("unexpected OpenClaw command projection: %#v", openClaw.Commands)
 	}
 	codex := registry.ListForBackend(BackendCapabilityCodex)
-	if containsCommand(codex.Commands, "/oc-refresh") {
+	if containsCommand(codex.Commands, "/oc-refresh") || !containsCommand(codex.Commands, "/tasks") || !containsCommand(codex.Commands, "/new") || !containsCommand(codex.Commands, "/project") {
 		t.Fatalf("OpenClaw-only command leaked into Codex projection: %#v", codex.Commands)
 	}
 	help := registry.HelpTextForBackend(BackendCapabilityOpenClaw)

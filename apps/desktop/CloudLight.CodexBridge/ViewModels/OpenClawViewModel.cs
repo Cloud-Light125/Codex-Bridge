@@ -127,6 +127,15 @@ public sealed class OpenClawViewModel : ObservableObject
         finally { IsBusy = false; }
     }
 
+    public async Task SelectSessionByNumberAsync(int number, CancellationToken cancellationToken = default)
+    {
+        if (number < 1) return;
+        if (Sessions.All(session => session.Number != number))
+            await RefreshAsync(cancellationToken, reloadSelected: false);
+        var session = Sessions.FirstOrDefault(item => item.Number == number);
+        if (session is not null) SelectedSession = session;
+    }
+
     public void ApplyEvent(BridgeEvent bridgeEvent)
     {
         if (!bridgeEvent.EventType.StartsWith("openclaw.", StringComparison.OrdinalIgnoreCase)) return;

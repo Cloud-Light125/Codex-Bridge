@@ -25,6 +25,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/numberprefix"
 	bridgequery "cloudlight.dev/codexbridge/bridge-daemon/internal/query"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/taskcenter"
 )
 
 type Control interface {
@@ -53,6 +54,7 @@ type turnRoute struct {
 	SessionKey string
 	ThreadID   string
 	TurnID     string
+	TaskNumber int
 	Revoked    bool
 }
 
@@ -85,6 +87,7 @@ type multiSession struct {
 	UserID        string
 	ThreadID      string
 	TurnID        string
+	TaskNumber    int
 	InteractionID string
 	Question      interactions.Question
 	Selected      map[string]bool
@@ -97,6 +100,7 @@ type interactionFlow struct {
 	UserID        string
 	ThreadID      string
 	TurnID        string
+	TaskNumber    int
 	InteractionID string
 	Questions     []interactions.Question
 	Index         int
@@ -114,6 +118,7 @@ type Service struct {
 	commands        *commandregistry.Registry
 	queries         *bridgequery.Service
 	openclaw        conversation.IConversationBackend
+	taskService     *taskcenter.Service
 	backendResolver func(string) string
 
 	ctx    context.Context
@@ -210,6 +215,12 @@ func (s *Service) SetOpenClawBackend(backend conversation.IConversationBackend) 
 	if s.queries != nil {
 		s.queries.SetOpenClawBackend(backend)
 	}
+	s.mu.Unlock()
+}
+
+func (s *Service) SetTaskService(service *taskcenter.Service) {
+	s.mu.Lock()
+	s.taskService = service
 	s.mu.Unlock()
 }
 
@@ -579,7 +590,7 @@ func (s *Service) handleTargetCommand(ctx context.Context, message channels.Inbo
 		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, commandregistry.ActionThreadHistory, append([]string{strconv.Itoa(record.Number)}, invocation.Arguments...))
 	case commandregistry.ActionThreadStop:
 		s.stopThread(ctx, message, record.TargetID)
-	case commandregistry.ActionInteractionCancel:
+	case commandregistry.ActionTaskCancel, commandregistry.ActionInteractionCancel:
 		s.cancelThreadInteraction(ctx, message, record.TargetID)
 	default:
 		s.send(ctx, message.Address, fmt.Sprintf("指令 %s 不支持 #编号 会话上下文。", invocation.Definition.Name))
@@ -595,6 +606,19 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 	if !invocation.Definition.Enabled {
 		s.send(ctx, message.Address, "指令 "+invocation.Definition.Name+" 当前已停用。")
 		return
+	}
+	s.mu.Lock()
+	tasks := s.taskService
+	s.mu.Unlock()
+	if tasks != nil {
+		if result, handled, err := tasks.ExecuteRemoteCommand(ctx, message, invocation); handled {
+			if err != nil {
+				s.send(ctx, message.Address, "任务操作失败："+err.Error())
+			} else {
+				s.send(ctx, message.Address, result)
+			}
+			return
+		}
 	}
 	backend := s.backendForMessage(message)
 	target := s.targetForMessage(message)
@@ -630,6 +654,14 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 			s.commandThread(ctx, message, argument, "stop")
 		} else {
 			s.stopTurn(ctx, message)
+		}
+	case commandregistry.ActionTaskCancel:
+		if backend == conversation.BackendOpenClaw {
+			s.send(ctx, message.Address, bridgequery.NotApplicableText(backend))
+		} else if argument != "" {
+			s.commandThread(ctx, message, argument, "cancel")
+		} else {
+			s.send(ctx, message.Address, "请使用 #编号 /cancel 指定等待输入的会话。")
 		}
 	case commandregistry.ActionInteractionCancel:
 		if argument != "" {
@@ -1404,12 +1436,18 @@ func telegramRelevantEvent(eventType string) bool {
 		events.OpenClawDisconnected, events.OpenClawMessageDelta, events.OpenClawMessageCompleted,
 		events.OpenClawMessageAborted, events.OpenClawMessageFailed:
 		return true
+	case events.TaskWaitingInput, events.TaskCompleted, events.TaskFailed:
+		return true
 	default:
 		return false
 	}
 }
 
 func (s *Service) handleEvent(event events.Event) {
+	if event.EventType == events.TaskWaitingInput || event.EventType == events.TaskCompleted || event.EventType == events.TaskFailed {
+		s.handleTaskNotification(event)
+		return
+	}
 	if event.EventType == events.CodexDisconnected {
 		s.finishRoutesForBackend(conversation.BackendCodex)
 		return
@@ -1442,6 +1480,69 @@ func (s *Service) handleEvent(event events.Event) {
 	}
 	switch event.EventType {
 	case events.TurnCompleted, events.TurnFailed, events.TurnInterrupted:
+		s.removeRoute(route)
+	}
+}
+
+func (s *Service) handleTaskNotification(event events.Event) {
+	s.mu.Lock()
+	tasks := s.taskService
+	profileID := s.channelProfileID
+	s.mu.Unlock()
+	if tasks == nil {
+		return
+	}
+	task, ok := taskcenter.TaskFromEvent(event)
+	if !ok || !strings.EqualFold(task.ChannelType, "telegram") || (task.ChannelProfileID != "" && task.ChannelProfileID != profileID) {
+		return
+	}
+	address, ok := tasks.NotificationAddress(task)
+	if !ok {
+		return
+	}
+	if task.Status == taskcenter.StatusWaitingInput && attachTaskInteraction(s, task, address) {
+		return
+	}
+	if task.Status == taskcenter.StatusCompleted || task.Status == taskcenter.StatusFailed {
+		s.removeTaskRoute(task)
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	s.send(ctx, address, tasks.NotificationText(task))
+}
+
+// attachTaskInteraction hands a Task-created Codex interaction to the same
+// guarded Telegram flow used by ordinary bound turns. This keeps multi-question
+// parsing and user/Address authorization in one existing implementation.
+func attachTaskInteraction(s *Service, task taskcenter.Task, address channels.ChannelAddress) bool {
+	if task.Backend != conversation.BackendCodex || task.TargetID == "" || task.CurrentRunID == "" || task.PendingInteractionID == "" {
+		return false
+	}
+	route := &turnRoute{Address: address, UserID: firstNonEmpty(task.UserID, address.UserID), Backend: conversation.BackendCodex, SessionKey: task.TargetID, ThreadID: task.TargetID, TurnID: task.CurrentRunID, TaskNumber: task.TaskNumber}
+	key := routeMapKey(route.Backend, route.SessionKey, route.TurnID)
+	s.mu.Lock()
+	if existing := s.routes[key]; existing != nil {
+		if !sameAddress(existing.Address, address) || existing.UserID != route.UserID {
+			s.mu.Unlock()
+			return false
+		}
+		route = existing
+	} else {
+		s.routes[key] = route
+	}
+	s.mu.Unlock()
+	s.handleInteractionEvent(events.Event{EventType: events.InteractionRequested, ThreadID: task.TargetID, TurnID: task.CurrentRunID, Payload: map[string]any{"interaction": map[string]any{"id": task.PendingInteractionID}}})
+	return true
+}
+
+func (s *Service) removeTaskRoute(task taskcenter.Task) {
+	if task.TargetID == "" || task.CurrentRunID == "" {
+		return
+	}
+	s.mu.Lock()
+	route := s.routes[routeMapKey(task.Backend, task.TargetID, task.CurrentRunID)]
+	s.mu.Unlock()
+	if route != nil {
 		s.removeRoute(route)
 	}
 }
@@ -1593,11 +1694,11 @@ func (s *Service) handleInteractionEvent(event events.Event) {
 	ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
 	defer cancel()
 	if interaction.Kind != interactions.KindUserInput {
-		s.send(ctx, route.Address, "Codex needs approval. For safety, approve or deny this request in the WPF app.")
+		s.send(ctx, route.Address, taskInteractionPrefix(route.TaskNumber)+"Codex needs approval. For safety, approve or deny this request in the WPF app.")
 		return
 	}
 	if len(interaction.Questions) == 0 {
-		s.send(ctx, route.Address, "Codex requested input, but this question must be handled in WPF.")
+		s.send(ctx, route.Address, taskInteractionPrefix(route.TaskNumber)+"Codex requested input, but this question must be handled in WPF.")
 		return
 	}
 	expires, err := time.Parse(time.RFC3339Nano, interaction.ExpiresAt)
@@ -1611,7 +1712,7 @@ func (s *Service) handleInteractionEvent(event events.Event) {
 	}
 	s.flows[interaction.ID] = &interactionFlow{
 		Expires: expires, Address: route.Address, UserID: route.UserID, ThreadID: route.ThreadID,
-		TurnID: route.TurnID, InteractionID: interaction.ID, Questions: append([]interactions.Question(nil), interaction.Questions...), Answers: make(map[string][]string),
+		TurnID: route.TurnID, TaskNumber: route.TaskNumber, InteractionID: interaction.ID, Questions: append([]interactions.Question(nil), interaction.Questions...), Answers: make(map[string][]string),
 	}
 	s.mu.Unlock()
 	s.presentInteractionQuestion(ctx, interaction.ID)
@@ -1628,7 +1729,7 @@ func (s *Service) presentInteractionQuestion(ctx context.Context, interactionID 
 		return
 	}
 	question := flow.Questions[flow.Index]
-	address, userID, threadID, turnID, expires := flow.Address, flow.UserID, flow.ThreadID, flow.TurnID, flow.Expires
+	address, userID, threadID, turnID, expires, taskNumber := flow.Address, flow.UserID, flow.ThreadID, flow.TurnID, flow.Expires, flow.TaskNumber
 	s.mu.Unlock()
 	switch question.Type {
 	case "single-choice":
@@ -1637,10 +1738,10 @@ func (s *Service) presentInteractionQuestion(ctx context.Context, interactionID 
 			token := s.newCallback(callbackAction{Kind: "flow-answer", Address: address, UserID: userID, ThreadID: threadID, TurnID: turnID, InteractionID: interactionID, QuestionID: question.ID, Value: option.Value, Expires: expires})
 			rows = append(rows, channels.ActionRow{Buttons: []channels.Button{{Label: truncateRunes(option.Label, 54), Value: token}}})
 		}
-		_, _ = s.sendOutbound(ctx, channels.OutboundMessage{Address: address, Text: questionPrompt(question), Actions: rows})
+		_, _ = s.sendOutbound(ctx, channels.OutboundMessage{Address: address, Text: taskQuestionPrompt(taskNumber, question), Actions: rows})
 	case "multiple-choice":
 		sessionID := randomToken()
-		session := &multiSession{Expires: expires, Address: address, UserID: userID, ThreadID: threadID, TurnID: turnID, InteractionID: interactionID, Question: question, Selected: make(map[string]bool)}
+		session := &multiSession{Expires: expires, Address: address, UserID: userID, ThreadID: threadID, TurnID: turnID, TaskNumber: taskNumber, InteractionID: interactionID, Question: question, Selected: make(map[string]bool)}
 		s.mu.Lock()
 		s.sessions[sessionID] = session
 		s.mu.Unlock()
@@ -1651,7 +1752,7 @@ func (s *Service) presentInteractionQuestion(ctx context.Context, interactionID 
 		s.waits[waitKey(address, userID, threadID)] = wait
 		s.waits[waitKey(address, userID)] = wait
 		s.mu.Unlock()
-		s.send(ctx, address, questionPrompt(question)+"\nReply with your next text message.")
+		s.send(ctx, address, taskQuestionPrompt(taskNumber, question)+"\nReply with your next text message.")
 	}
 }
 
@@ -1674,7 +1775,7 @@ func (s *Service) renderMulti(ctx context.Context, sessionID string, session *mu
 	}
 	submit := s.newCallback(callbackAction{Kind: "submit-multi", Address: session.Address, UserID: session.UserID, ThreadID: session.ThreadID, TurnID: session.TurnID, InteractionID: session.InteractionID, QuestionID: session.Question.ID, SessionID: sessionID, Expires: session.Expires})
 	rows = append(rows, channels.ActionRow{Buttons: []channels.Button{{Label: "Submit", Value: submit}}})
-	message := channels.OutboundMessage{Address: session.Address, Text: questionPrompt(session.Question), Actions: rows}
+	message := channels.OutboundMessage{Address: session.Address, Text: taskQuestionPrompt(session.TaskNumber, session.Question), Actions: rows}
 	if session.MessageID == "" {
 		result, err := s.sendOutbound(ctx, message)
 		if err == nil {
@@ -2266,6 +2367,21 @@ func questionPrompt(question interactions.Question) string {
 		return question.Header + "\n" + question.Text
 	}
 	return question.Text
+}
+
+func taskQuestionPrompt(number int, question interactions.Question) string {
+	prompt := questionPrompt(question)
+	if number < 1 {
+		return prompt
+	}
+	return fmt.Sprintf("T%d：%s", number, prompt)
+}
+
+func taskInteractionPrefix(number int) string {
+	if number < 1 {
+		return ""
+	}
+	return fmt.Sprintf("T%d: ", number)
 }
 
 func interactionIDFromPayload(payload map[string]any) string {

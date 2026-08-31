@@ -39,6 +39,11 @@ const (
 	TurnCompleted            = "turn.completed"
 	TurnFailed               = "turn.failed"
 	TurnPersistence          = "turn.persistence_changed"
+	TaskUpdated              = "task.updated"
+	TaskStateChanged         = "task.state_changed"
+	TaskWaitingInput         = "task.waiting_input"
+	TaskCompleted            = "task.completed"
+	TaskFailed               = "task.failed"
 	Error                    = "error"
 	BindingCreated           = "binding.created"
 	BindingDeleted           = "binding.deleted"
@@ -251,6 +256,7 @@ func reliableEvent(eventType string) bool {
 	switch eventType {
 	case CodexDisconnected, InteractionRequested, InteractionResolved,
 		TurnInterrupted, TurnCompleted, TurnFailed, TurnPersistence,
+		TaskUpdated, TaskStateChanged, TaskWaitingInput, TaskCompleted, TaskFailed,
 		BindingCreated, BindingDeleted,
 		ChannelStatusChanged, ChannelConnected, ChannelDisconnected, ChannelError,
 		TelegramPollingStarted, TelegramPollingStopped, TelegramRateLimited,

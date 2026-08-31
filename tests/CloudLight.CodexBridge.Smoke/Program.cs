@@ -447,6 +447,8 @@ await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "mirror-state.jso
 await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "thread-numbers.json"), "{\"thread-a\":41}");
 await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "openclaw-session-numbers.json"), "{\"version\":1,\"nextNumber\":2,\"sessions\":[{\"sessionKey\":\"agent:main:main\",\"number\":1}]}");
 await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "conversation-numbers.json"), "{\"version\":1,\"nextNumber\":3,\"conversations\":[{\"number\":1,\"backend\":\"codex\",\"targetId\":\"thread-a\"},{\"number\":2,\"backend\":\"openclaw\",\"targetId\":\"agent:main:main\"}]}");
+await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "projects.json"), "{\"version\":1,\"projects\":[{\"projectId\":\"project-xiaomi\",\"name\":\"CloudLight XiaoMi\",\"aliases\":[\"xiaomi\"],\"workingDirectory\":\"C:\\\\code\\\\CloudLight XiaoMi\",\"defaultBackend\":\"codex\",\"defaultConversationNumber\":1,\"autoCreateConversation\":false,\"reuseStrategy\":\"fixed\",\"enabled\":true}]}");
+await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "data", "tasks.json"), "{\"version\":1,\"nextTaskNumber\":109,\"tasks\":[{\"taskId\":\"task-108\",\"taskNumber\":108,\"title\":\"修复统计\",\"description\":\"修复统计页面在线时间问题\",\"projectId\":\"project-xiaomi\",\"projectNameSnapshot\":\"CloudLight XiaoMi\",\"backend\":\"codex\",\"conversationNumber\":1,\"targetId\":\"thread-a\",\"status\":\"completed\",\"createdAt\":\"2026-08-31T00:00:00Z\",\"lastActivityAt\":\"2026-08-31T00:01:00Z\",\"createdFrom\":\"desktop\",\"dispatchState\":\"dispatched\",\"result\":{\"success\":true,\"finalText\":\"TASK CENTER TEST OK\"}}]}");
 await File.WriteAllBytesAsync(Path.Combine(bridgeLocal, "secrets", "qqbot-app-secret.dat"), [1, 2, 3, 4]);
 await File.WriteAllBytesAsync(Path.Combine(bridgeLocal, "secrets", "telegram-token.dat"), [5, 6, 7, 8]);
 await File.WriteAllTextAsync(Path.Combine(bridgeLocal, "logs", "bridge-daemon.log"), "runtime");
@@ -457,7 +459,10 @@ var service = new BackupService(settings, codex, bridgeLocal, bridgeRoaming);
 var backupPath = Path.Combine(backups, "roundtrip.clcbak");
 var result = await service.CreateBackupAsync(backupPath, true, true);
 Assert(result.IsComplete, "备份必须完整成功");
-Assert(result.Manifest.FileCount == 13, $"预期 13 个持久化文件，实际 {result.Manifest.FileCount}");
+Assert(result.Manifest.FileCount == 15, $"预期 15 个持久化文件，实际 {result.Manifest.FileCount}");
+Assert(result.Manifest.Modules.Any(module => module.Module == BackupModules.TaskCenter), "任务与项目必须单独作为可恢复模块记录");
+Assert(result.Manifest.Files.Any(file => file.RelativePath == "bridge/local/data/tasks.json") &&
+       result.Manifest.Files.Any(file => file.RelativePath == "bridge/local/data/projects.json"), "备份 manifest 必须记录 tasks.json 和 projects.json");
 Assert(result.Manifest.ExcludedRuntimeFiles.Any(path => path.Contains("cache", StringComparison.OrdinalIgnoreCase)), "cache 必须在创建阶段排除");
 Assert(result.Manifest.ExcludedRuntimeFiles.Any(path => path.Contains("tmp", StringComparison.OrdinalIgnoreCase)), "tmp/lock 必须在创建阶段排除");
 Assert(result.Manifest.ExcludedRuntimeFiles.Any(path => path.Contains("logs", StringComparison.OrdinalIgnoreCase)), "日志必须在创建阶段排除");
@@ -530,6 +535,24 @@ var restoredBindings = await File.ReadAllTextAsync(Path.Combine(bridgeLocal, "bi
 Assert(restoredBindings.Contains("binding-a") && restoredBindings.Contains("openclaw") && restoredBindings.Contains("agent:main:main"), "有效 bindings 必须恢复 backend/targetId");
 var restoredConversationNumbers = await File.ReadAllTextAsync(Path.Combine(bridgeLocal, "data", "conversation-numbers.json"));
 Assert(restoredConversationNumbers.Contains("openclaw") && restoredConversationNumbers.Contains("agent:main:main"), "全局 conversation registry 必须恢复 backend/targetId");
+var restoredProjects = await File.ReadAllTextAsync(Path.Combine(bridgeLocal, "data", "projects.json"));
+var restoredTasks = await File.ReadAllTextAsync(Path.Combine(bridgeLocal, "data", "tasks.json"));
+Assert(restoredProjects.Contains("project-xiaomi") && restoredProjects.Contains("xiaomi"), "Project 数据必须恢复并保留 alias");
+Assert(restoredTasks.Contains("project-xiaomi") && restoredTasks.Contains("conversationNumber") && restoredTasks.Contains("TASK CENTER TEST OK"), "Task 数据必须恢复并保留 Project/Conversation 关系");
+using var restoredProjectDocument = JsonDocument.Parse(restoredProjects);
+var restoredProject = restoredProjectDocument.RootElement.GetProperty("projects").EnumerateArray()
+    .First(project => project.GetProperty("projectId").GetString() == "project-xiaomi");
+Assert(restoredProject.GetProperty("defaultBackend").GetString() == "codex" &&
+       restoredProject.GetProperty("defaultConversationNumber").GetInt32() == 1,
+       "恢复后的 Project 必须保留 Backend/Conversation 路由");
+using var restoredTaskDocument = JsonDocument.Parse(restoredTasks);
+var restoredTask = restoredTaskDocument.RootElement.GetProperty("tasks").EnumerateArray()
+    .First(task => task.GetProperty("taskNumber").GetInt32() == 108);
+Assert(restoredTask.GetProperty("projectId").GetString() == "project-xiaomi" &&
+       restoredTask.GetProperty("backend").GetString() == "codex" &&
+       restoredTask.GetProperty("conversationNumber").GetInt32() == 1 &&
+       restoredTask.GetProperty("targetId").GetString() == "thread-a",
+       "恢复后的 Task 必须保留 Project/Backend/Conversation/TargetId 关系");
 
 var legacy = Path.Combine(backups, "legacy-failed-files.clcbak");
 File.Copy(backupPath, legacy);

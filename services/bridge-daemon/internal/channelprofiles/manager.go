@@ -25,6 +25,7 @@ import (
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/qqbot"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/taskcenter"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/telegram"
 )
 
@@ -149,6 +150,7 @@ type Manager struct {
 	registry  any
 	commands  *commandregistry.Registry
 	openclaw  conversation.IConversationBackend
+	tasks     *taskcenter.Service
 	profiles  map[string]*profile
 	resources map[string]*resource // credential key -> resource
 	byID      map[string]*resource // canonical physical resource id -> resource
@@ -188,6 +190,20 @@ func (m *Manager) SetCommandRegistry(commands *commandregistry.Registry) {
 		}
 		if item.qq != nil {
 			item.qq.SetCommandRegistry(commands)
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetTaskService(service *taskcenter.Service) {
+	m.mu.Lock()
+	m.tasks = service
+	for _, item := range m.resources {
+		if item.telegram != nil {
+			item.telegram.SetTaskService(service)
+		}
+		if item.qq != nil {
+			item.qq.SetTaskService(service)
 		}
 	}
 	m.mu.Unlock()
@@ -725,6 +741,7 @@ func (m *Manager) newResourceLocked(request ConfigureRequest, key string) (*reso
 		item.telegram.SetBindingPreparer(m.PrepareBinding)
 		item.telegram.SetBackendResolver(m.CurrentBackend)
 		item.telegram.SetOpenClawBackend(m.openclaw)
+		item.telegram.SetTaskService(m.tasks)
 		if m.commands != nil {
 			item.telegram.SetCommandRegistry(m.commands)
 		}
@@ -734,6 +751,7 @@ func (m *Manager) newResourceLocked(request ConfigureRequest, key string) (*reso
 		item.qq.SetBindingPreparer(m.PrepareBinding)
 		item.qq.SetBackendResolver(m.CurrentBackend)
 		item.qq.SetOpenClawBackend(m.openclaw)
+		item.qq.SetTaskService(m.tasks)
 		if m.commands != nil {
 			item.qq.SetCommandRegistry(m.commands)
 		}

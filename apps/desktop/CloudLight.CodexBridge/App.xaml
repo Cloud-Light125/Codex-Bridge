@@ -190,6 +190,8 @@
             </Style>
 
             <DataTemplate DataType="{x:Type viewModels:OverviewViewModel}"><views:OverviewView /></DataTemplate>
+			<DataTemplate DataType="{x:Type viewModels:TasksViewModel}"><views:TasksView /></DataTemplate>
+			<DataTemplate DataType="{x:Type viewModels:ProjectsViewModel}"><views:ProjectsView /></DataTemplate>
             <DataTemplate DataType="{x:Type viewModels:SessionsViewModel}"><views:SessionsView /></DataTemplate>
 			<DataTemplate DataType="{x:Type viewModels:OpenClawViewModel}"><views:OpenClawView /></DataTemplate>
 			<DataTemplate DataType="{x:Type viewModels:ChannelProfilesViewModel}"><views:ChannelProfilesView /></DataTemplate>

@@ -26,6 +26,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/openclaw"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/qqbot"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/taskcenter"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/telegram"
 )
 
@@ -38,6 +39,7 @@ type Server struct {
 	logger   *bridgelog.SafeLogger
 	profiles *channelprofiles.Manager
 	openclaw *openclaw.Service
+	tasks    *taskcenter.Service
 	mirror   *mirror.Service
 	commands *commandregistry.Registry
 	http     *http.Server
@@ -59,6 +61,16 @@ func New(token string, runtimeManager *bridgeruntime.Manager, controlService *co
 	mux.HandleFunc("GET /api/v1/interactions", server.authorized(server.interactionList))
 	mux.HandleFunc("GET /api/v1/interactions/{interactionId}", server.authorized(server.interaction))
 	mux.HandleFunc("POST /api/v1/interactions/{interactionId}/respond", server.authorized(server.respondInteraction))
+	mux.HandleFunc("GET /api/v1/projects", server.authorized(server.projectList))
+	mux.HandleFunc("POST /api/v1/projects", server.authorized(server.projectCreate))
+	mux.HandleFunc("PUT /api/v1/projects/{projectId}", server.authorized(server.projectUpdate))
+	mux.HandleFunc("DELETE /api/v1/projects/{projectId}", server.authorized(server.projectDelete))
+	mux.HandleFunc("GET /api/v1/tasks", server.authorized(server.taskList))
+	mux.HandleFunc("POST /api/v1/tasks", server.authorized(server.taskCreate))
+	mux.HandleFunc("GET /api/v1/tasks/{taskNumber}", server.authorized(server.taskGet))
+	mux.HandleFunc("POST /api/v1/tasks/{taskNumber}/continue", server.authorized(server.taskContinue))
+	mux.HandleFunc("POST /api/v1/tasks/{taskNumber}/retry", server.authorized(server.taskRetry))
+	mux.HandleFunc("POST /api/v1/tasks/{taskNumber}/cancel", server.authorized(server.taskCancel))
 	mux.HandleFunc("GET /api/v1/bindings", server.authorized(server.bindingList))
 	mux.HandleFunc("POST /api/v1/bindings", server.authorized(server.createBinding))
 	mux.HandleFunc("DELETE /api/v1/bindings/{bindingId}", server.authorized(server.deleteBinding))
@@ -117,6 +129,10 @@ func New(token string, runtimeManager *bridgeruntime.Manager, controlService *co
 // current api.New call shape and makes OpenClaw additive.
 func (s *Server) SetOpenClawBackend(backend *openclaw.Service) {
 	s.openclaw = backend
+}
+
+func (s *Server) SetTaskService(service *taskcenter.Service) {
+	s.tasks = service
 }
 
 func (s *Server) commandList(response http.ResponseWriter, request *http.Request) {
@@ -434,6 +450,224 @@ func (s *Server) respondInteraction(response http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) projectList(response http.ResponseWriter, _ *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"projects": s.tasks.Projects().List()})
+}
+
+func (s *Server) projectCreate(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	var input taskcenter.ProjectInput
+	if !decodeBody(response, request, 64*1024, &input) {
+		return
+	}
+	project, err := s.tasks.Projects().Create(input)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, project)
+}
+
+func (s *Server) projectUpdate(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	projectID, ok := pathID(response, request.PathValue("projectId"), "Project")
+	if !ok {
+		return
+	}
+	var input taskcenter.ProjectInput
+	if !decodeBody(response, request, 64*1024, &input) {
+		return
+	}
+	project, err := s.tasks.Projects().Update(projectID, input)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, project)
+}
+
+func (s *Server) projectDelete(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	projectID, ok := pathID(response, request.PathValue("projectId"), "Project")
+	if !ok {
+		return
+	}
+	if _, err := s.tasks.DeleteProject(projectID); err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) taskList(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	status := strings.TrimSpace(request.URL.Query().Get("status"))
+	if status != "" {
+		valid := map[string]bool{
+			taskcenter.StatusQueued: true, taskcenter.StatusRouting: true, taskcenter.StatusRunning: true,
+			taskcenter.StatusWaitingInput: true, taskcenter.StatusCompleted: true, taskcenter.StatusFailed: true,
+			taskcenter.StatusCancelled: true, taskcenter.StatusInterrupted: true,
+		}
+		if !valid[status] {
+			writeError(response, http.StatusBadRequest, "invalid_task_status", "无效的任务状态筛选")
+			return
+		}
+	}
+	limit := 100
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 500 {
+			writeError(response, http.StatusBadRequest, "invalid_limit", "limit 必须是 1 到 500 之间的整数")
+			return
+		}
+		limit = parsed
+	}
+	tasks := s.tasks.Tasks().List(taskcenter.TaskFilter{Status: status, Search: request.URL.Query().Get("search")})
+	if len(tasks) > limit {
+		tasks = tasks[:limit]
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"tasks": tasks})
+}
+
+func (s *Server) taskCreate(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	var input taskcenter.TaskInput
+	if !decodeBody(response, request, 128*1024, &input) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 60*time.Second)
+	defer cancel()
+	task, err := s.tasks.CreateTask(ctx, input)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, task)
+}
+
+func (s *Server) taskGet(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	number, ok := taskNumberPath(response, request.PathValue("taskNumber"))
+	if !ok {
+		return
+	}
+	task, found := s.tasks.Tasks().Get(number)
+	if !found {
+		writeError(response, http.StatusNotFound, "task_not_found", "任务不存在")
+		return
+	}
+	writeJSON(response, http.StatusOK, task)
+}
+
+func (s *Server) taskContinue(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	number, ok := taskNumberPath(response, request.PathValue("taskNumber"))
+	if !ok {
+		return
+	}
+	var input taskcenter.TaskInput
+	if !decodeOptionalBody(response, request, 128*1024, &input) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 60*time.Second)
+	defer cancel()
+	task, err := s.tasks.ContinueTask(ctx, number, input)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, task)
+}
+
+func (s *Server) taskRetry(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	number, ok := taskNumberPath(response, request.PathValue("taskNumber"))
+	if !ok {
+		return
+	}
+	var input taskcenter.TaskInput
+	if !decodeOptionalBody(response, request, 128*1024, &input) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 60*time.Second)
+	defer cancel()
+	task, err := s.tasks.RetryTask(ctx, number, input)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, task)
+}
+
+func (s *Server) taskCancel(response http.ResponseWriter, request *http.Request) {
+	if !s.requireTasks(response) {
+		return
+	}
+	number, ok := taskNumberPath(response, request.PathValue("taskNumber"))
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	defer cancel()
+	task, err := s.tasks.CancelTask(ctx, number)
+	if err != nil {
+		s.writeTaskError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusAccepted, task)
+}
+
+func (s *Server) requireTasks(response http.ResponseWriter) bool {
+	if s.tasks == nil || s.tasks.Tasks() == nil || s.tasks.Projects() == nil {
+		writeError(response, http.StatusServiceUnavailable, "tasks_unavailable", "任务中心尚未初始化")
+		return false
+	}
+	return true
+}
+
+func taskNumberPath(response http.ResponseWriter, value string) (int, bool) {
+	value = strings.TrimSpace(strings.Trim(value, "#Tt[]"))
+	number, err := strconv.Atoi(value)
+	if err != nil || number < 1 {
+		writeError(response, http.StatusBadRequest, "invalid_task_number", "任务编号无效")
+		return 0, false
+	}
+	return number, true
+}
+
+func (s *Server) writeTaskError(response http.ResponseWriter, err error) {
+	message := "任务操作失败"
+	if err != nil {
+		message = err.Error()
+	}
+	status, code := http.StatusBadRequest, "task_request_failed"
+	if errors.Is(err, taskcenter.ErrTaskNotFound) || errors.Is(err, taskcenter.ErrProjectNotFound) || strings.Contains(message, "不存在") {
+		status, code = http.StatusNotFound, "task_not_found"
+	} else if strings.Contains(message, "忙") || strings.Contains(message, "活动任务") || strings.Contains(message, "只能") {
+		status, code = http.StatusConflict, "task_conflict"
+	}
+	writeError(response, status, code, message)
 }
 
 func (s *Server) bindingList(response http.ResponseWriter, _ *http.Request) {
