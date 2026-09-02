@@ -50,10 +50,11 @@ func normalizeThreadSummary(raw map[string]any) ThreadSummary {
 	}
 	return ThreadSummary{
 		ThreadID: id, Title: title, Summary: preview, CWD: stringValue(payload["cwd"]),
-		Model:     stringValue(firstValue(payload, "model", "modelId", "model_id")),
-		CreatedAt: timeValue(firstValue(payload, "createdAt", "created_at")),
-		UpdatedAt: timeValue(firstValue(payload, "updatedAt", "updated_at")),
-		Archived:  archived, Status: statusValue(payload["status"]),
+		Model:       stringValue(firstValue(payload, "model", "modelId", "model_id")),
+		CreatedAt:   timeValue(firstValue(payload, "createdAt", "created_at")),
+		UpdatedAt:   timeValue(firstValue(payload, "updatedAt", "updated_at")),
+		HistoryMode: stringValue(firstValue(payload, "historyMode", "history_mode")),
+		Archived:    archived, Status: statusValue(payload["status"]),
 		SessionID:   stringValue(firstValue(payload, "sessionId", "session_id")),
 		SourceKind:  sourceKindValue(firstValue(payload, "source", "threadSource", "thread_source")),
 		RolloutPath: stringValue(firstValue(payload, "path", "rolloutPath", "rollout_path")),
@@ -221,15 +222,17 @@ func unixTime(value int64) string {
 }
 
 func mapSlice(value any) []map[string]any {
-	raw, ok := value.([]any)
-	if !ok {
-		return nil
-	}
-	result := make([]map[string]any, 0, len(raw))
-	for _, item := range raw {
-		if object, ok := item.(map[string]any); ok {
-			result = append(result, object)
+	result := []map[string]any{}
+	switch raw := value.(type) {
+	case []any:
+		result = make([]map[string]any, 0, len(raw))
+		for _, item := range raw {
+			if object, ok := item.(map[string]any); ok {
+				result = append(result, object)
+			}
 		}
+	case []map[string]any:
+		result = append(result, raw...)
 	}
 	return result
 }

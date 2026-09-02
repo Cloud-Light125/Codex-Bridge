@@ -542,7 +542,7 @@ func (s *Service) history(ctx context.Context, arguments []string) Result {
 	if record.Backend != conversationregistry.BackendCodex {
 		return one(fmt.Sprintf("聊天编号 #%d 属于 OpenClaw，请按 OpenClaw 会话方式查询。", record.Number))
 	}
-	detail, err := s.control.ReadThread(ctx, record.TargetID, true)
+	detail, err := control.ReadThreadHistory(ctx, s.control, record.TargetID, count)
 	if err != nil || detail.ThreadID == "" {
 		return one(fmt.Sprintf("聊天编号 #%d 当前不可用。", record.Number))
 	}
@@ -723,7 +723,7 @@ func (s *Service) failed(ctx context.Context, arguments []string) string {
 				return
 			}
 			defer func() { <-semaphore }()
-			detail, readErr := s.control.ReadThread(ctx, summary.ThreadID, true)
+			detail, readErr := control.ReadThreadActivityHistory(ctx, s.control, summary.ThreadID, 10)
 			if readErr != nil || detail.ThreadID == "" {
 				return
 			}
@@ -873,8 +873,8 @@ func (s *Service) recentThreads(ctx context.Context, limit int) ([]control.Threa
 }
 
 // thread/list intentionally omits turns and can report an idle cached status
-// while another Codex process owns an in-progress Turn. A read-only thread/read
-// refresh supplies the actual last Turn status to RuntimeState reconciliation.
+// while another Codex process owns an in-progress Turn. The activity reader
+// refreshes only metadata plus the newest Turn without loading Items.
 func (s *Service) hydrateActivities(ctx context.Context, threads []control.ThreadSummary) {
 	semaphore := make(chan struct{}, 8)
 	var wait sync.WaitGroup
@@ -892,7 +892,7 @@ func (s *Service) hydrateActivities(ctx context.Context, threads []control.Threa
 				return
 			}
 			defer func() { <-semaphore }()
-			_, _ = s.control.ReadThread(ctx, threadID, true)
+			_, _ = control.ReadThreadActivity(ctx, s.control, threadID)
 		}()
 	}
 	wait.Wait()

@@ -849,7 +849,7 @@ func (s *Service) commandOpenClawTarget(ctx context.Context, message channels.In
 }
 
 func (s *Service) statusThread(ctx context.Context, message channels.InboundMessage, threadID string) {
-	thread, err := s.control.ReadThread(ctx, threadID, true)
+	thread, err := control.ReadThreadActivity(ctx, s.control, threadID)
 	if err != nil || thread.ThreadID == "" {
 		s.send(ctx, message.Address, "指定会话不可用。")
 		return
@@ -1057,7 +1057,7 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 		s.send(ctx, message.Address, fmt.Sprintf("当前绑定：OpenClaw #%d\nCurrent binding\nBackend: OpenClaw\nProfile: %s\nSession: #%d %s\nSessionKey: %s\nUpdated: %s\nState: %s", number, firstNonEmpty(binding.ChannelProfileID, "default"), number, displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
 		return
 	}
-	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
+	thread, err := control.ReadThreadHistory(ctx, s.control, binding.ThreadID, 1)
 	if err != nil || thread.ThreadID == "" {
 		s.send(ctx, message.Address, "Bound Thread "+shortID(binding.ThreadID)+" is no longer available. Use /unbind or bind another Thread.")
 		return

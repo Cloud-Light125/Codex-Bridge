@@ -10,9 +10,72 @@ import (
 
 var ErrUnavailable = errors.New("Codex app-server is unavailable")
 
+const DefaultHistoryTurnLimit = 50
+
 type ThreadReader interface {
 	ThreadList(ctx context.Context, limit int, cursor string) (map[string]any, error)
 	ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error)
+}
+
+// ThreadHistoryReader is implemented by the runtime's app-server adapter.
+// Keeping it optional preserves source compatibility for legacy test doubles
+// and non-Codex readers while ensuring the real app-server path never asks a
+// paginated thread for thread/read(includeTurns=true).
+type ThreadHistoryReader interface {
+	ThreadReadHistory(ctx context.Context, threadID string, limit int) (map[string]any, error)
+}
+
+type ThreadActivityReader interface {
+	ThreadReadActivity(ctx context.Context, threadID string) (map[string]any, error)
+}
+
+type ThreadActivityHistoryReader interface {
+	ThreadReadActivityHistory(ctx context.Context, threadID string, limit int) (map[string]any, error)
+}
+
+type DetailReader interface {
+	ReadThread(ctx context.Context, threadID string, includeTurns bool) (ThreadDetail, error)
+}
+
+type DetailHistoryReader interface {
+	ReadThreadHistory(ctx context.Context, threadID string, limit int) (ThreadDetail, error)
+}
+
+type DetailActivityReader interface {
+	ReadThreadActivity(ctx context.Context, threadID string) (ThreadDetail, error)
+}
+
+type DetailActivityHistoryReader interface {
+	ReadThreadActivityHistory(ctx context.Context, threadID string, limit int) (ThreadDetail, error)
+}
+
+// ReadThreadHistory keeps the compatibility decision at the control boundary
+// so channels, query services, Mirror, and Task Center do not implement RPC
+// pagination independently.
+func ReadThreadHistory(ctx context.Context, reader DetailReader, threadID string, limit int) (ThreadDetail, error) {
+	if history, ok := reader.(DetailHistoryReader); ok {
+		return history.ReadThreadHistory(ctx, threadID, limit)
+	}
+	return reader.ReadThread(ctx, threadID, true)
+}
+
+// ReadThreadActivity is the bounded status path. It never requests message
+// Items and falls back to metadata-only ReadThread(false) for old readers.
+func ReadThreadActivity(ctx context.Context, reader DetailReader, threadID string) (ThreadDetail, error) {
+	if activity, ok := reader.(DetailActivityReader); ok {
+		return activity.ReadThreadActivity(ctx, threadID)
+	}
+	return reader.ReadThread(ctx, threadID, false)
+}
+
+// ReadThreadActivityHistory is the bounded status-only multi-Turn path. Its
+// fallback preserves compatibility with old readers that only expose the
+// original detail method.
+func ReadThreadActivityHistory(ctx context.Context, reader DetailReader, threadID string, limit int) (ThreadDetail, error) {
+	if activity, ok := reader.(DetailActivityHistoryReader); ok {
+		return activity.ReadThreadActivityHistory(ctx, threadID, limit)
+	}
+	return reader.ReadThread(ctx, threadID, false)
 }
 
 type RuntimeStateProvider interface {
@@ -59,7 +122,67 @@ func (s *Service) ListThreads(ctx context.Context, limit int, cursor string) (Th
 }
 
 func (s *Service) ReadThread(ctx context.Context, threadID string, includeTurns bool) (ThreadDetail, error) {
-	raw, err := s.reader.ThreadRead(ctx, threadID, includeTurns)
+	var (
+		raw map[string]any
+		err error
+	)
+	if includeTurns {
+		raw, err = s.readThreadHistoryRaw(ctx, threadID, DefaultHistoryTurnLimit)
+	} else {
+		raw, err = s.reader.ThreadRead(ctx, threadID, false)
+	}
+	return s.decorateThread(raw, threadID, err)
+}
+
+// ReadThreadHistory is the bounded history entry point used by /history and
+// other features that know how many recent Turns they need.
+func (s *Service) ReadThreadHistory(ctx context.Context, threadID string, limit int) (ThreadDetail, error) {
+	raw, err := s.readThreadHistoryRaw(ctx, threadID, limit)
+	return s.decorateThread(raw, threadID, err)
+}
+
+// ReadThreadActivity intentionally does not load Items. For the real
+// app-server client it performs thread/read(false) plus one paginated Turn;
+// legacy readers remain metadata-only when no lightweight RPC exists.
+func (s *Service) ReadThreadActivity(ctx context.Context, threadID string) (ThreadDetail, error) {
+	var (
+		raw map[string]any
+		err error
+	)
+	if reader, ok := s.reader.(ThreadActivityReader); ok {
+		raw, err = reader.ThreadReadActivity(ctx, threadID)
+	} else {
+		raw, err = s.reader.ThreadRead(ctx, threadID, false)
+	}
+	return s.decorateThread(raw, threadID, err)
+}
+
+// ReadThreadActivityHistory intentionally omits Items while retaining a
+// bounded number of recent Turns for status/error queries.
+func (s *Service) ReadThreadActivityHistory(ctx context.Context, threadID string, limit int) (ThreadDetail, error) {
+	var (
+		raw map[string]any
+		err error
+	)
+	if reader, ok := s.reader.(ThreadActivityHistoryReader); ok {
+		raw, err = reader.ThreadReadActivityHistory(ctx, threadID, limit)
+	} else {
+		raw, err = s.reader.ThreadRead(ctx, threadID, false)
+	}
+	return s.decorateThread(raw, threadID, err)
+}
+
+func (s *Service) readThreadHistoryRaw(ctx context.Context, threadID string, limit int) (map[string]any, error) {
+	if reader, ok := s.reader.(ThreadHistoryReader); ok {
+		return reader.ThreadReadHistory(ctx, threadID, limit)
+	}
+	// Older injected readers only expose the original full-read method. This
+	// fallback is reachable for legacy servers/test doubles; the production
+	// Manager implements ThreadHistoryReader and takes the safe path above.
+	return s.reader.ThreadRead(ctx, threadID, true)
+}
+
+func (s *Service) decorateThread(raw map[string]any, threadID string, err error) (ThreadDetail, error) {
 	if err != nil {
 		return ThreadDetail{}, err
 	}

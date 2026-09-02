@@ -494,7 +494,7 @@ public sealed class BackupService
     {
         FormatVersion = CurrentFormatVersion,
         CreatedAt = DateTimeOffset.Now,
-        AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.2.1",
+        AppVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.2.2",
         CodexVersion = TryGetCodexVersion(),
         MachineName = Environment.MachineName,
         CodexHome = CodexHome,

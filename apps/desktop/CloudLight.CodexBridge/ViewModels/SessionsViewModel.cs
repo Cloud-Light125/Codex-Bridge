@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -33,6 +34,7 @@ public sealed class SessionsViewModel : ObservableObject
     private long _selectionVersion;
     private CancellationTokenSource? _detailCancellation;
     private CancellationTokenSource? _reloadCancellation;
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _detailFlights = new(StringComparer.Ordinal);
     private readonly HashSet<string> _persistedTurns = new(StringComparer.Ordinal);
 
     public SessionsViewModel(BridgeApiClient api, LogService logs)
@@ -356,8 +358,12 @@ public sealed class SessionsViewModel : ObservableObject
 
     private async Task LoadDetailAsync(string threadId, long version, CancellationToken cancellationToken)
     {
+        var flight = _detailFlights.GetOrAdd(threadId, static _ => new SemaphoreSlim(1, 1));
+        var acquired = false;
         try
         {
+            await flight.WaitAsync(cancellationToken);
+            acquired = true;
             var detailTask = _api.GetThreadAsync(threadId, cancellationToken);
             var interactionsTask = _api.GetInteractionsAsync("pending", cancellationToken);
             var detail = await detailTask;
@@ -385,6 +391,10 @@ public sealed class SessionsViewModel : ObservableObject
             ErrorText = UiText.UserError(exception, "读取会话");
             SetViewState("error");
             _logs.Add("desktop", $"读取 Thread 详情失败：{exception.Message}");
+        }
+        finally
+        {
+            if (acquired) flight.Release();
         }
     }
 
@@ -719,6 +729,7 @@ public sealed class SessionsViewModel : ObservableObject
         _detailCancellation?.Cancel();
         _detailCancellation?.Dispose();
         _detailCancellation = null;
+        CancelRecalibration();
     }
 
     private bool IsCurrentSelection(string threadId, long version) =>
@@ -726,22 +737,30 @@ public sealed class SessionsViewModel : ObservableObject
 
     private void ScheduleRecalibration()
     {
-        _reloadCancellation?.Cancel();
-        _reloadCancellation?.Dispose();
+        var threadId = SelectedThread?.ThreadId;
+        if (string.IsNullOrWhiteSpace(threadId))
+        {
+            CancelRecalibration();
+            return;
+        }
+        CancelRecalibration();
         _reloadCancellation = new CancellationTokenSource();
         var token = _reloadCancellation.Token;
-        var threadId = SelectedThread?.ThreadId;
-        if (string.IsNullOrWhiteSpace(threadId)) return;
+        var version = Interlocked.Read(ref _selectionVersion);
         _ = Task.Run(async () =>
         {
+            var flight = _detailFlights.GetOrAdd(threadId, static _ => new SemaphoreSlim(1, 1));
+            var acquired = false;
             try
             {
                 await Task.Delay(500, token);
+                await flight.WaitAsync(token);
+                acquired = true;
                 var detail = await _api.GetThreadAsync(threadId, token);
                 var interactions = await _api.GetInteractionsAsync("pending", token);
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
-                    if (SelectedThread?.ThreadId != threadId) return;
+                    if (!IsCurrentSelection(threadId, version)) return;
                     SelectedDetail = detail;
                     SetRuntime(detail.Runtime);
                     RebuildTimeline(detail);
@@ -756,7 +775,18 @@ public sealed class SessionsViewModel : ObservableObject
             {
                 _logs.Add("desktop", $"重新校准 Thread 状态失败：{exception.Message}");
             }
+            finally
+            {
+                if (acquired) flight.Release();
+            }
         }, token);
+    }
+
+    private void CancelRecalibration()
+    {
+        _reloadCancellation?.Cancel();
+        _reloadCancellation?.Dispose();
+        _reloadCancellation = null;
     }
 
     private static bool TryPayload<T>(JsonElement payload, string property, out T value)

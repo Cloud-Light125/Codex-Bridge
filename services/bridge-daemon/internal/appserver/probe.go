@@ -8,11 +8,11 @@ import (
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 )
 
-var probeRPCMethods = []string{"initialize", "initialized", "thread/read"}
+var probeRPCMethods = []string{"initialize", "initialized", "thread/read", "thread/turns/list", "thread/items/list"}
 
 // ProbeResult records how a short-lived, independent app-server was launched.
-// Raw is the thread/read result so callers can verify turn IDs without
-// treating this process's in-memory state as proof of persistence.
+// Raw is the bounded compatible history result so callers can verify turn IDs
+// without treating this process's in-memory state as proof of persistence.
 type ProbeResult struct {
 	Raw              map[string]any
 	PID              int
@@ -26,8 +26,9 @@ type ProbeResult struct {
 
 // ProbeThread starts a new, short-lived app-server using the exact executable,
 // working directory, and inherited environment supplied to the primary client.
-// Its protocol is strictly initialize -> initialized -> thread/read. It never
-// resumes, starts, forks, or writes to a thread.
+// Its protocol is initialize -> initialized -> thread/read(false), followed by
+// the read-only paginated history chain when the server advertises it. It
+// never resumes, starts, forks, or writes to a thread.
 func ProbeThread(ctx context.Context, codexPath, cwd, version, threadID string, logger *bridgelog.SafeLogger) (result ProbeResult, err error) {
 	result = ProbeResult{
 		CodexPath:        strings.TrimSpace(codexPath),
@@ -56,7 +57,7 @@ func ProbeThread(ctx context.Context, codexPath, cwd, version, threadID string, 
 		}
 	}()
 
-	result.Raw, err = client.ThreadRead(ctx, threadID, true)
+	result.Raw, err = client.ThreadReadHistory(ctx, threadID, DefaultHistoryTurnLimit)
 	if err != nil {
 		result.ErrorSummary = safeProbeError(err)
 	}

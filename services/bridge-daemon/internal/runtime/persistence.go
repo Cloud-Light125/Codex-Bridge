@@ -333,7 +333,7 @@ func (m *Manager) VerifyThreadPersistence(ctx context.Context, threadID string) 
 	if err != nil {
 		return control.PersistenceVerification{}, err
 	}
-	raw, err := client.ThreadRead(ctx, threadID, true)
+	raw, err := client.ThreadReadHistory(ctx, threadID, appserver.DefaultHistoryTurnLimit)
 	if err != nil {
 		return control.PersistenceVerification{}, fmt.Errorf("primary thread/read: %w", err)
 	}
@@ -384,7 +384,7 @@ func (m *Manager) verifyCompletedTurn(threadID, turnID string, trace *turnTrace)
 	var lastVerification *control.PersistenceVerification
 	var lastReadError error
 	for attempt := 0; attempt <= len(completedPersistenceRetryDelays); attempt++ {
-		raw, readErr := client.ThreadRead(ctx, threadID, true)
+		raw, readErr := client.ThreadReadHistory(ctx, threadID, appserver.DefaultHistoryTurnLimit)
 		if readErr != nil {
 			lastReadError = readErr
 			m.logger.Printf("persistenceRetry selectedThreadId=%s expectedTurnId=%s attempt=%d result=primary-read-failed error=%s", threadID, turnID, attempt+1, bridgelog.Redact(readErr.Error()))

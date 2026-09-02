@@ -84,6 +84,9 @@ type Control interface {
 	ListThreads(context.Context, int, string) (control.ThreadList, error)
 	ReadThread(context.Context, string, bool) (control.ThreadDetail, error)
 }
+
+const mirrorHistoryTurnLimit = 50
+
 type Runtime interface {
 	RuntimeState(string) control.RuntimeState
 }
@@ -334,7 +337,7 @@ func (s *Service) baselineAll() {
 	_, _ = store.EnsureBatchBackend(conversationregistry.BackendCodex, metadata)
 	for _, thread := range summaries {
 		ctx, cancel := context.WithTimeout(s.ctx, 8*time.Second)
-		detail, err := s.control.ReadThread(ctx, thread.ThreadID, true)
+		detail, err := control.ReadThreadHistory(ctx, s.control, thread.ThreadID, mirrorHistoryTurnLimit)
 		cancel()
 		if err != nil {
 			continue
@@ -449,7 +452,7 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 	defer lock.Unlock()
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
-	detail, err := s.control.ReadThread(ctx, threadID, true)
+	detail, err := control.ReadThreadHistory(ctx, s.control, threadID, mirrorHistoryTurnLimit)
 	if err != nil {
 		s.mu.Lock()
 		fallback := s.rolloutFinals[threadID]

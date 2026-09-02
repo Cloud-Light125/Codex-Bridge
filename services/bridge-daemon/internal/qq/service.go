@@ -414,7 +414,7 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 		s.send(ctx, message.Address, "当前 QQ 会话尚未绑定。使用 /threads 或 /bind。")
 		return
 	}
-	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
+	thread, err := control.ReadThreadHistory(ctx, s.control, binding.ThreadID, 1)
 	if err != nil || thread.ThreadID == "" {
 		s.send(ctx, message.Address, "绑定的 Thread "+shortID(binding.ThreadID)+" 已不存在，请解除绑定或重新绑定。")
 		return
@@ -441,7 +441,7 @@ func (s *Service) status(ctx context.Context, message channels.InboundMessage) {
 		s.send(ctx, message.Address, strings.Join(lines, "\n"))
 		return
 	}
-	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
+	thread, err := control.ReadThreadActivity(ctx, s.control, binding.ThreadID)
 	if err != nil || thread.ThreadID == "" {
 		lines = append(lines, "绑定："+shortID(binding.ThreadID), "Thread：不可用或已删除")
 	} else {
@@ -866,7 +866,7 @@ func (s *Service) deliverCompleted(ctx context.Context, route *turnRoute) {
 		s.removeRoute(route.TurnID)
 		return
 	}
-	thread, err := s.control.ReadThread(ctx, route.ThreadID, true)
+	thread, err := control.ReadThreadHistory(ctx, s.control, route.ThreadID, 1)
 	if err != nil || thread.ThreadID != route.ThreadID {
 		s.finishRoute(ctx, route, "任务已持久化，但无法读取正式回复。请在 WPF 中查看。")
 		return

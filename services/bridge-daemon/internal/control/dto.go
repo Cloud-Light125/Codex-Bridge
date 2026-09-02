@@ -14,6 +14,7 @@ type ThreadSummary struct {
 	Model       string `json:"model"`
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
+	HistoryMode string `json:"historyMode,omitempty"`
 	Archived    *bool  `json:"archived"`
 	Status      string `json:"status"`
 	SessionID   string `json:"sessionId,omitempty"`

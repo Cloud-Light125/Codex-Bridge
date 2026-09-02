@@ -241,7 +241,7 @@ func (a *CodexTaskAdapter) QueryRunState(ctx context.Context, ref ConversationRe
 	if a.control == nil {
 		return RunState{}, errors.New("Codex backend is unavailable")
 	}
-	detail, err := a.control.ReadThread(ctx, strings.TrimSpace(ref.TargetID), true)
+	detail, err := control.ReadThreadActivity(ctx, a.control, strings.TrimSpace(ref.TargetID))
 	if err != nil {
 		return RunState{}, err
 	}

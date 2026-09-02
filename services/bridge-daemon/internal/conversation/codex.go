@@ -69,7 +69,7 @@ func (b *CodexBackend) ReadSession(ctx context.Context, key string) (Detail, err
 	if b.control == nil {
 		return Detail{}, errors.New("Codex backend is unavailable")
 	}
-	detail, err := b.control.ReadThread(ctx, strings.TrimSpace(key), true)
+	detail, err := control.ReadThreadHistory(ctx, b.control, strings.TrimSpace(key), control.DefaultHistoryTurnLimit)
 	if err != nil {
 		return Detail{}, err
 	}

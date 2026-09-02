@@ -18,8 +18,11 @@ import (
 )
 
 type fakeControl struct {
-	threads []control.ThreadSummary
-	details map[string]control.ThreadDetail
+	threads               []control.ThreadSummary
+	details               map[string]control.ThreadDetail
+	historyLimits         []int
+	activityCalls         int
+	activityHistoryLimits []int
 }
 
 type fakeOpenClawBackend struct {
@@ -73,6 +76,29 @@ func (f *fakeControl) ReadThread(_ context.Context, threadID string, _ bool) (co
 	return f.details[threadID], nil
 }
 
+func (f *fakeControl) ReadThreadHistory(ctx context.Context, threadID string, limit int) (control.ThreadDetail, error) {
+	f.historyLimits = append(f.historyLimits, limit)
+	return f.ReadThread(ctx, threadID, true)
+}
+
+func (f *fakeControl) ReadThreadActivity(ctx context.Context, threadID string) (control.ThreadDetail, error) {
+	f.activityCalls++
+	detail, err := f.ReadThread(ctx, threadID, false)
+	if len(detail.Turns) > 1 {
+		detail.Turns = detail.Turns[len(detail.Turns)-1:]
+	}
+	return detail, err
+}
+
+func (f *fakeControl) ReadThreadActivityHistory(ctx context.Context, threadID string, limit int) (control.ThreadDetail, error) {
+	f.activityHistoryLimits = append(f.activityHistoryLimits, limit)
+	detail, err := f.ReadThread(ctx, threadID, false)
+	for index := range detail.Turns {
+		detail.Turns[index].Items = nil
+	}
+	return detail, err
+}
+
 type fakeRuntime struct {
 	status       bridgeruntime.Status
 	states       map[string]control.RuntimeState
@@ -122,6 +148,9 @@ func TestHistoryReturnsLastCompletedUserAssistantRounds(t *testing.T) {
 	joined := strings.Join(result.Parts, "\n")
 	if !handled || !strings.Contains(joined, "第二问") || !strings.Contains(joined, "第二答") || !strings.Contains(joined, "第三问") || !strings.Contains(joined, "尚未完成") {
 		t.Fatalf("unexpected history: %s", joined)
+	}
+	if len(controlService.historyLimits) != 1 || controlService.historyLimits[0] != 2 {
+		t.Fatalf("history requested an unbounded/wrong turn limit: %#v", controlService.historyLimits)
 	}
 	for _, excluded := range []string{"第一问", "第一答", "中间进度", "尚在执行", "secret stdout"} {
 		if strings.Contains(joined, excluded) {
@@ -185,6 +214,18 @@ func TestRunningWaitingRecentAndFailedUseReadOnlyRuntimeTruth(t *testing.T) {
 	if !strings.Contains(failures.Parts[0], "#4 构建任务") || !strings.Contains(failures.Parts[0], "原因：构建失败") {
 		t.Fatalf("failed result: %s", failures.Parts[0])
 	}
+	if runtimeControl := service.control.(*fakeControl); runtimeControl.activityCalls == 0 || len(runtimeControl.activityHistoryLimits) != len(threads) || !allLimits(runtimeControl.activityHistoryLimits, 10) {
+		t.Fatalf("status queries did not use lightweight readers: activity=%d history=%#v", runtimeControl.activityCalls, runtimeControl.activityHistoryLimits)
+	}
+}
+
+func allLimits(limits []int, want int) bool {
+	for _, limit := range limits {
+		if limit != want {
+			return false
+		}
+	}
+	return true
 }
 
 func TestQuotaUsesOfficialRateLimitSnapshotWithoutInference(t *testing.T) {

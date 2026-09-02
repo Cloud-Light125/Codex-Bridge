@@ -783,7 +783,7 @@ func (s *Service) commandOpenClawTarget(ctx context.Context, message channels.In
 }
 
 func (s *Service) statusThread(ctx context.Context, message channels.InboundMessage, threadID string) {
-	thread, err := s.control.ReadThread(ctx, threadID, true)
+	thread, err := control.ReadThreadActivity(ctx, s.control, threadID)
 	if err != nil || thread.ThreadID == "" {
 		s.send(ctx, message.Address, "指定会话不可用。")
 		return
@@ -1051,7 +1051,7 @@ func (s *Service) current(ctx context.Context, message channels.InboundMessage) 
 		s.send(ctx, message.Address, fmt.Sprintf("当前绑定：OpenClaw #%d\n当前绑定\n后端：OpenClaw\nProfile：%s\nSession：#%d %s\nSessionKey：%s\n更新：%s\n状态：%s", number, firstNonEmpty(binding.ChannelProfileID, "默认"), number, displayTitle(detail.Title), detail.Key, displayTime(detail.UpdatedAt), firstNonEmpty(detail.Status, "idle")))
 		return
 	}
-	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
+	thread, err := control.ReadThreadHistory(ctx, s.control, binding.ThreadID, 1)
 	if err != nil || thread.ThreadID == "" {
 		s.send(ctx, message.Address, "绑定的 Thread "+shortID(binding.ThreadID)+" 已不存在，请解除绑定或重新绑定。")
 		return
@@ -1108,7 +1108,7 @@ func (s *Service) status(ctx context.Context, message channels.InboundMessage) {
 		s.send(ctx, message.Address, strings.Join(lines, "\n"))
 		return
 	}
-	thread, err := s.control.ReadThread(ctx, binding.ThreadID, true)
+	thread, err := control.ReadThreadActivity(ctx, s.control, binding.ThreadID)
 	if err != nil || thread.ThreadID == "" {
 		lines = append(lines, "绑定："+shortID(binding.ThreadID), "Thread：不可用或已删除")
 	} else {

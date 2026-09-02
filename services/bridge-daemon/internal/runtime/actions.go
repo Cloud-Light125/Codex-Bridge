@@ -148,14 +148,14 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 	if err != nil {
 		return control.TurnAccepted{}, err
 	}
-	m.logger.Printf("rpcTrace stage=thread/read-request selectedThreadId=%s requestThreadId=%s includeTurns=true", threadID, threadID)
-	raw, err := client.ThreadRead(ctx, threadID, true)
+	m.logger.Printf("rpcTrace stage=thread/read-activity-request selectedThreadId=%s requestThreadId=%s includeTurns=false", threadID, threadID)
+	raw, err := client.ThreadReadActivity(ctx, threadID)
 	if err != nil {
 		return control.TurnAccepted{}, err
 	}
 	initial := persistenceSnapshot(raw, "")
-	m.logRPCThread("thread/read", threadID, initial)
-	if err := m.requireSelectedThread(threadID, initial, "thread/read"); err != nil {
+	m.logRPCThread("thread/read-activity", threadID, initial)
+	if err := m.requireSelectedThread(threadID, initial, "thread/read-activity"); err != nil {
 		return control.TurnAccepted{}, err
 	}
 	activity := control.ActivityFromThreadRead(raw)

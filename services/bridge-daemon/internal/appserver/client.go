@@ -76,6 +76,7 @@ type Client struct {
 	version   string
 	logger    *bridgelog.SafeLogger
 	onEvent   func(Event)
+	history   *HistoryReader
 
 	mu             sync.RWMutex
 	writeMu        sync.Mutex
@@ -148,7 +149,7 @@ func detectedCLI(path string) Detection {
 }
 
 func NewClient(codexPath, cwd, version string, logger *bridgelog.SafeLogger, onEvent func(Event)) *Client {
-	return &Client{
+	client := &Client{
 		codexPath:      codexPath,
 		cwd:            cwd,
 		version:        version,
@@ -157,6 +158,8 @@ func NewClient(codexPath, cwd, version string, logger *bridgelog.SafeLogger, onE
 		pending:        make(map[uint64]chan response),
 		serverRequests: make(map[string]json.RawMessage),
 	}
+	client.history = NewHistoryReader(client, logger)
+	return client
 }
 
 func (c *Client) Start(ctx context.Context) error {
@@ -195,6 +198,9 @@ func (c *Client) Start(ctx context.Context) error {
 	c.exit = make(chan error, 1)
 	exit := c.exit
 	c.mu.Unlock()
+	if c.history != nil {
+		c.history.Reset()
+	}
 
 	go c.readStdout(stdout)
 	go c.readStderr(stderr)
@@ -236,6 +242,69 @@ func (c *Client) ThreadRead(ctx context.Context, threadID string, includeTurns b
 		"threadId":     threadID,
 		"includeTurns": includeTurns,
 	})
+}
+
+// ThreadTurnsList pages a stored thread's turns. The options mirror the
+// app-server protocol, including its opaque cursor and itemsView fields.
+func (c *Client) ThreadTurnsList(ctx context.Context, options ThreadTurnsListOptions) (map[string]any, error) {
+	params := map[string]any{"threadId": strings.TrimSpace(options.ThreadID)}
+	if cursor := strings.TrimSpace(options.Cursor); cursor != "" {
+		params["cursor"] = cursor
+	}
+	if options.Limit > 0 {
+		params["limit"] = options.Limit
+	}
+	if direction := strings.TrimSpace(options.SortDirection); direction != "" {
+		params["sortDirection"] = direction
+	}
+	if view := strings.TrimSpace(options.ItemsView); view != "" {
+		params["itemsView"] = view
+	}
+	return c.request(ctx, "thread/turns/list", params)
+}
+
+// ThreadItemsList pages persisted items. The protocol accepts an optional
+// turnId; it is intentionally omitted when empty rather than sent as an
+// empty selector.
+func (c *Client) ThreadItemsList(ctx context.Context, options ThreadItemsListOptions) (map[string]any, error) {
+	params := map[string]any{"threadId": strings.TrimSpace(options.ThreadID)}
+	if turnID := strings.TrimSpace(options.TurnID); turnID != "" {
+		params["turnId"] = turnID
+	}
+	if cursor := strings.TrimSpace(options.Cursor); cursor != "" {
+		params["cursor"] = cursor
+	}
+	if options.Limit > 0 {
+		params["limit"] = options.Limit
+	}
+	if direction := strings.TrimSpace(options.SortDirection); direction != "" {
+		params["sortDirection"] = direction
+	}
+	return c.request(ctx, "thread/items/list", params)
+}
+
+// ThreadReadHistory is the safe history entry point for callers that need
+// message bodies. It never sends includeTurns=true after a paginated thread
+// has been identified; the HistoryReader selects the legacy path only for
+// legacy threads or an unknown-mode compatibility probe.
+func (c *Client) ThreadReadHistory(ctx context.Context, threadID string, limit int) (map[string]any, error) {
+	return c.history.ReadThread(ctx, threadID, limit)
+}
+
+// ThreadReadActivity reads metadata and, for paginated threads, only the
+// newest Turn without Items. It is intended for list/status refreshes.
+func (c *Client) ThreadReadActivity(ctx context.Context, threadID string) (map[string]any, error) {
+	return c.history.ReadActivity(ctx, threadID)
+}
+
+// ThreadReadActivityHistory reads only a bounded set of recent Turn status
+// records and never hydrates their Items.
+func (c *Client) ThreadReadActivityHistory(ctx context.Context, threadID string, limit int) (map[string]any, error) {
+	return c.history.ReadActivityHistory(ctx, threadID, limit)
+}
+
+func (c *Client) HistoryCapability() HistoryCapability {
+	return c.history.Capability()
 }
 
 // AccountRateLimits reads the official Codex account rate-limit snapshot.

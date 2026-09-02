@@ -435,11 +435,57 @@ func (m *Manager) ThreadList(ctx context.Context, limit int, cursor string) (map
 }
 
 func (m *Manager) ThreadRead(ctx context.Context, threadID string, includeTurns bool) (map[string]any, error) {
+	if includeTurns {
+		return m.ThreadReadHistory(ctx, threadID, appserver.DefaultHistoryTurnLimit)
+	}
 	client, err := m.runningClient()
 	if err != nil {
 		return nil, err
 	}
-	raw, err := client.ThreadRead(ctx, threadID, includeTurns)
+	raw, err := client.ThreadRead(ctx, threadID, false)
+	if err == nil {
+		m.reconcileActivity(control.ActivityFromThreadRead(raw))
+	}
+	return raw, err
+}
+
+// ThreadReadHistory is the runtime-facing compatibility entry point. The
+// appserver client performs the paginated/legacy decision and bounds the
+// number of turns and items returned.
+func (m *Manager) ThreadReadHistory(ctx context.Context, threadID string, limit int) (map[string]any, error) {
+	client, err := m.runningClient()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := client.ThreadReadHistory(ctx, threadID, limit)
+	if err == nil {
+		m.reconcileActivity(control.ActivityFromThreadRead(raw))
+	}
+	return raw, err
+}
+
+// ThreadReadActivity is intentionally metadata plus one newest Turn without
+// Items. It is used by list/status refreshes and never hydrates message bodies.
+func (m *Manager) ThreadReadActivity(ctx context.Context, threadID string) (map[string]any, error) {
+	client, err := m.runningClient()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := client.ThreadReadActivity(ctx, threadID)
+	if err == nil {
+		m.reconcileActivity(control.ActivityFromThreadRead(raw))
+	}
+	return raw, err
+}
+
+// ThreadReadActivityHistory is the status-only multi-Turn variant used by
+// failure/status queries. It still never requests thread/items/list.
+func (m *Manager) ThreadReadActivityHistory(ctx context.Context, threadID string, limit int) (map[string]any, error) {
+	client, err := m.runningClient()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := client.ThreadReadActivityHistory(ctx, threadID, limit)
 	if err == nil {
 		m.reconcileActivity(control.ActivityFromThreadRead(raw))
 	}
