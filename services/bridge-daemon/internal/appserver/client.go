@@ -104,6 +104,12 @@ func Detect(customPath string) Detection {
 		}
 		return Detection{Path: candidate, Error: "configured Codex CLI path does not exist or is not executable"}
 	}
+	for _, preferred := range preferredCodexPaths() {
+		detection := detectedCLI(preferred)
+		if detection.Available {
+			return detection
+		}
+	}
 	resolved, err := exec.LookPath("codex")
 	if err != nil {
 		return Detection{Error: "Codex CLI was not found on PATH; install Codex CLI or configure a custom path"}

@@ -57,6 +57,15 @@ public sealed class CodexDiscoveryService(LogService logs)
             LogThrottled("manual-path-summary", "[codex-discovery] Manual candidates=1 valid=0; continuing");
         }
 
+        var preferredCandidates = EnumeratePreferredLaunchCandidates().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var fromPreferredEntry = await ValidateFirstAsync(
+            preferredCandidates, CodexDiscoverySource.PATH, attempted, logMissingCandidates: false, cancellationToken).ConfigureAwait(false);
+        if (fromPreferredEntry.Found) return LogSuccess(fromPreferredEntry);
+
+        // An automatically remembered PATH result can point at an older npm
+        // wrapper even after the native Codex installation has been updated.
+        // Prefer the known installation locations before trusting that cached
+        // result; an explicit manual path was already handled above.
         if (!string.IsNullOrWhiteSpace(detectedPath))
         {
             var saved = await ValidateFirstAsync(
@@ -64,11 +73,6 @@ public sealed class CodexDiscoveryService(LogService logs)
             if (saved.Found) return LogSuccess(saved);
             LogThrottled("saved-path-summary", "[codex-discovery] SavedPath candidates=1 valid=0; continuing");
         }
-
-        var preferredCandidates = EnumeratePreferredLaunchCandidates().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var fromPreferredEntry = await ValidateFirstAsync(
-            preferredCandidates, CodexDiscoverySource.PATH, attempted, logMissingCandidates: false, cancellationToken).ConfigureAwait(false);
-        if (fromPreferredEntry.Found) return LogSuccess(fromPreferredEntry);
 
         var pathCandidates = EnumeratePathCandidates().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         LogThrottled("path-summary:" + string.Join("|", pathCandidates), $"[codex-discovery] PATH candidates={pathCandidates.Length}" +
@@ -295,6 +299,14 @@ public sealed class CodexDiscoveryService(LogService logs)
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localAppData)) yield break;
+
+        // Current Codex desktop builds install the usable app-server binary
+        // under a versioned directory here, rather than next to the PATH
+        // shim.  The shim may report the same CLI version while lacking the
+        // paginated history RPCs exposed by the desktop installation.
+        var nativeDirectory = Path.Combine(localAppData, "OpenAI", "Codex", "bin");
+        foreach (var candidate in EnumerateInstallationCandidates(nativeDirectory))
+            yield return candidate;
 
         var win32Directory = Path.Combine(localAppData, "Programs", "OpenAI", "Codex", "bin");
         foreach (var name in CodexFileNames)
