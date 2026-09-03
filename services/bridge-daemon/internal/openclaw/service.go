@@ -33,6 +33,8 @@ const (
 	defaultRequestTimeout = 30 * time.Second
 	defaultTickInterval   = 30 * time.Second
 	maxReconnectBackoff   = 30 * time.Second
+	maxSeenEvents         = 4096
+	maxHistoryMessages    = 200
 )
 
 type Config struct {
@@ -59,7 +61,7 @@ type Service struct {
 	pending    map[string]pendingRequest
 	writeMu    sync.Mutex
 
-	subscribers map[uint64]func(conversation.Event)
+	subscribers map[uint64]*eventSubscriber
 	nextSubID   uint64
 	sessions    map[string]conversation.Session
 	runText     map[string]string
@@ -80,6 +82,39 @@ type pendingRequest struct {
 	generation uint64
 	response   chan rpcResponse
 }
+
+type eventSubscriber struct {
+	handler  func(conversation.Event)
+	queue    chan conversation.Event
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+func newEventSubscriber(handler func(conversation.Event)) *eventSubscriber {
+	subscriber := &eventSubscriber{handler: handler, queue: make(chan conversation.Event, 128), done: make(chan struct{})}
+	go subscriber.run()
+	return subscriber
+}
+
+func (s *eventSubscriber) enqueue(event conversation.Event) {
+	select {
+	case s.queue <- event:
+	case <-s.done:
+	}
+}
+
+func (s *eventSubscriber) run() {
+	for {
+		select {
+		case <-s.done:
+			return
+		case event := <-s.queue:
+			s.handler(event)
+		}
+	}
+}
+
+func (s *eventSubscriber) stop() { s.stopOnce.Do(func() { close(s.done) }) }
 
 type rpcResponse struct {
 	ok      bool
@@ -140,7 +175,7 @@ func NewService(logger *bridgelog.SafeLogger, broker *events.Broker, registries 
 	return &Service{
 		logger: logger, broker: broker,
 		status:  conversation.ConnectionStatus{Backend: conversation.BackendOpenClaw, State: "not-configured", AutoReconnect: true},
-		pending: make(map[string]pendingRequest), subscribers: make(map[uint64]func(conversation.Event)),
+		pending: make(map[string]pendingRequest), subscribers: make(map[uint64]*eventSubscriber),
 		sessions: make(map[string]conversation.Session), runText: make(map[string]string),
 		seenEvents: make(map[string]time.Time), tickEvery: defaultTickInterval, numbers: numbers,
 	}
@@ -751,6 +786,9 @@ func (s *Service) ListSessions(ctx context.Context, limit int) ([]conversation.S
 		return nil, err
 	}
 	s.mu.Lock()
+	// The Gateway list is a snapshot. Replacing the cache releases sessions
+	// that were deleted or archived instead of retaining every key ever seen.
+	s.sessions = make(map[string]conversation.Session, len(result))
 	for _, session := range result {
 		s.sessions[session.Key] = session
 	}
@@ -820,7 +858,7 @@ func (s *Service) ReadSession(ctx context.Context, key string) (conversation.Det
 	if err != nil {
 		return conversation.Detail{Session: session}, err
 	}
-	messages := decodeMessages(response)
+	messages := latestMessages(decodeMessages(response), maxHistoryMessages)
 	return conversation.Detail{Session: session, Messages: messages}, nil
 }
 
@@ -876,15 +914,19 @@ func (s *Service) SubscribeEvents(handler func(conversation.Event)) func() {
 	if handler == nil {
 		return func() {}
 	}
+	subscriber := newEventSubscriber(handler)
 	s.mu.Lock()
 	s.nextSubID++
 	id := s.nextSubID
-	s.subscribers[id] = handler
+	s.subscribers[id] = subscriber
 	s.mu.Unlock()
 	return func() {
 		s.mu.Lock()
-		delete(s.subscribers, id)
+		if current, ok := s.subscribers[id]; ok && current == subscriber {
+			delete(s.subscribers, id)
+		}
 		s.mu.Unlock()
+		subscriber.stop()
 	}
 }
 
@@ -915,6 +957,7 @@ func (s *Service) handleChatEvent(raw json.RawMessage, envelopeSeq int) {
 	}
 	if runID != "" {
 		s.mu.Lock()
+		terminal := state != "delta"
 		if state == "delta" {
 			if rawReplace, ok := payload["replace"].(bool); ok && rawReplace {
 				s.runText[runID] = delta
@@ -926,6 +969,9 @@ func (s *Service) handleChatEvent(raw json.RawMessage, envelopeSeq int) {
 		}
 		if text == "" && state != "delta" {
 			text = s.runText[runID]
+		}
+		if terminal {
+			delete(s.runText, runID)
 		}
 		s.mu.Unlock()
 	}
@@ -965,6 +1011,18 @@ func (s *Service) rememberEvent(state, key, runID string, seq int, delta, text s
 		return false
 	}
 	s.seenEvents[eventKey] = now
+	if len(s.seenEvents) > maxSeenEvents {
+		oldestKey := ""
+		var oldestAt time.Time
+		for seen, at := range s.seenEvents {
+			if oldestKey == "" || at.Before(oldestAt) {
+				oldestKey, oldestAt = seen, at
+			}
+		}
+		if oldestKey != "" {
+			delete(s.seenEvents, oldestKey)
+		}
+	}
 	return true
 }
 
@@ -987,14 +1045,13 @@ func (s *Service) publishBackendEvent(event conversation.Event) {
 		s.broker.PublishScoped(event.Type, event.SessionKey, event.RunID, "", payload)
 	}
 	s.mu.RLock()
-	handlers := make([]func(conversation.Event), 0, len(s.subscribers))
-	for _, handler := range s.subscribers {
-		handlers = append(handlers, handler)
+	subscribers := make([]*eventSubscriber, 0, len(s.subscribers))
+	for _, subscriber := range s.subscribers {
+		subscribers = append(subscribers, subscriber)
 	}
 	s.mu.RUnlock()
-	for _, handler := range handlers {
-		handlerCopy := handler
-		go handlerCopy(event)
+	for _, subscriber := range subscribers {
+		subscriber.enqueue(event)
 	}
 }
 
@@ -1093,7 +1150,7 @@ func decodeMessages(raw json.RawMessage) []conversation.Message {
 	if json.Unmarshal(raw, &wrapper) != nil {
 		return nil
 	}
-	result := make([]conversation.Message, 0, len(wrapper.Messages))
+	result := make([]conversation.Message, 0, minOpenClawInt(len(wrapper.Messages), maxHistoryMessages))
 	for _, item := range wrapper.Messages {
 		var object map[string]any
 		if json.Unmarshal(item, &object) != nil {
@@ -1107,9 +1164,32 @@ func decodeMessages(raw json.RawMessage) []conversation.Message {
 		if role == "" {
 			role = "assistant"
 		}
-		result = append(result, conversation.Message{ID: firstString(object, "id", "messageId"), Role: role, Text: text, Timestamp: valueTime(object, "timestamp", "createdAt"), RunID: firstString(object, "runId", "runID")})
+		message := conversation.Message{ID: firstString(object, "id", "messageId"), Role: role, Text: text, Timestamp: valueTime(object, "timestamp", "createdAt"), RunID: firstString(object, "runId", "runID")}
+		if len(result) == maxHistoryMessages {
+			copy(result, result[1:])
+			result[len(result)-1] = message
+		} else {
+			result = append(result, message)
+		}
 	}
 	return result
+}
+
+func latestMessages(messages []conversation.Message, limit int) []conversation.Message {
+	if limit <= 0 || len(messages) <= limit {
+		return messages
+	}
+	start := len(messages) - limit
+	result := make([]conversation.Message, limit)
+	copy(result, messages[start:])
+	return result
+}
+
+func minOpenClawInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func extractMessageText(value any) string {

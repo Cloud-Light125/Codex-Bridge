@@ -22,7 +22,31 @@
         </Grid>
         <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
             <ListBox ItemsSource="{Binding Entries}" FontFamily="Consolas" FontSize="12" BorderThickness="0"
-                     ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                     ScrollViewer.CanContentScroll="True"
+                     VirtualizingPanel.IsVirtualizing="True"
+                     VirtualizingPanel.VirtualizationMode="Recycling">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <VirtualizingStackPanel />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="{x:Type ListBoxItem}">
+                        <Setter Property="Padding" Value="0" />
+                        <Setter Property="Margin" Value="0" />
+                        <Setter Property="Background" Value="Transparent" />
+                        <Setter Property="BorderThickness" Value="0" />
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                                    <ContentPresenter Content="{TemplateBinding Content}"
+                                                      ContentTemplate="{TemplateBinding ContentTemplate}" />
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
                 <ListBox.ItemTemplate>
                     <DataTemplate>
                         <TextBox Text="{Binding Display, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" FontFamily="Cascadia Mono, Consolas" TextWrapping="NoWrap" Padding="8,4" />

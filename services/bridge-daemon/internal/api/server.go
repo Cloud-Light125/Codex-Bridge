@@ -556,10 +556,7 @@ func (s *Server) taskList(response http.ResponseWriter, request *http.Request) {
 		}
 		limit = parsed
 	}
-	tasks := s.tasks.Tasks().List(taskcenter.TaskFilter{Status: status, Search: request.URL.Query().Get("search")})
-	if len(tasks) > limit {
-		tasks = tasks[:limit]
-	}
+	tasks := s.tasks.Tasks().ListLimited(taskcenter.TaskFilter{Status: status, Search: request.URL.Query().Get("search")}, limit)
 	writeJSON(response, http.StatusOK, map[string]any{"tasks": tasks})
 }
 

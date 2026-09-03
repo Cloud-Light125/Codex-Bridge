@@ -3,6 +3,7 @@ package appserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -116,6 +117,50 @@ func TestHistoryReaderPaginatedUsesTurnsAndItemsWithoutFullRead(t *testing.T) {
 	items := historyObjects(turns[0]["items"])
 	if got := []string{historyString(items[0], "id"), historyString(items[1], "id")}; !reflect.DeepEqual(got, []string{"user-1", "assistant-1"}) {
 		t.Fatalf("turn-1 items = %#v; want unwrapped chronological items", got)
+	}
+}
+
+func TestHistoryReaderDefaultWindowCapsTurnsAndItems(t *testing.T) {
+	fake := &fakeHistoryRPC{
+		read: func(includeTurns bool) (map[string]any, error) {
+			if includeTurns {
+				return nil, &RPCError{Code: -32600, Message: "includeTurns is unsupported"}
+			}
+			return paginatedMetadata("bounded-thread", "paginated"), nil
+		},
+		turns: func(options ThreadTurnsListOptions) (map[string]any, error) {
+			data := make([]map[string]any, 0, 40)
+			for index := 0; index < 40; index++ {
+				data = append(data, map[string]any{"id": fmt.Sprintf("turn-%02d", index), "status": "completed"})
+			}
+			return map[string]any{"data": data}, nil
+		},
+		items: func(options ThreadItemsListOptions) (map[string]any, error) {
+			data := make([]map[string]any, 0, options.Limit)
+			for index := 0; index < options.Limit; index++ {
+				data = append(data, map[string]any{"id": fmt.Sprintf("%s-item-%03d", options.TurnID, index), "type": "agentMessage"})
+			}
+			return map[string]any{"data": data}, nil
+		},
+	}
+
+	result, err := NewHistoryReader(fake, nil).ReadThread(context.Background(), "bounded-thread", 0)
+	if err != nil {
+		t.Fatalf("ReadThread returned error: %v", err)
+	}
+	turns := historyObjects(result["thread"].(map[string]any)["turns"])
+	if len(turns) != DefaultHistoryTurnLimit {
+		t.Fatalf("turn count = %d; want %d", len(turns), DefaultHistoryTurnLimit)
+	}
+	itemCount := 0
+	for _, turn := range turns {
+		itemCount += len(historyObjects(turn["items"]))
+	}
+	if itemCount != maxHistoryItemCount {
+		t.Fatalf("item count = %d; want %d", itemCount, maxHistoryItemCount)
+	}
+	if len(fake.itemCalls) != maxHistoryItemCount/maxHistoryItemsPerTurn {
+		t.Fatalf("item page calls = %d; want %d", len(fake.itemCalls), maxHistoryItemCount/maxHistoryItemsPerTurn)
 	}
 }
 

@@ -49,11 +49,12 @@ const (
 const (
 	// The desktop initially shows a bounded recent window. Callers that need a
 	// smaller window (for example /history 3) pass that limit explicitly.
-	DefaultHistoryTurnLimit  = 50
+	DefaultHistoryTurnLimit  = 30
 	ActivityHistoryTurnLimit = 1
 	maxHistoryTurnLimit      = 50
 	maxHistoryPageCount      = 100
-	maxHistoryItemCount      = 5000
+	maxHistoryItemCount      = 300
+	maxHistoryItemsPerTurn   = 100
 	historyTurnPageLimit     = 50
 	historyItemPageLimit     = 100
 )
@@ -303,13 +304,16 @@ func (r *HistoryReader) readPaginated(ctx context.Context, metadata map[string]a
 	if err != nil {
 		return nil, err
 	}
+	remainingItems := maxHistoryItemCount
 	for index := range turns {
 		if includeItems {
-			items, itemErr := r.readItems(ctx, threadID, turnID(turns[index]))
+			itemLimit := minInt(maxHistoryItemsPerTurn, remainingItems)
+			items, itemErr := r.readItems(ctx, threadID, turnID(turns[index]), itemLimit)
 			if itemErr != nil {
 				return nil, itemErr
 			}
 			turns[index]["items"] = items
+			remainingItems -= len(items)
 		} else {
 			// Preserve the existing DTO shape while making it explicit that
 			// Activity intentionally did not load any Items.
@@ -374,8 +378,8 @@ func (r *HistoryReader) readTurns(ctx context.Context, threadID string, limit in
 	return turns, nil
 }
 
-func (r *HistoryReader) readItems(ctx context.Context, threadID, turnID string) ([]map[string]any, error) {
-	if strings.TrimSpace(turnID) == "" {
+func (r *HistoryReader) readItems(ctx context.Context, threadID, turnID string, limit int) ([]map[string]any, error) {
+	if strings.TrimSpace(turnID) == "" || limit <= 0 {
 		return []map[string]any{}, nil
 	}
 	items := make([]map[string]any, 0)
@@ -383,11 +387,11 @@ func (r *HistoryReader) readItems(ctx context.Context, threadID, turnID string) 
 	seenCursors := make(map[string]bool)
 	cursor := ""
 	pageCount := 0
-	for pageCount < maxHistoryPageCount && len(items) < maxHistoryItemCount {
+	for pageCount < maxHistoryPageCount && len(items) < limit {
 		pageCount++
 		page, err := r.rpc.ThreadItemsList(ctx, ThreadItemsListOptions{
 			ThreadID: threadID, TurnID: turnID, Cursor: cursor,
-			Limit: historyItemPageLimit, SortDirection: "asc",
+			Limit: minInt(historyItemPageLimit, limit-len(items)), SortDirection: "asc",
 		})
 		if err != nil {
 			if isHistoryUnsupportedError(err) {
@@ -405,7 +409,7 @@ func (r *HistoryReader) readItems(ctx context.Context, threadID, turnID string) 
 				seenItems[id] = true
 			}
 			items = append(items, item)
-			if len(items) >= maxHistoryItemCount {
+			if len(items) >= limit {
 				break
 			}
 		}

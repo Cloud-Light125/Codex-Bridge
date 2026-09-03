@@ -37,6 +37,7 @@ public sealed class CodexDiscoveryService(LogService logs)
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentDiagnostics = new(StringComparer.Ordinal);
     private const int MaximumSearchDepth = 6;
     private const int MaximumSearchedDirectories = 1024;
+    private const int MaximumRecentDiagnostics = 512;
 
     public Task<CodexDiscoveryResult> DiscoverAsync(
         string? savedPath,
@@ -485,6 +486,13 @@ public sealed class CodexDiscoveryService(LogService logs)
     private void LogThrottled(string key, string message)
     {
         var now = DateTimeOffset.UtcNow;
+        foreach (var candidate in _recentDiagnostics)
+            if (now - candidate.Value >= TimeSpan.FromMinutes(10)) _recentDiagnostics.TryRemove(candidate.Key, out _);
+        if (_recentDiagnostics.Count >= MaximumRecentDiagnostics && !_recentDiagnostics.ContainsKey(key))
+        {
+            var oldest = _recentDiagnostics.OrderBy(pair => pair.Value).FirstOrDefault();
+            if (!string.IsNullOrEmpty(oldest.Key)) _recentDiagnostics.TryRemove(oldest.Key, out _);
+        }
         if (_recentDiagnostics.TryGetValue(key, out var previous) && now - previous < TimeSpan.FromSeconds(30)) return;
         _recentDiagnostics[key] = now;
         logs.Add("codex-discovery", message);

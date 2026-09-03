@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -217,6 +218,45 @@ func waitForOpenClaw(t *testing.T, service *Service, predicate func(conversation
 	status := service.ConnectionStatus()
 	t.Fatalf("OpenClaw status did not reach expected state: %#v", status)
 	return status
+}
+
+func TestServiceRepeatedStartStopDoesNotAccumulateGoroutines(t *testing.T) {
+	_, server := newFakeGateway(t)
+	broker := events.NewBroker()
+	numbers, err := sessionregistry.New(filepath.Join(t.TempDir(), "openclaw-session-numbers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil, broker, numbers)
+	defer service.Close()
+
+	gatewayURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	baseline := runtime.NumGoroutine()
+	peak := baseline
+	for cycle := 0; cycle < 20; cycle++ {
+		if _, err := service.ConfigureConfig(Config{GatewayURL: gatewayURL, Token: "test-token", AutoReconnect: false, Start: true}); err != nil {
+			t.Fatalf("configure cycle %d: %v", cycle, err)
+		}
+		waitForOpenClaw(t, service, func(status conversation.ConnectionStatus) bool { return status.Connected })
+		if err := service.Close(); err != nil {
+			t.Fatalf("close cycle %d: %v", cycle, err)
+		}
+		runtime.Gosched()
+		if current := runtime.NumGoroutine(); current > peak {
+			peak = current
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && runtime.NumGoroutine() > baseline+4 {
+		runtime.Gosched()
+		time.Sleep(20 * time.Millisecond)
+	}
+	final := runtime.NumGoroutine()
+	t.Logf("OpenClaw start/stop cycles=20 goroutines baseline=%d peak=%d final=%d", baseline, peak, final)
+	if final > baseline+4 {
+		t.Fatalf("goroutines did not return near baseline: baseline=%d final=%d", baseline, final)
+	}
 }
 
 func TestServiceConnectsListsSendsFinalAbortsAndReconnects(t *testing.T) {

@@ -189,6 +189,13 @@ func (r *TaskRegistry) GetByID(id string) (Task, bool) {
 }
 
 func (r *TaskRegistry) List(filter TaskFilter) []Task {
+	return r.ListLimited(filter, 0)
+}
+
+// ListLimited selects the newest matching tasks before cloning their payloads.
+// The registry remains a durable full history, but list callers do not need to
+// allocate/copy every long FinalText just to return the first page.
+func (r *TaskRegistry) ListLimited(filter TaskFilter, limit int) []Task {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	status := strings.ToLower(strings.TrimSpace(filter.Status))
@@ -201,9 +208,18 @@ func (r *TaskRegistry) List(filter TaskFilter) []Task {
 		if search != "" && !taskMatchesSearch(task, search) {
 			continue
 		}
-		result = append(result, cloneTask(task))
+		// Keep this first pass shallow. The list endpoint normally truncates the
+		// sorted candidates, so cloning long descriptions/results here would
+		// allocate the entire durable history unnecessarily.
+		result = append(result, task)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].TaskNumber > result[j].TaskNumber })
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	for index := range result {
+		result[index] = cloneTask(result[index])
+	}
 	return result
 }
 

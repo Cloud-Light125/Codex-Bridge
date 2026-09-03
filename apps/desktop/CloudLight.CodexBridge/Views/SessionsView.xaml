@@ -110,9 +110,14 @@
                         </Grid>
                     </Border>
 
-                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                        <StackPanel Margin="20">
-                            <Border Background="{DynamicResource CodeBrush}" CornerRadius="6" Padding="12" Margin="0,0,0,14">
+                    <Grid Grid.Row="1" Margin="20">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                            <Border Grid.Row="0" Background="{DynamicResource CodeBrush}" CornerRadius="6" Padding="12" Margin="0,0,0,14">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="100" />
@@ -138,13 +143,14 @@
                                 </Grid>
                             </Border>
 
-                            <Border Visibility="{Binding PersistenceVerificationVisibility}" Background="{DynamicResource CodeBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,14">
+                            <Border Grid.Row="1" Visibility="{Binding PersistenceVerificationVisibility}" Background="{DynamicResource CodeBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,14">
                                 <StackPanel>
                                     <TextBlock Text="会话检查结果" FontWeight="SemiBold" />
                                     <TextBox Text="{Binding PersistenceVerificationText, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" Foreground="{DynamicResource SecondaryTextBrush}" Margin="0,6,0,0" />
                                 </StackPanel>
                             </Border>
 
+                        <ScrollViewer Grid.Row="2" MaxHeight="260" VerticalScrollBarVisibility="Auto">
                             <ItemsControl ItemsSource="{Binding PendingInteractions}">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
@@ -209,10 +215,42 @@
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
+                        </ScrollViewer>
 
-                            <TextBlock Text="消息与工具事件" FontSize="17" FontWeight="SemiBold" Margin="0,4,0,10" />
-                            <ItemsControl ItemsSource="{Binding Timeline}">
-                                <ItemsControl.ItemTemplate>
+                        <Grid Grid.Row="3">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="消息与工具事件" FontSize="17" FontWeight="SemiBold" Margin="0,4,0,10" />
+                            <ListBox Grid.Row="1" ItemsSource="{Binding Timeline}" BorderThickness="0"
+                                     ScrollViewer.CanContentScroll="True"
+                                     VirtualizingPanel.IsVirtualizing="True"
+                                     VirtualizingPanel.VirtualizationMode="Recycling">
+                                <ListBox.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <VirtualizingStackPanel />
+                                    </ItemsPanelTemplate>
+                                </ListBox.ItemsPanel>
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="{x:Type ListBoxItem}">
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                        <Setter Property="Padding" Value="0" />
+                                        <Setter Property="Margin" Value="0" />
+                                        <Setter Property="Background" Value="Transparent" />
+                                        <Setter Property="BorderThickness" Value="0" />
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                                                    <ContentPresenter Content="{TemplateBinding Content}"
+                                                                      ContentTemplate="{TemplateBinding ContentTemplate}"
+                                                                      HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" />
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <Border BorderBrush="{Binding StatusBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,9">
                                             <StackPanel>
@@ -231,10 +269,10 @@
                                             </StackPanel>
                                         </Border>
                                     </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </StackPanel>
-                    </ScrollViewer>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
+                    </Grid>
 
                     <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16">
                         <StackPanel>

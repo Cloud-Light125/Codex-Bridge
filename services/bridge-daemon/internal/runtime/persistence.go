@@ -35,7 +35,11 @@ var completedPersistenceRetryDelays = []time.Duration{
 	10 * time.Second,
 }
 
-const completedPersistenceInitialDelay = 0
+const (
+	completedPersistenceInitialDelay = 0
+	maxPersistenceRecords            = 512
+	traceRetention                   = 30 * time.Minute
+)
 
 type turnTrace struct {
 	mu sync.Mutex
@@ -156,6 +160,7 @@ func (m *Manager) beginTurnTrace(threadID string, initial control.ThreadPersiste
 		RolloutBefore:    statFile(initial.RolloutPath),
 	}
 	m.traceMu.Lock()
+	m.pruneTracesLocked(time.Now().UTC())
 	m.traces[threadID] = trace
 	m.traceMu.Unlock()
 	m.logger.Printf(
@@ -163,6 +168,31 @@ func (m *Manager) beginTurnTrace(threadID string, initial control.ThreadPersiste
 		threadID, safeDiagnosticPath(initial.RolloutPath), trace.RolloutBefore.Exists, trace.RolloutBefore.Length,
 	)
 	return trace
+}
+
+func (m *Manager) pruneTracesLocked(now time.Time) {
+	for threadID, trace := range m.traces {
+		if trace.routingActive() || trace.StartedAt.IsZero() || now.Sub(trace.StartedAt) < traceRetention {
+			continue
+		}
+		delete(m.traces, threadID)
+	}
+	for len(m.traces) > maxPersistenceRecords {
+		oldestID := ""
+		var oldestAt time.Time
+		for threadID, trace := range m.traces {
+			if trace.routingActive() {
+				continue
+			}
+			if oldestID == "" || trace.StartedAt.Before(oldestAt) {
+				oldestID, oldestAt = threadID, trace.StartedAt
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		delete(m.traces, oldestID)
+	}
 }
 
 func (m *Manager) turnTrace(threadID string) *turnTrace {
@@ -311,6 +341,23 @@ func (m *Manager) lastVerification(threadID string) (control.PersistenceVerifica
 func (m *Manager) saveVerification(verification control.PersistenceVerification) {
 	m.traceMu.Lock()
 	m.lastVerifications[verification.ThreadID] = verification
+	for len(m.lastVerifications) > maxPersistenceRecords {
+		oldestID := ""
+		var oldestAt time.Time
+		for threadID, candidate := range m.lastVerifications {
+			at, err := time.Parse(time.RFC3339Nano, candidate.VerifiedAt)
+			if err != nil {
+				at = time.Time{}
+			}
+			if oldestID == "" || at.Before(oldestAt) {
+				oldestID, oldestAt = threadID, at
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(m.lastVerifications, oldestID)
+	}
 	m.traceMu.Unlock()
 }
 
@@ -322,9 +369,8 @@ func (m *Manager) VerifyThreadPersistence(ctx context.Context, threadID string) 
 	if threadID == "" {
 		return control.PersistenceVerification{}, &ValidationError{Code: "invalid_thread_id", Message: "Thread ID is required"}
 	}
-	lock := m.threadLock(threadID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := m.lockThread(threadID)
+	defer unlock()
 	stateBefore := m.RuntimeState(threadID)
 	if isActiveState(stateBefore.State) && stateBefore.State != StateCompletedUnverified {
 		return control.PersistenceVerification{}, busyError(threadID, stateBefore.State)

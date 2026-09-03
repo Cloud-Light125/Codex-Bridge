@@ -67,6 +67,7 @@ func (m *Manager) setState(state control.RuntimeState, publish bool) {
 	m.stateMu.Lock()
 	previous, existed := m.states[state.ThreadID]
 	m.states[state.ThreadID] = state
+	m.pruneStatesLocked()
 	m.stateMu.Unlock()
 	if publish && (!existed || previous.State != state.State || previous.TurnID != state.TurnID || previous.PendingInteractionCount != state.PendingInteractionCount) {
 		m.broker.PublishScoped(events.TurnStatusChanged, state.ThreadID, state.TurnID, "", map[string]any{"runtime": state})
@@ -140,9 +141,8 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 	if text == "" {
 		return control.TurnAccepted{}, &ValidationError{Code: "empty_text", Message: "消息内容不能为空"}
 	}
-	lock := m.threadLock(threadID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := m.lockThread(threadID)
+	defer unlock()
 
 	client, err := m.runningClient()
 	if err != nil {
@@ -295,9 +295,8 @@ func isRemoteChannelTurn(origin string) bool {
 
 func (m *Manager) InterruptTurn(ctx context.Context, threadID, turnID string) (control.InterruptResult, error) {
 	threadID, turnID = strings.TrimSpace(threadID), strings.TrimSpace(turnID)
-	lock := m.threadLock(threadID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := m.lockThread(threadID)
+	defer unlock()
 	state := m.RuntimeState(threadID)
 	if state.TurnID == turnID && (state.State == StateCompleted || state.State == StateFailed) {
 		return control.InterruptResult{ThreadID: threadID, TurnID: turnID, Status: state.State}, nil

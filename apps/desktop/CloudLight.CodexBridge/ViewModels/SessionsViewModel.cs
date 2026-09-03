@@ -1,10 +1,11 @@
-using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Threading;
 using CloudLight.CodexBridge.Infrastructure;
 using CloudLight.CodexBridge.Models;
 using CloudLight.CodexBridge.Services;
@@ -13,6 +14,12 @@ namespace CloudLight.CodexBridge.ViewModels;
 
 public sealed class SessionsViewModel : ObservableObject
 {
+    private const int MaximumInitialTimelineEntries = 300;
+    private const int MaximumVisibleTimelineEntries = 512;
+    private const int MaximumPersistedTurns = 1024;
+    private const int MaximumToolOutputCharacters = 128 * 1024;
+    private const int StreamingFlushCharacters = 512;
+    private const string TruncatedOutputMarker = "\n\n[输出过长，已截断；完整内容请查看日志/原始任务结果。]";
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
     private readonly BridgeApiClient _api;
     private readonly LogService _logs;
@@ -34,8 +41,14 @@ public sealed class SessionsViewModel : ObservableObject
     private long _selectionVersion;
     private CancellationTokenSource? _detailCancellation;
     private CancellationTokenSource? _reloadCancellation;
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _detailFlights = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DetailFlight> _detailFlights = new(StringComparer.Ordinal);
+    private readonly object _detailFlightsGate = new();
     private readonly HashSet<string> _persistedTurns = new(StringComparer.Ordinal);
+    private readonly Queue<string> _persistedTurnOrder = new();
+    private readonly Dictionary<string, StringBuilder> _streamBuffers = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _truncatedStreams = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _streamPublishedLengths = new(StringComparer.Ordinal);
+    private readonly DispatcherTimer? _streamFlushTimer;
 
     public SessionsViewModel(BridgeApiClient api, LogService logs)
     {
@@ -58,6 +71,15 @@ public sealed class SessionsViewModel : ObservableObject
         AllowInteractionCommand = new RelayCommand(value => _ = RespondInteractionAsync(value as PendingInteractionViewModel, "allow"));
         DenyInteractionCommand = new RelayCommand(value => _ = RespondInteractionAsync(value as PendingInteractionViewModel, "deny"));
         SubmitAnswersCommand = new RelayCommand(value => _ = RespondInteractionAsync(value as PendingInteractionViewModel, "submit"));
+        if (Application.Current?.Dispatcher is { } dispatcher)
+        {
+            _streamFlushTimer = new DispatcherTimer(DispatcherPriority.DataBind, dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(75)
+            };
+            _streamFlushTimer.Tick += (_, _) => FlushStreamingBuffers();
+            _streamFlushTimer.Start();
+        }
     }
 
     public ObservableCollection<ThreadSummary> Threads { get; } = [];
@@ -75,6 +97,13 @@ public sealed class SessionsViewModel : ObservableObject
     public ICommand AllowInteractionCommand { get; }
     public ICommand DenyInteractionCommand { get; }
     public ICommand SubmitAnswersCommand { get; }
+    public int ActiveDetailFlightCount
+    {
+        get
+        {
+            lock (_detailFlightsGate) return _detailFlights.Count;
+        }
+    }
 
     public string SearchText
     {
@@ -96,9 +125,10 @@ public sealed class SessionsViewModel : ObservableObject
             {
                 CancelDetailLoad();
                 SelectedDetail = null;
+                ClearStreamingBuffers();
                 Timeline.Clear();
                 PendingInteractions.Clear();
-                _persistedTurns.Clear();
+                ClearPersistedTurns();
                 SetPersistenceVerificationText("");
                 SetViewState("empty");
                 return;
@@ -193,8 +223,10 @@ public sealed class SessionsViewModel : ObservableObject
             if (SelectedThread is null)
             {
                 SelectedDetail = null;
+                ClearStreamingBuffers();
                 Timeline.Clear();
                 PendingInteractions.Clear();
+                ClearPersistedTurns();
                 SetViewState("empty");
             }
             else if (reloadSelected)
@@ -345,8 +377,9 @@ public sealed class SessionsViewModel : ObservableObject
     {
         CancelDetailLoad();
         SelectedDetail = null;
+        ClearStreamingBuffers();
         Timeline.Clear();
-        _persistedTurns.Clear();
+        ClearPersistedTurns();
         ErrorText = "";
         ActionError = "";
         SetPersistenceVerificationText("");
@@ -358,11 +391,11 @@ public sealed class SessionsViewModel : ObservableObject
 
     private async Task LoadDetailAsync(string threadId, long version, CancellationToken cancellationToken)
     {
-        var flight = _detailFlights.GetOrAdd(threadId, static _ => new SemaphoreSlim(1, 1));
+        var flight = AcquireDetailFlight(threadId);
         var acquired = false;
         try
         {
-            await flight.WaitAsync(cancellationToken);
+            await flight.Gate.WaitAsync(cancellationToken);
             acquired = true;
             var detailTask = _api.GetThreadAsync(threadId, cancellationToken);
             var interactionsTask = _api.GetInteractionsAsync("pending", cancellationToken);
@@ -374,9 +407,13 @@ public sealed class SessionsViewModel : ObservableObject
                 _logs.Add("desktop", $"读取待处理交互失败：{exception.Message}");
             }
             if (!IsCurrentSelection(threadId, version)) return;
-            SelectedDetail = detail;
             SetRuntime(detail.Runtime);
             RebuildTimeline(detail);
+            // The Timeline is the active UI projection. Keep only metadata and
+            // runtime in SelectedDetail so the deserialized Turn/Item graph and
+            // the projected card text are not retained together.
+            detail.Turns = [];
+            SelectedDetail = detail;
             PendingInteractions.Clear();
             foreach (var interaction in interactionList?.Interactions.Where(item => item.ThreadId == threadId) ?? [])
             {
@@ -394,7 +431,7 @@ public sealed class SessionsViewModel : ObservableObject
         }
         finally
         {
-            if (acquired) flight.Release();
+            ReleaseDetailFlight(threadId, flight, acquired);
         }
     }
 
@@ -424,7 +461,7 @@ public sealed class SessionsViewModel : ObservableObject
             HandlePersistenceStatus(new BridgeEvent { ThreadId = result.ThreadId, TurnId = result.ExpectedTurnId }, result.Status);
             if (result.Status is "persisted")
             {
-                if (!string.IsNullOrWhiteSpace(result.ExpectedTurnId)) _persistedTurns.Add(result.ExpectedTurnId);
+                RememberPersistedTurn(result.ExpectedTurnId);
                 // The diagnostic API has already used a separate app-server.
                 // Re-read official history to replace only matching temporary cards.
                 ScheduleRecalibration();
@@ -560,11 +597,17 @@ public sealed class SessionsViewModel : ObservableObject
             .ToArray();
         var unverifiedTurnIds = temporary.Select(entry => entry.TurnId).Where(id => !string.IsNullOrWhiteSpace(id)).ToHashSet(StringComparer.Ordinal);
         Timeline.Clear();
-        foreach (var turn in detail.Turns)
+        var recentItems = new List<(TurnDetail Turn, ItemDetail Item)>(MaximumInitialTimelineEntries);
+        for (var turnIndex = detail.Turns.Count - 1; turnIndex >= 0 && recentItems.Count < MaximumInitialTimelineEntries; turnIndex--)
         {
+            var turn = detail.Turns[turnIndex];
             if (unverifiedTurnIds.Contains(turn.TurnId)) continue;
-            foreach (var item in turn.Items)
-            {
+            for (var itemIndex = turn.Items.Count - 1; itemIndex >= 0 && recentItems.Count < MaximumInitialTimelineEntries; itemIndex--)
+                recentItems.Add((turn, turn.Items[itemIndex]));
+        }
+        recentItems.Reverse();
+        foreach (var (turn, item) in recentItems)
+        {
                 var type = item.Type;
                 var expandable = type is "commandExecution" or "fileChange" or "dynamicToolCall" or "mcpToolCall" or "webSearch" or "collabAgentToolCall";
                 var known = type is "userMessage" or "agentMessage" or "commandExecution" or "fileChange" or "dynamicToolCall" or "mcpToolCall" or "webSearch" or "collabAgentToolCall";
@@ -585,7 +628,9 @@ public sealed class SessionsViewModel : ObservableObject
                 {
                     Key = $"{turn.TurnId}:{item.ItemId}", TurnId = turn.TurnId, ItemId = item.ItemId,
                     Timestamp = string.IsNullOrWhiteSpace(turn.UpdatedAt) ? turn.CreatedAt : turn.UpdatedAt,
-                    Kind = kind, Title = title, Text = string.Join(Environment.NewLine, new[] { item.Text, item.Label, item.Output }.Where(value => !string.IsNullOrWhiteSpace(value))),
+                    Kind = kind, Title = title, Text = expandable
+                        ? LimitText(string.Join(Environment.NewLine, new[] { item.Text, item.Label, item.Output }.Where(value => !string.IsNullOrWhiteSpace(value))), MaximumToolOutputCharacters)
+                        : string.Join(Environment.NewLine, new[] { item.Text, item.Label, item.Output }.Where(value => !string.IsNullOrWhiteSpace(value))),
                     // Item state and turn state are different concepts.  Do not
                     // borrow turn.Status here: it made unknown cards look like a
                     // completed message.
@@ -594,24 +639,24 @@ public sealed class SessionsViewModel : ObservableObject
                         : UiText.Status(item.Status),
                     IsExpandable = expandable
                 });
-            }
         }
         foreach (var entry in temporary) Timeline.Add(entry);
+        TrimTimeline();
     }
 
     private void AppendAssistantDelta(BridgeEvent bridgeEvent, string delta)
     {
         if (string.IsNullOrEmpty(delta)) return;
         var entry = FindTimeline(bridgeEvent) ?? CreateTimeline(bridgeEvent, "assistant", "Codex", false);
-        entry.Text += delta;
-        entry.Status = "待确认（正在回复）";
+        AppendStreamingText(entry, delta, int.MaxValue, "待确认（正在回复）");
     }
 
     private void CompleteAssistant(BridgeEvent bridgeEvent)
     {
         var entry = FindTimeline(bridgeEvent) ?? CreateTimeline(bridgeEvent, "assistant", "Codex", false);
         var text = PayloadText(bridgeEvent.Payload, "text");
-        if (!string.IsNullOrWhiteSpace(text)) entry.Text = text;
+        if (!string.IsNullOrWhiteSpace(text)) SetTimelineText(entry, text);
+        else FinishStreamingEntry(entry);
         entry.Status = "待确认（回复已完成）";
     }
 
@@ -619,15 +664,94 @@ public sealed class SessionsViewModel : ObservableObject
     {
         if (string.IsNullOrEmpty(delta)) return;
         var entry = FindTimeline(bridgeEvent) ?? CreateTimeline(bridgeEvent, "tool", "工具调用", true);
-        entry.Text += delta;
-        entry.Status = "正在执行";
+        AppendStreamingText(entry, delta, MaximumToolOutputCharacters, "正在执行");
     }
 
     private void AddOrUpdateTimeline(BridgeEvent bridgeEvent, string kind, string title, string text, bool expandable, string status = "")
     {
         var entry = FindTimeline(bridgeEvent) ?? CreateTimeline(bridgeEvent, kind, title, expandable);
-        if (!string.IsNullOrWhiteSpace(text)) entry.Text = text;
+        if (!string.IsNullOrWhiteSpace(text)) SetTimelineText(entry, expandable ? LimitText(text, MaximumToolOutputCharacters) : text);
         if (!string.IsNullOrWhiteSpace(status)) entry.Status = status;
+    }
+
+    private void AppendStreamingText(TimelineEntry entry, string delta, int maximumCharacters, string status)
+    {
+        if (!_streamBuffers.TryGetValue(entry.Key, out var buffer))
+        {
+            buffer = new StringBuilder(entry.Text);
+            _streamBuffers[entry.Key] = buffer;
+            _streamPublishedLengths[entry.Key] = buffer.Length;
+        }
+
+        if (buffer.Length < maximumCharacters)
+        {
+            var remaining = maximumCharacters - buffer.Length;
+            if (delta.Length <= remaining) buffer.Append(delta);
+            else
+            {
+                buffer.Append(delta.AsSpan(0, remaining));
+                _truncatedStreams.Add(entry.Key);
+            }
+        }
+        else if (maximumCharacters != int.MaxValue)
+        {
+            _truncatedStreams.Add(entry.Key);
+        }
+
+        entry.Status = status;
+        if (_streamFlushTimer is null || buffer.Length - _streamPublishedLengths.GetValueOrDefault(entry.Key) >= StreamingFlushCharacters)
+            FlushStreamingEntry(entry);
+    }
+
+    private void FlushStreamingBuffers()
+    {
+        foreach (var key in _streamBuffers.Keys.ToArray())
+        {
+            var entry = Timeline.FirstOrDefault(item => item.Key == key);
+            if (entry is null)
+            {
+                _streamBuffers.Remove(key);
+                _truncatedStreams.Remove(key);
+                _streamPublishedLengths.Remove(key);
+                continue;
+            }
+            FlushStreamingEntry(entry);
+        }
+    }
+
+    private void FlushStreamingEntry(TimelineEntry entry)
+    {
+        if (!_streamBuffers.TryGetValue(entry.Key, out var buffer)) return;
+        var truncated = _truncatedStreams.Contains(entry.Key);
+        if (buffer.Length == _streamPublishedLengths.GetValueOrDefault(entry.Key) &&
+            (!truncated || entry.Text.EndsWith(TruncatedOutputMarker, StringComparison.Ordinal))) return;
+        var text = buffer.ToString();
+        if (truncated) text += TruncatedOutputMarker;
+        if (!string.Equals(entry.Text, text, StringComparison.Ordinal)) entry.Text = text;
+        _streamPublishedLengths[entry.Key] = buffer.Length;
+    }
+
+    private void FinishStreamingEntry(TimelineEntry entry)
+    {
+        FlushStreamingEntry(entry);
+        _streamBuffers.Remove(entry.Key);
+        _truncatedStreams.Remove(entry.Key);
+        _streamPublishedLengths.Remove(entry.Key);
+    }
+
+    private void SetTimelineText(TimelineEntry entry, string text)
+    {
+        _streamBuffers.Remove(entry.Key);
+        _truncatedStreams.Remove(entry.Key);
+        _streamPublishedLengths.Remove(entry.Key);
+        entry.Text = text;
+    }
+
+    private void ClearStreamingBuffers()
+    {
+        _streamBuffers.Clear();
+        _truncatedStreams.Clear();
+        _streamPublishedLengths.Clear();
     }
 
     private TimelineEntry? FindTimeline(BridgeEvent bridgeEvent)
@@ -644,7 +768,30 @@ public sealed class SessionsViewModel : ObservableObject
             Kind = kind, Title = title, IsExpandable = expandable, IsTemporary = true
         };
         Timeline.Add(entry);
+        TrimTimeline();
         return entry;
+    }
+
+    private void TrimTimeline()
+    {
+        while (Timeline.Count > MaximumVisibleTimelineEntries)
+        {
+            var index = -1;
+            for (var candidate = 0; candidate < Timeline.Count; candidate++)
+            {
+                if (!Timeline[candidate].IsTemporary)
+                {
+                    index = candidate;
+                    break;
+                }
+            }
+            if (index < 0) index = 0;
+            var removed = Timeline[index];
+            Timeline.RemoveAt(index);
+            _streamBuffers.Remove(removed.Key);
+            _truncatedStreams.Remove(removed.Key);
+            _streamPublishedLengths.Remove(removed.Key);
+        }
     }
 
     private void MarkTurnCompletedUnverified(BridgeEvent bridgeEvent)
@@ -668,7 +815,7 @@ public sealed class SessionsViewModel : ObservableObject
         switch (status)
         {
             case "persisted":
-                _persistedTurns.Add(bridgeEvent.TurnId);
+                RememberPersistedTurn(bridgeEvent.TurnId);
                 ScheduleRecalibration();
                 break;
             case "completed-unverified":
@@ -700,6 +847,20 @@ public sealed class SessionsViewModel : ObservableObject
         OnPropertyChanged(nameof(RuntimeSourceText));
         OnPropertyChanged(nameof(CurrentTurnId));
         RefreshCommandStates();
+    }
+
+    private void RememberPersistedTurn(string turnId)
+    {
+        if (string.IsNullOrWhiteSpace(turnId) || !_persistedTurns.Add(turnId)) return;
+        _persistedTurnOrder.Enqueue(turnId);
+        while (_persistedTurnOrder.Count > MaximumPersistedTurns)
+            _persistedTurns.Remove(_persistedTurnOrder.Dequeue());
+    }
+
+    private void ClearPersistedTurns()
+    {
+        _persistedTurns.Clear();
+        _persistedTurnOrder.Clear();
     }
 
     private void SetViewState(string state)
@@ -749,21 +910,23 @@ public sealed class SessionsViewModel : ObservableObject
         var version = Interlocked.Read(ref _selectionVersion);
         _ = Task.Run(async () =>
         {
-            var flight = _detailFlights.GetOrAdd(threadId, static _ => new SemaphoreSlim(1, 1));
+            var flight = AcquireDetailFlight(threadId);
             var acquired = false;
             try
             {
                 await Task.Delay(500, token);
-                await flight.WaitAsync(token);
+                await flight.Gate.WaitAsync(token);
                 acquired = true;
                 var detail = await _api.GetThreadAsync(threadId, token);
                 var interactions = await _api.GetInteractionsAsync("pending", token);
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
                     if (!IsCurrentSelection(threadId, version)) return;
-                    SelectedDetail = detail;
                     SetRuntime(detail.Runtime);
+                    ClearStreamingBuffers();
                     RebuildTimeline(detail);
+                    detail.Turns = [];
+                    SelectedDetail = detail;
                     PendingInteractions.Clear();
                     foreach (var item in interactions.Interactions.Where(item => item.ThreadId == threadId))
                         PendingInteractions.Add(new PendingInteractionViewModel(item));
@@ -777,7 +940,7 @@ public sealed class SessionsViewModel : ObservableObject
             }
             finally
             {
-                if (acquired) flight.Release();
+                ReleaseDetailFlight(threadId, flight, acquired);
             }
         }, token);
     }
@@ -821,16 +984,58 @@ public sealed class SessionsViewModel : ObservableObject
         return type switch { "commandExecution" => "命令执行", "webSearch" => "网页搜索", _ => PayloadText(payload, "name", "工具调用") };
     }
 
-    private static string ToolBody(JsonElement payload) => string.Join(Environment.NewLine,
+    private static string ToolBody(JsonElement payload) => LimitText(string.Join(Environment.NewLine,
         new[] { PayloadText(payload, "command"), PayloadText(payload, "cwd"), PayloadText(payload, "aggregatedOutput"), PayloadText(payload, "output") }
-            .Where(value => !string.IsNullOrWhiteSpace(value)));
+            .Where(value => !string.IsNullOrWhiteSpace(value))), MaximumToolOutputCharacters);
 
     private static string FileBody(JsonElement payload)
     {
-        var direct = string.Join(Environment.NewLine, new[] { PayloadText(payload, "path"), PayloadText(payload, "diff") }.Where(value => !string.IsNullOrWhiteSpace(value)));
+        var direct = LimitText(string.Join(Environment.NewLine, new[] { PayloadText(payload, "path"), PayloadText(payload, "diff") }.Where(value => !string.IsNullOrWhiteSpace(value))), MaximumToolOutputCharacters);
         if (!string.IsNullOrWhiteSpace(direct)) return direct;
-        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("changes", out var changes)) return changes.ToString();
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("changes", out var changes)) return LimitText(changes.ToString(), MaximumToolOutputCharacters);
         return "文件状态已更新";
+    }
+
+    private static string LimitText(string value, int maximumCharacters)
+    {
+        if (maximumCharacters <= 0 || value.Length <= maximumCharacters) return value;
+        return value[..maximumCharacters] + TruncatedOutputMarker;
+    }
+
+    private DetailFlight AcquireDetailFlight(string threadId)
+    {
+        lock (_detailFlightsGate)
+        {
+            if (!_detailFlights.TryGetValue(threadId, out var flight))
+            {
+                flight = new DetailFlight();
+                _detailFlights[threadId] = flight;
+            }
+            flight.References++;
+            return flight;
+        }
+    }
+
+    private void ReleaseDetailFlight(string threadId, DetailFlight flight, bool acquired)
+    {
+        if (acquired) flight.Gate.Release();
+        var dispose = false;
+        lock (_detailFlightsGate)
+        {
+            flight.References--;
+            if (flight.References == 0 && _detailFlights.TryGetValue(threadId, out var current) && ReferenceEquals(current, flight))
+            {
+                _detailFlights.Remove(threadId);
+                dispose = true;
+            }
+        }
+        if (dispose) flight.Gate.Dispose();
+    }
+
+    private sealed class DetailFlight
+    {
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+        public int References { get; set; }
     }
 
     private bool MatchesSearch(object item)

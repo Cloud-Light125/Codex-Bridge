@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Text;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Threading;
 using CloudLight.CodexBridge.Infrastructure;
 using CloudLight.CodexBridge.Models;
 using CloudLight.CodexBridge.Services;
@@ -14,6 +16,11 @@ namespace CloudLight.CodexBridge.ViewModels;
 // keeping each list and event stream isolated.
 public sealed class OpenClawViewModel : ObservableObject
 {
+    private const int MaximumInitialMessages = 200;
+    private const int MaximumVisibleMessages = 256;
+    private const int MaximumMessageCharacters = 128 * 1024;
+    private const string TruncatedMessageMarker = "\n\n[消息过长，界面已截断；原始内容仍保留在 Gateway 历史中。]";
+    private const int StreamingFlushCharacters = 512;
     private readonly BridgeApiClient _api;
     private readonly LogService _logs;
     private readonly AsyncRelayCommand _sendCommand;
@@ -28,6 +35,10 @@ public sealed class OpenClawViewModel : ObservableObject
     private bool _isSending;
     private long _selectionVersion;
     private CancellationTokenSource? _detailCancellation;
+    private readonly Dictionary<string, StringBuilder> _streamBuffers = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _truncatedStreams = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _streamPublishedLengths = new(StringComparer.Ordinal);
+    private readonly DispatcherTimer? _streamFlushTimer;
 
     public OpenClawViewModel(BridgeApiClient api, LogService logs)
     {
@@ -41,6 +52,15 @@ public sealed class OpenClawViewModel : ObservableObject
         _stopCommand = new AsyncRelayCommand(StopAsync, () => CanStop);
         StopCommand = _stopCommand;
         CopySessionKeyCommand = new RelayCommand(_ => CopySessionKey());
+        if (Application.Current?.Dispatcher is { } dispatcher)
+        {
+            _streamFlushTimer = new DispatcherTimer(DispatcherPriority.DataBind, dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(75)
+            };
+            _streamFlushTimer.Tick += (_, _) => FlushStreamingBuffers();
+            _streamFlushTimer.Start();
+        }
     }
 
     public ObservableCollection<OpenClawSessionSummary> Sessions { get; } = [];
@@ -62,6 +82,7 @@ public sealed class OpenClawViewModel : ObservableObject
             {
                 CancelDetailLoad();
                 SelectedDetail = null;
+                ClearStreamingBuffers();
                 Messages.Clear();
                 RefreshCommandStates();
                 return;
@@ -170,6 +191,7 @@ public sealed class OpenClawViewModel : ObservableObject
     {
         CancelDetailLoad();
         SelectedDetail = null;
+        ClearStreamingBuffers();
         Messages.Clear();
         ErrorText = "";
         var version = Interlocked.Increment(ref _selectionVersion);
@@ -183,18 +205,25 @@ public sealed class OpenClawViewModel : ObservableObject
         {
             var detail = await _api.GetOpenClawSessionAsync(key, cancellationToken);
             if (!IsCurrentSelection(key, version)) return;
-            SelectedDetail = detail;
             Messages.Clear();
-            foreach (var message in detail.Messages)
+            var firstMessage = Math.Max(0, detail.Messages.Count - MaximumInitialMessages);
+            for (var index = firstMessage; index < detail.Messages.Count; index++)
             {
+                var message = detail.Messages[index];
                 var user = string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase);
                 Messages.Add(new TimelineEntry
                 {
                     Key = string.IsNullOrWhiteSpace(message.Id) ? $"{message.RunId}:{message.Timestamp}" : message.Id,
                     TurnId = message.RunId, Timestamp = message.Timestamp, Kind = user ? "user" : "assistant",
-                    Title = user ? "用户" : "OpenClaw", Text = message.Text, Status = "消息"
+                    Title = user ? "用户" : "OpenClaw", Text = LimitMessageText(message.Text), Status = "消息"
                 });
             }
+            TrimMessages();
+            // Messages is only the transport DTO. The visible list is the
+            // bounded UI projection, so do not retain the complete Gateway
+            // history beside it after rendering.
+            detail.Messages = [];
+            SelectedDetail = detail;
             RefreshCommandStates();
             OnPropertyChanged(nameof(DetailsVisibility));
             OnPropertyChanged(nameof(EmptyVisibility));
@@ -219,6 +248,7 @@ public sealed class OpenClawViewModel : ObservableObject
         {
             var accepted = await _api.SendOpenClawMessageAsync(SelectedDetail.Key, text);
             Messages.Add(new TimelineEntry { Key = $"pending-user-{accepted.RunId}", TurnId = accepted.RunId, Kind = "user", Title = "用户", Text = text, Status = "已发送", IsTemporary = true });
+            TrimMessages();
             MessageText = "";
             SetActiveRun(accepted.RunId, true);
         }
@@ -261,10 +291,118 @@ public sealed class OpenClawViewModel : ObservableObject
         {
             entry = new TimelineEntry { Key = key, TurnId = bridgeEvent.TurnId, Timestamp = bridgeEvent.Timestamp, Kind = kind, Title = title, IsTemporary = true };
             Messages.Add(entry);
+            TrimMessages();
         }
-        if (!string.IsNullOrWhiteSpace(text)) entry.Text = replace ? text : entry.Text + text;
+        if (replace)
+        {
+            if (!string.IsNullOrWhiteSpace(text)) SetMessageText(entry, text);
+            else FinishStreamingEntry(entry);
+        }
+        else if (string.Equals(status, "正在回复", StringComparison.Ordinal))
+        {
+            AppendStreamingText(entry, text);
+        }
+        else if (!string.IsNullOrWhiteSpace(text))
+        {
+            SetMessageText(entry, entry.Text + text);
+        }
         entry.Status = status;
         entry.IsFailure = failure;
+    }
+
+    private void AppendStreamingText(TimelineEntry entry, string delta)
+    {
+        if (string.IsNullOrEmpty(delta)) return;
+        if (!_streamBuffers.TryGetValue(entry.Key, out var buffer))
+        {
+            buffer = new StringBuilder(entry.Text);
+            _streamBuffers[entry.Key] = buffer;
+            _streamPublishedLengths[entry.Key] = buffer.Length;
+        }
+        if (buffer.Length < MaximumMessageCharacters)
+        {
+            var remaining = MaximumMessageCharacters - buffer.Length;
+            if (delta.Length <= remaining) buffer.Append(delta);
+            else
+            {
+                buffer.Append(delta.AsSpan(0, remaining));
+                buffer.Append(TruncatedMessageMarker);
+                _truncatedStreams.Add(entry.Key);
+            }
+        }
+        else if (_truncatedStreams.Add(entry.Key))
+        {
+            buffer.Append(TruncatedMessageMarker);
+        }
+        // Once the UI projection is truncated, do not keep appending to the
+        // per-run buffer. The final Gateway event still replaces it with the
+        // same bounded projection.
+        if (_streamFlushTimer is null || buffer.Length - _streamPublishedLengths.GetValueOrDefault(entry.Key) >= StreamingFlushCharacters)
+            FlushStreamingEntry(entry);
+    }
+
+    private void FlushStreamingBuffers()
+    {
+        foreach (var key in _streamBuffers.Keys.ToArray())
+        {
+            var entry = Messages.FirstOrDefault(item => item.Key == key);
+            if (entry is null)
+            {
+                _streamBuffers.Remove(key);
+                _truncatedStreams.Remove(key);
+                _streamPublishedLengths.Remove(key);
+                continue;
+            }
+            FlushStreamingEntry(entry);
+        }
+    }
+
+    private void FlushStreamingEntry(TimelineEntry entry)
+    {
+        if (!_streamBuffers.TryGetValue(entry.Key, out var buffer)) return;
+        if (buffer.Length == _streamPublishedLengths.GetValueOrDefault(entry.Key)) return;
+        var text = buffer.ToString();
+        if (!string.Equals(entry.Text, text, StringComparison.Ordinal)) entry.Text = text;
+        _streamPublishedLengths[entry.Key] = buffer.Length;
+    }
+
+    private void FinishStreamingEntry(TimelineEntry entry)
+    {
+        FlushStreamingEntry(entry);
+        _streamBuffers.Remove(entry.Key);
+        _truncatedStreams.Remove(entry.Key);
+        _streamPublishedLengths.Remove(entry.Key);
+    }
+
+    private void SetMessageText(TimelineEntry entry, string text)
+    {
+        _streamBuffers.Remove(entry.Key);
+        _truncatedStreams.Remove(entry.Key);
+        _streamPublishedLengths.Remove(entry.Key);
+        entry.Text = LimitMessageText(text);
+    }
+
+    private static string LimitMessageText(string text) => text.Length <= MaximumMessageCharacters
+        ? text
+        : text[..MaximumMessageCharacters] + TruncatedMessageMarker;
+
+    private void ClearStreamingBuffers()
+    {
+        _streamBuffers.Clear();
+        _truncatedStreams.Clear();
+        _streamPublishedLengths.Clear();
+    }
+
+    private void TrimMessages()
+    {
+        while (Messages.Count > MaximumVisibleMessages)
+        {
+            var removed = Messages[0];
+            Messages.RemoveAt(0);
+            _streamBuffers.Remove(removed.Key);
+            _truncatedStreams.Remove(removed.Key);
+            _streamPublishedLengths.Remove(removed.Key);
+        }
     }
 
     private static string PayloadText(BridgeEvent bridgeEvent, string name, string fallback = "") =>

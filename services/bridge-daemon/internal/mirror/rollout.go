@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -36,6 +37,7 @@ func (s *Service) watchRollouts() {
 	addTree(sessions)
 	s.logger.Printf("rolloutWatcher result=started root=%s", sessions)
 	timers := map[string]*time.Timer{}
+	var timersMu sync.Mutex
 	known := map[string]fileStamp{}
 	_ = filepath.WalkDir(sessions, func(path string, entry os.DirEntry, err error) error {
 		if err == nil && !entry.IsDir() && isRollout(path) {
@@ -45,13 +47,23 @@ func (s *Service) watchRollouts() {
 		}
 		return nil
 	})
+	trimKnownRollouts(known)
 	reconcile := time.NewTicker(2 * time.Second)
 	defer reconcile.Stop()
+	defer func() {
+		timersMu.Lock()
+		for path, timer := range timers {
+			timer.Stop()
+			delete(timers, path)
+		}
+		timersMu.Unlock()
+	}()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-reconcile.C:
+			seen := make(map[string]struct{}, len(known))
 			_ = filepath.WalkDir(sessions, func(path string, entry os.DirEntry, err error) error {
 				if err != nil || entry.IsDir() || !isRollout(path) {
 					return nil
@@ -60,6 +72,7 @@ func (s *Service) watchRollouts() {
 				if e != nil {
 					return nil
 				}
+				seen[path] = struct{}{}
 				stamp := fileStamp{info.Size(), info.ModTime()}
 				if previous, ok := known[path]; !ok || previous != stamp {
 					known[path] = stamp
@@ -67,6 +80,12 @@ func (s *Service) watchRollouts() {
 				}
 				return nil
 			})
+			for path := range known {
+				if _, ok := seen[path]; !ok {
+					delete(known, path)
+				}
+			}
+			trimKnownRollouts(known)
 		case err, ok := <-w.Errors:
 			if !ok {
 				return
@@ -87,12 +106,43 @@ func (s *Service) watchRollouts() {
 			if !isRollout(event.Name) {
 				continue
 			}
+			timersMu.Lock()
 			if timer := timers[event.Name]; timer != nil {
 				timer.Stop()
 			}
+			timersMu.Unlock()
 			path := event.Name
-			timers[path] = time.AfterFunc(250*time.Millisecond, func() { s.onRolloutChanged(path) })
+			var timer *time.Timer
+			timer = time.AfterFunc(250*time.Millisecond, func() {
+				s.onRolloutChanged(path)
+				timersMu.Lock()
+				if timers[path] == timer {
+					delete(timers, path)
+				}
+				timersMu.Unlock()
+			})
+			timersMu.Lock()
+			timers[path] = timer
+			timersMu.Unlock()
 		}
+	}
+}
+
+const maxKnownRolloutFiles = 4096
+
+func trimKnownRollouts(known map[string]fileStamp) {
+	for len(known) > maxKnownRolloutFiles {
+		oldestPath := ""
+		var oldestAt time.Time
+		for path, stamp := range known {
+			if oldestPath == "" || stamp.ModTime.Before(oldestAt) {
+				oldestPath, oldestAt = path, stamp.ModTime
+			}
+		}
+		if oldestPath == "" {
+			return
+		}
+		delete(known, oldestPath)
 	}
 }
 
@@ -118,10 +168,31 @@ func (s *Service) onRolloutChanged(path string) {
 		return
 	}
 	s.rolloutFinals[final.ThreadID] = final
+	trimRolloutFinals(s.rolloutFinals)
 	s.mu.Unlock()
 	s.logFinalMilestone("turn_completed", final.ThreadID, final.TurnID, "watcher")
 	s.logFinalMilestone("final_first_observed", final.ThreadID, final.TurnID, "watcher")
 	s.triggerSync(final.ThreadID, "watcher", final.TurnID)
+}
+
+func trimRolloutFinals(finals map[string]rolloutFinal) {
+	for len(finals) > maxRolloutFinals {
+		oldestID := ""
+		var oldestAt time.Time
+		for threadID, final := range finals {
+			at, err := time.Parse(time.RFC3339Nano, final.CompletedAt)
+			if err != nil {
+				at = time.Time{}
+			}
+			if oldestID == "" || at.Before(oldestAt) {
+				oldestID, oldestAt = threadID, at
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		delete(finals, oldestID)
+	}
 }
 
 func readCompletedRolloutFinal(path string) (rolloutFinal, bool) {

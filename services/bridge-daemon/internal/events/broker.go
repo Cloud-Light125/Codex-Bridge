@@ -117,12 +117,9 @@ type Broker struct {
 }
 
 type subscription struct {
-	mu     sync.Mutex
-	output chan Event
-	wake   chan struct{}
-	done   chan struct{}
-	queue  []Event
-	closed bool
+	output   chan Event
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 func NewBroker() *Broker {
@@ -147,7 +144,12 @@ func (b *Broker) PublishScoped(eventType, threadID, turnID, itemID string, paylo
 	b.mu.Lock()
 	b.history = append(b.history, event)
 	if len(b.history) > 64 {
-		b.history = b.history[len(b.history)-64:]
+		excess := len(b.history) - 64
+		// Clear discarded event payloads before moving the slice window. A
+		// resliced backing array can otherwise keep old maps/strings alive until
+		// the next capacity growth, even though history is logically bounded.
+		clear(b.history[:excess])
+		b.history = b.history[excess:]
 	}
 	subscribers := make([]*subscription, 0, len(b.subscribers))
 	for _, subscriber := range b.subscribers {
@@ -177,79 +179,29 @@ func (b *Broker) Subscribe() (<-chan Event, func()) {
 }
 
 func newSubscription() *subscription {
-	subscriber := &subscription{output: make(chan Event, 128), wake: make(chan struct{}, 1), done: make(chan struct{}), queue: make([]Event, 0, 256)}
-	go subscriber.run()
-	return subscriber
+	return &subscription{output: make(chan Event, 128), done: make(chan struct{})}
 }
 
 func (s *subscription) enqueue(event Event) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if reliableEvent(event.EventType) {
+		// Reliable events provide backpressure to the publisher. This keeps
+		// terminal/interaction state lossless without a second, unbounded queue.
+		select {
+		case s.output <- event:
+		case <-s.done:
+		}
 		return
 	}
-	const softLimit = 256
-	if len(s.queue) >= softLimit {
-		discard := -1
-		for index, queued := range s.queue {
-			if !reliableEvent(queued.EventType) {
-				discard = index
-				break
-			}
-		}
-		if discard >= 0 {
-			copy(s.queue[discard:], s.queue[discard+1:])
-			s.queue = s.queue[:len(s.queue)-1]
-		} else if !reliableEvent(event.EventType) {
-			s.mu.Unlock()
-			return
-		}
-		// If the queue contains only reliable events, let it grow rather than
-		// falsifying a terminal, interaction, binding, or channel state.
-	}
-	s.queue = append(s.queue, event)
-	s.mu.Unlock()
+	// Deltas, heartbeats and other projection events are allowed to drop when
+	// a client is slow; the bounded channel is the complete queue.
 	select {
-	case s.wake <- struct{}{}:
+	case s.output <- event:
 	default:
 	}
 }
 
-func (s *subscription) run() {
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-s.wake:
-			for {
-				s.mu.Lock()
-				if len(s.queue) == 0 || s.closed {
-					s.mu.Unlock()
-					break
-				}
-				event := s.queue[0]
-				s.queue = s.queue[1:]
-				s.mu.Unlock()
-				select {
-				case s.output <- event:
-				case <-s.done:
-					return
-				}
-			}
-		}
-	}
-}
-
 func (s *subscription) stop() {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
-	}
-	s.closed = true
-	s.queue = nil
-	close(s.done)
-	s.mu.Unlock()
+	s.stopOnce.Do(func() { close(s.done) })
 }
 
 func reliableEvent(eventType string) bool {

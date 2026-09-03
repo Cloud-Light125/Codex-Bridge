@@ -70,11 +70,36 @@
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top"><Button Content="复制 Key" Command="{Binding CopySessionKeyCommand}"/><Button Content="停止任务" Command="{Binding StopCommand}" IsEnabled="{Binding CanStop}" Foreground="{DynamicResource ErrorBrush}" Margin="8,0,0,0"/></StackPanel>
                         </Grid>
                     </Border>
-                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"><StackPanel Margin="20">
-                        <Border Background="{DynamicResource CodeBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,14"><StackPanel><TextBlock Text="Gateway" FontWeight="SemiBold"/><TextBlock Text="{Binding GatewayDetailText}" Style="{StaticResource SecondaryTextStyle}" Margin="0,5,0,0" TextWrapping="Wrap"/><TextBlock Text="{Binding GatewayError}" Foreground="{DynamicResource ErrorBrush}" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-                        <TextBlock Text="消息历史" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10"/>
-                        <ItemsControl ItemsSource="{Binding Messages}"><ItemsControl.ItemTemplate><DataTemplate><Border BorderBrush="{Binding StatusBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,9"><StackPanel><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{Binding StatusBrush}" FontSize="11"/><TextBlock Text="{Binding TimestampDisplay}" Style="{StaticResource SecondaryTextStyle}" FontSize="11" Margin="0,4,0,0"/></Grid><TextBox Text="{Binding Text, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" Margin="0,8,0,0"/></StackPanel></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
-                    </StackPanel></ScrollViewer>
+                    <Grid Grid.Row="1" Margin="20">
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <Border Grid.Row="0" Background="{DynamicResource CodeBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,14"><StackPanel><TextBlock Text="Gateway" FontWeight="SemiBold"/><TextBlock Text="{Binding GatewayDetailText}" Style="{StaticResource SecondaryTextStyle}" Margin="0,5,0,0" TextWrapping="Wrap"/><TextBlock Text="{Binding GatewayError}" Foreground="{DynamicResource ErrorBrush}" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+                        <TextBlock Grid.Row="1" Text="消息历史" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                        <ListBox Grid.Row="2" ItemsSource="{Binding Messages}" BorderThickness="0"
+                                 ScrollViewer.CanContentScroll="True"
+                                 VirtualizingPanel.IsVirtualizing="True"
+                                 VirtualizingPanel.VirtualizationMode="Recycling">
+                            <ListBox.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel /></ItemsPanelTemplate></ListBox.ItemsPanel>
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="{x:Type ListBoxItem}">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="Margin" Value="0" />
+                                    <Setter Property="Background" Value="Transparent" />
+                                    <Setter Property="BorderThickness" Value="0" />
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                                                <ContentPresenter Content="{TemplateBinding Content}"
+                                                                  ContentTemplate="{TemplateBinding ContentTemplate}"
+                                                                  HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" />
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate><DataTemplate><Border BorderBrush="{Binding StatusBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,9"><StackPanel><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{Binding StatusBrush}" FontSize="11"/><TextBlock Text="{Binding TimestampDisplay}" Style="{StaticResource SecondaryTextStyle}" FontSize="11" Margin="0,4,0,0"/></Grid><TextBox Text="{Binding Text, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" Margin="0,8,0,0"/></StackPanel></Border></DataTemplate></ListBox.ItemTemplate>
+                        </ListBox>
+                    </Grid>
                     <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox Text="{Binding MessageText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="70" MaxHeight="160" VerticalScrollBarVisibility="Auto" ToolTip="Ctrl+Enter 发送到当前 OpenClaw Session"><TextBox.InputBindings><KeyBinding Key="Enter" Modifiers="Control" Command="{Binding SendCommand}"/></TextBox.InputBindings></TextBox><StackPanel Grid.Column="1" Margin="10,0,0,0"><Button Content="发送" Command="{Binding SendCommand}" IsEnabled="{Binding CanSend}" MinWidth="88" Style="{StaticResource PrimaryButtonStyle}"/><TextBlock Text="Ctrl+Enter" Style="{StaticResource SecondaryTextStyle}" FontSize="11" HorizontalAlignment="Center" Margin="0,4,0,0"/></StackPanel></Grid></Border>
                 </Grid>
             </Grid>

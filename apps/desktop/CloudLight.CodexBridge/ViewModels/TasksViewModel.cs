@@ -11,6 +11,8 @@ namespace CloudLight.CodexBridge.ViewModels;
 
 public sealed class TasksViewModel : ObservableObject
 {
+    private const int MaximumTasks = 100;
+    private const int MaximumCachedActionResults = 128;
     private readonly BridgeApiClient _api;
     private readonly LogService _logs;
     private readonly SessionsViewModel _sessions;
@@ -223,7 +225,7 @@ public sealed class TasksViewModel : ObservableObject
         var selectedNumber = SelectedTask?.TaskNumber;
         try
         {
-            var result = await _api.GetTasksAsync(StatusFilter, SearchText, 500);
+            var result = await _api.GetTasksAsync(StatusFilter, SearchText, 100);
             var projects = await _api.GetProjectsAsync();
             Tasks.Clear();
             foreach (var task in result.Tasks) Tasks.Add(task);
@@ -245,6 +247,7 @@ public sealed class TasksViewModel : ObservableObject
             var existing = Tasks.FirstOrDefault(item => item.TaskNumber == task.TaskNumber);
             if (existing is not null) Tasks[Tasks.IndexOf(existing)] = task;
             else Tasks.Insert(0, task);
+            while (Tasks.Count > MaximumTasks) Tasks.RemoveAt(Tasks.Count - 1);
             SelectedTask = Tasks.FirstOrDefault(item => item.TaskNumber == SelectedTask?.TaskNumber) ?? SelectedTask;
             TasksView.Refresh();
             NotifyCounts();
@@ -378,6 +381,13 @@ public sealed class TasksViewModel : ObservableObject
             if (response.Result is not null)
             {
                 _actionResults[selected.TaskNumber] = response.Result;
+                while (_actionResults.Count > MaximumCachedActionResults)
+                {
+                    var oldest = _actionResults
+                        .OrderBy(pair => DateTimeOffset.TryParse(pair.Value.Time, out var time) ? time : DateTimeOffset.MinValue)
+                        .First();
+                    _actionResults.Remove(oldest.Key);
+                }
                 if (SelectedTask?.TaskNumber == selected.TaskNumber) ActionResult = response.Result;
                 if (action.Id.Equals("open", StringComparison.OrdinalIgnoreCase)) OpenConversation();
             }

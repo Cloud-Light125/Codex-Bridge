@@ -16,6 +16,8 @@ const (
 	KindPermissionsApproval = "permissions-approval"
 	KindUserInput           = "user-input"
 	KindUnknown             = "unknown"
+	maxTerminalInteractions = 256
+	terminalInteractionTTL  = 5 * time.Minute
 )
 
 type FileChange struct {
@@ -59,6 +61,7 @@ type PendingInteraction struct {
 	Method          string         `json:"-"`
 	ServerRequestID string         `json:"-"`
 	Raw             map[string]any `json:"-"`
+	completedAt     time.Time
 }
 
 type ResponseRequest struct {
@@ -80,6 +83,7 @@ func NewStore() *Store {
 func (s *Store) Add(method, requestID string, params map[string]any, now time.Time) PendingInteraction {
 	interaction := normalize(method, requestID, params, now)
 	s.mu.Lock()
+	s.pruneTerminalLocked(now)
 	s.items[interaction.ID] = &interaction
 	s.byRequest[requestID] = interaction.ID
 	s.mu.Unlock()
@@ -139,8 +143,8 @@ func (s *Store) Complete(id, status string) (PendingInteraction, bool) {
 	if !ok {
 		return PendingInteraction{}, false
 	}
-	item.Status = status
-	delete(s.byRequest, item.ServerRequestID)
+	s.markTerminalLocked(item, status, time.Now().UTC())
+	s.pruneTerminalLocked(time.Now().UTC())
 	return clone(*item), true
 }
 
@@ -166,9 +170,11 @@ func (s *Store) ResolveByRequest(requestID string) (PendingInteraction, bool) {
 		return PendingInteraction{}, false
 	}
 	if item.Status == "pending" || item.Status == "responding" {
-		item.Status = "resolved"
+		s.markTerminalLocked(item, "resolved", time.Now().UTC())
+	} else {
+		delete(s.byRequest, item.ServerRequestID)
 	}
-	delete(s.byRequest, item.ServerRequestID)
+	s.pruneTerminalLocked(time.Now().UTC())
 	return clone(*item), true
 }
 
@@ -193,15 +199,16 @@ func (s *Store) ExpireDue(now time.Time) []PendingInteraction {
 func (s *Store) ExpireAll(status string) []PendingInteraction {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now().UTC()
 	result := []PendingInteraction{}
 	for _, item := range s.items {
 		if item.Status != "pending" && item.Status != "responding" && item.Status != "expiring" {
 			continue
 		}
-		item.Status = status
-		delete(s.byRequest, item.ServerRequestID)
+		s.markTerminalLocked(item, status, now)
 		result = append(result, clone(*item))
 	}
+	s.pruneTerminalLocked(now)
 	return result
 }
 
@@ -216,10 +223,10 @@ func (s *Store) ClearTurn(threadID, turnID, status string) []PendingInteraction 
 		if item.Status != "pending" && item.Status != "responding" && item.Status != "expiring" {
 			continue
 		}
-		item.Status = status
-		delete(s.byRequest, item.ServerRequestID)
+		s.markTerminalLocked(item, status, time.Now().UTC())
 		result = append(result, clone(*item))
 	}
+	s.pruneTerminalLocked(time.Now().UTC())
 	return result
 }
 
@@ -233,6 +240,50 @@ func (s *Store) PendingCount(threadID string) int {
 		}
 	}
 	return count
+}
+
+func (s *Store) markTerminalLocked(item *PendingInteraction, status string, now time.Time) {
+	item.Status = status
+	item.completedAt = now
+	// Raw contains the original app-server parameters and can include large
+	// command/file payloads. It is needed only while a response is pending.
+	item.Raw = nil
+	delete(s.byRequest, item.ServerRequestID)
+}
+
+func (s *Store) pruneTerminalLocked(now time.Time) {
+	terminalCount := 0
+	for id, item := range s.items {
+		if isPendingStatus(item.Status) {
+			continue
+		}
+		terminalCount++
+		if !item.completedAt.IsZero() && now.Sub(item.completedAt) >= terminalInteractionTTL {
+			delete(s.items, id)
+			terminalCount--
+		}
+	}
+	for terminalCount > maxTerminalInteractions {
+		oldestID := ""
+		var oldestAt time.Time
+		for id, item := range s.items {
+			if isPendingStatus(item.Status) {
+				continue
+			}
+			if oldestID == "" || item.completedAt.Before(oldestAt) {
+				oldestID, oldestAt = id, item.completedAt
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(s.items, oldestID)
+		terminalCount--
+	}
+}
+
+func isPendingStatus(status string) bool {
+	return status == "pending" || status == "responding" || status == "expiring"
 }
 
 func normalize(method, requestID string, params map[string]any, now time.Time) PendingInteraction {
@@ -362,6 +413,9 @@ func commandValue(value any) string {
 }
 
 func copyMap(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
 	result := make(map[string]any, len(value))
 	for key, item := range value {
 		result[key] = item

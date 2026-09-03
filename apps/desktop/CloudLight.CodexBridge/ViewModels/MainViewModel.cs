@@ -1,4 +1,6 @@
+using System.Threading.Channels;
 using System.Windows.Input;
+using System.Windows.Threading;
 using CloudLight.CodexBridge.Infrastructure;
 using CloudLight.CodexBridge.Models;
 using CloudLight.CodexBridge.Services;
@@ -16,6 +18,14 @@ public sealed class MainViewModel : ObservableObject
     private readonly CodexDiscoveryRetryRunner _codexDiscoveryRetryRunner;
     private CodexDiscoveryResult _codexDiscovery;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly Channel<BridgeEvent> _uiEventQueue = Channel.CreateBounded<BridgeEvent>(new BoundedChannelOptions(2048)
+    {
+        SingleReader = true,
+        SingleWriter = false,
+        FullMode = BoundedChannelFullMode.Wait
+    });
+    private int _uiEventDrainScheduled;
+    private int _queuedUiEvents;
     private readonly object _codexRetrySync = new();
     private Task? _codexRetryTask;
     private CancellationTokenSource? _codexRetryCancellation;
@@ -275,12 +285,10 @@ public sealed class MainViewModel : ObservableObject
 
     private void OnEventReceived(object? sender, BridgeEvent bridgeEvent)
     {
-        QueueUiAction(() => Sessions.ApplyEvent(bridgeEvent));
-        QueueUiAction(() => OpenClaw.ApplyEvent(bridgeEvent));
-        QueueUiAction(() => Tasks.ApplyEvent(bridgeEvent));
-        QueueUiAction(() => Projects.ApplyEvent(bridgeEvent));
-        if (bridgeEvent.EventType.StartsWith("channel.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("binding.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("telegram.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qq", StringComparison.OrdinalIgnoreCase))
-            QueueUiAction(() => ChannelProfiles.ApplyEvent(bridgeEvent));
+        // The SSE callback can receive hundreds of deltas per second. Queue
+        // the event envelope once and drain it in bounded UI batches instead
+        // of creating one DispatcherOperation/Task per view per event.
+        EnqueueUiEvent(bridgeEvent);
         if (bridgeEvent.EventType is "codex.connected" or "codex.disconnected" or "codex.config_updated" or "openclaw.connected" or "openclaw.disconnected" or "openclaw.reconnecting" or "openclaw.session.updated" or "error") { QueueUiTask(RefreshAsync); return; }
         if (bridgeEvent.EventType != "thread.updated") return;
         _eventRefresh?.Cancel(); _eventRefresh?.Dispose();
@@ -292,6 +300,87 @@ public sealed class MainViewModel : ObservableObject
             catch (OperationCanceledException) { } catch (ObjectDisposedException) { }
             catch (Exception exception) { _logs.AddException("desktop", "刷新 Codex 会话事件失败。", exception); }
         }, token);
+    }
+
+    private void EnqueueUiEvent(BridgeEvent bridgeEvent)
+    {
+        if (_stopped) return;
+        try
+        {
+            if (_uiEventQueue.Writer.TryWrite(bridgeEvent))
+            {
+                Interlocked.Increment(ref _queuedUiEvents);
+            }
+            else
+            {
+                if (Application.Current?.Dispatcher.CheckAccess() == true)
+                {
+                    // A background writer can fill the queue again between
+                    // the bounded drain and TryWrite. Keep draining on the UI
+                    // thread until this event is accepted; dropping a final,
+                    // interaction, or task-state event would leave the local
+                    // projection inconsistent with the daemon.
+                    while (!_uiEventQueue.Writer.TryWrite(bridgeEvent))
+                    {
+                        if (_stopped || _uiEventQueue.Reader.Completion.IsCompleted) return;
+                        DrainUiEvents();
+                    }
+                    Interlocked.Increment(ref _queuedUiEvents);
+                }
+                else
+                {
+                    // Backpressure the event-stream reader rather than
+                    // retaining an unbounded set of event closures/tasks.
+                    _uiEventQueue.Writer.WriteAsync(bridgeEvent, _lifetime.Token).AsTask().GetAwaiter().GetResult();
+                    Interlocked.Increment(ref _queuedUiEvents);
+                }
+            }
+            ScheduleUiEventDrain();
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (ChannelClosedException) { }
+    }
+
+    private void ScheduleUiEventDrain()
+    {
+        if (Interlocked.Exchange(ref _uiEventDrainScheduled, 1) != 0) return;
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null)
+        {
+            DrainUiEvents();
+            return;
+        }
+        try { _ = dispatcher.BeginInvoke(new Action(DrainUiEvents), DispatcherPriority.DataBind); }
+        catch (Exception) when (_stopped || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished) { Interlocked.Exchange(ref _uiEventDrainScheduled, 0); }
+    }
+
+    private void DrainUiEvents()
+    {
+        try
+        {
+            var processed = 0;
+            while (processed++ < 128 && _uiEventQueue.Reader.TryRead(out var bridgeEvent))
+            {
+                Interlocked.Decrement(ref _queuedUiEvents);
+                ApplyEventSafely(() => Sessions.ApplyEvent(bridgeEvent), "Codex 会话事件");
+                ApplyEventSafely(() => OpenClaw.ApplyEvent(bridgeEvent), "OpenClaw 事件");
+                ApplyEventSafely(() => Tasks.ApplyEvent(bridgeEvent), "任务事件");
+                ApplyEventSafely(() => Projects.ApplyEvent(bridgeEvent), "项目事件");
+                if (bridgeEvent.EventType.StartsWith("channel.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("binding.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("telegram.", StringComparison.OrdinalIgnoreCase) || bridgeEvent.EventType.StartsWith("qq", StringComparison.OrdinalIgnoreCase))
+                    ApplyEventSafely(() => ChannelProfiles.ApplyEvent(bridgeEvent), "渠道事件");
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _uiEventDrainScheduled, 0);
+            if (Volatile.Read(ref _queuedUiEvents) > 0 && !_stopped) ScheduleUiEventDrain();
+        }
+    }
+
+    private void ApplyEventSafely(Action action, string description)
+    {
+        try { action(); }
+        catch (Exception exception) { _logs.AddException("desktop", $"{description} UI 状态更新失败。", exception); }
     }
 
     private void OnEventStreamConnectionChanged(object? sender, bool connected)
@@ -430,12 +519,13 @@ public sealed class MainViewModel : ObservableObject
     {
         if (_stopped) return;
         _stopped = true;
+        _uiEventQueue.Writer.TryComplete();
         _eventRefresh?.Cancel(); _eventRefresh?.Dispose();
         _api.EventReceived -= OnEventReceived; _api.EventStreamConnectionChanged -= OnEventStreamConnectionChanged;
         Tasks.ConversationRequested -= OnConversationRequested;
         _lifetime.Cancel();
         await CancelCodexDiscoveryRetryAsync().ConfigureAwait(false);
         _codexRetryCancellation?.Dispose();
-        _api.Dispose(); await _daemon.StopAsync().ConfigureAwait(false); _lifetime.Dispose();
+        _api.Dispose(); await _daemon.StopAsync().ConfigureAwait(false); _lifetime.Dispose(); _logs.Dispose();
     }
 }

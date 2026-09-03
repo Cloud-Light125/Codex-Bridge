@@ -85,7 +85,12 @@ type Control interface {
 	ReadThread(context.Context, string, bool) (control.ThreadDetail, error)
 }
 
-const mirrorHistoryTurnLimit = 50
+const (
+	mirrorHistoryTurnLimit = 50
+	maxMirrorDedupeKeys    = 1024
+	maxRolloutFinals       = 1024
+	maxTransientTurns      = 512
+)
 
 type Runtime interface {
 	RuntimeState(string) control.RuntimeState
@@ -111,9 +116,9 @@ type Service struct {
 	workers           sync.WaitGroup
 	baselineOnce      sync.Once
 	baselineComplete  bool
-	turnOrigins       map[string]string
+	turnOrigins       map[string]turnOrigin
 	retry             map[string]bool
-	syncLocks         map[string]*sync.Mutex
+	syncLocks         map[string]*keyedSyncLock
 	pendingSync       map[string]string
 	rolloutFinals     map[string]rolloutFinal
 	observedFinals    map[string]bool
@@ -124,6 +129,14 @@ type Service struct {
 	lastQQErrorCode   string
 }
 type visibleMessage struct{ Key, TurnID, ItemID, Kind, Text, Origin string }
+type turnOrigin struct {
+	Origin string
+	At     time.Time
+}
+type keyedSyncLock struct {
+	mu   sync.Mutex
+	refs int
+}
 type rolloutFinal struct{ ThreadID, TurnID, ItemID, Text, CompletedAt string }
 
 type mirrorTargetError struct {
@@ -139,7 +152,7 @@ func DefaultConfig() Config {
 
 func New(path string, controlService Control, _ Runtime, registry any, broker *events.Broker, logger *bridgelog.SafeLogger, telegram, qq Target) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Service{path: path, control: controlService, registry: registry, broker: broker, logger: logger, telegram: telegram, qq: qq, ctx: ctx, cancel: cancel, done: make(chan struct{}), turnOrigins: map[string]string{}, retry: map[string]bool{}, syncLocks: map[string]*sync.Mutex{}, pendingSync: map[string]string{}, rolloutFinals: map[string]rolloutFinal{}, observedFinals: map[string]bool{}, resolvedFinals: map[string]bool{}, completedFinals: map[string]bool{}, model: diskModel{Version: 1, Config: DefaultConfig(), Cursors: map[string]Cursor{}, LiveDelivered: map[string]liveCursor{}, Finals: map[string]finalRecord{}}}
+	s := &Service{path: path, control: controlService, registry: registry, broker: broker, logger: logger, telegram: telegram, qq: qq, ctx: ctx, cancel: cancel, done: make(chan struct{}), turnOrigins: map[string]turnOrigin{}, retry: map[string]bool{}, syncLocks: map[string]*keyedSyncLock{}, pendingSync: map[string]string{}, rolloutFinals: map[string]rolloutFinal{}, observedFinals: map[string]bool{}, resolvedFinals: map[string]bool{}, completedFinals: map[string]bool{}, model: diskModel{Version: 1, Config: DefaultConfig(), Cursors: map[string]Cursor{}, LiveDelivered: map[string]liveCursor{}, Finals: map[string]finalRecord{}}}
 	if err := s.load(); err != nil {
 		cancel()
 		return nil, err
@@ -278,7 +291,8 @@ func (s *Service) handleEvent(event events.Event) {
 			origin = "bridge"
 		}
 		s.mu.Lock()
-		s.turnOrigins[event.TurnID] = origin
+		s.turnOrigins[event.TurnID] = turnOrigin{Origin: origin, At: time.Now().UTC()}
+		s.pruneTurnOriginsLocked(time.Now().UTC())
 		s.mu.Unlock()
 		s.triggerSync(event.ThreadID, "appserver", event.TurnID)
 	case events.InteractionRequested:
@@ -289,6 +303,7 @@ func (s *Service) handleEvent(event events.Event) {
 			}
 		}
 	case events.TurnFailed:
+		s.forgetTurnOrigin(event.TurnID)
 		if s.enabledType("error") {
 			message := "任务失败"
 			if detail, _ := event.Payload["error"].(string); strings.TrimSpace(detail) != "" {
@@ -299,10 +314,12 @@ func (s *Service) handleEvent(event events.Event) {
 			s.sendExceptional("failure", event.ThreadID, event.TurnID, message)
 		}
 	case events.TurnInterrupted:
+		s.forgetTurnOrigin(event.TurnID)
 		if s.enabledType("error") {
 			s.sendExceptional("stop", event.ThreadID, event.TurnID, "已停止。")
 		}
 	case events.TurnCompleted:
+		s.forgetTurnOrigin(event.TurnID)
 		status, _ := event.Payload["status"].(string)
 		if strings.EqualFold(strings.TrimSpace(status), "persisted") {
 			s.triggerSync(event.ThreadID, "appserver", event.TurnID)
@@ -447,9 +464,8 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 	if store == nil {
 		return
 	}
-	lock := s.threadSyncLock(threadID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := s.lockSync(threadID)
+	defer unlock()
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
 	detail, err := control.ReadThreadHistory(ctx, s.control, threadID, mirrorHistoryTurnLimit)
@@ -552,7 +568,14 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 	cursor.LastObservedMessage = messages[len(messages)-1].Key
 	s.mu.Lock()
 	s.model.Cursors[threadID] = cursor
-	s.retry[threadID] = (cfg.Enabled && cfg.Telegram.Enabled && cursor.LastTelegramMirrored != cursor.LastObservedMessage) || (cfg.Enabled && cfg.QQ.Enabled && cursor.LastQQMirrored != cursor.LastObservedMessage)
+	if cfg.Enabled && ((cfg.Telegram.Enabled && cursor.LastTelegramMirrored != cursor.LastObservedMessage) || (cfg.QQ.Enabled && cursor.LastQQMirrored != cursor.LastObservedMessage)) {
+		s.retry[threadID] = true
+	} else {
+		delete(s.retry, threadID)
+	}
+	if rollout.TurnID != "" && containsTurn(messages, rollout.TurnID) {
+		delete(s.rolloutFinals, threadID)
+	}
 	_ = s.saveLocked()
 	s.mu.Unlock()
 }
@@ -571,8 +594,48 @@ func (s *Service) logFinalMilestone(stage, threadID, turnID, source string) {
 		return
 	}
 	seen[key] = true
+	trimMirrorDedupe(seen)
 	s.mu.Unlock()
 	s.logger.Printf("latency stage=%s threadId=%s turnId=%s at=%s source=%s", stage, threadID, turnID, time.Now().UTC().Format(time.RFC3339Nano), source)
+}
+
+func trimMirrorDedupe(values map[string]bool) {
+	for len(values) > maxMirrorDedupeKeys {
+		for key := range values {
+			delete(values, key)
+			break
+		}
+	}
+}
+
+func (s *Service) forgetTurnOrigin(turnID string) {
+	if strings.TrimSpace(turnID) == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.turnOrigins, turnID)
+	s.mu.Unlock()
+}
+
+func (s *Service) pruneTurnOriginsLocked(now time.Time) {
+	for turnID, value := range s.turnOrigins {
+		if !value.At.IsZero() && now.Sub(value.At) >= 30*time.Minute {
+			delete(s.turnOrigins, turnID)
+		}
+	}
+	for len(s.turnOrigins) > maxTransientTurns {
+		oldestID := ""
+		var oldestAt time.Time
+		for turnID, value := range s.turnOrigins {
+			if oldestID == "" || value.At.Before(oldestAt) {
+				oldestID, oldestAt = turnID, value.At
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		delete(s.turnOrigins, oldestID)
+	}
 }
 
 func (s *Service) isFinalMirrored(key, platform string) bool {
@@ -599,15 +662,25 @@ func (s *Service) markFinalMirrored(key, platform string, cfg Config) {
 	s.mu.Unlock()
 }
 
-func (s *Service) threadSyncLock(threadID string) *sync.Mutex {
+func (s *Service) lockSync(key string) func() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	lock := s.syncLocks[threadID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		s.syncLocks[threadID] = lock
+	lock, ok := s.syncLocks[key]
+	if !ok {
+		lock = &keyedSyncLock{}
+		s.syncLocks[key] = lock
 	}
-	return lock
+	lock.refs++
+	s.mu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		s.mu.Lock()
+		lock.refs--
+		if lock.refs == 0 && s.syncLocks[key] == lock {
+			delete(s.syncLocks, key)
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *Service) retryFailed() {
@@ -857,7 +930,7 @@ func (s *Service) markLive(key, platform string) {
 func (s *Service) originForTurn(turnID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.turnOrigins[turnID]
+	return s.turnOrigins[turnID].Origin
 }
 
 func (s *Service) enabledType(kind string) bool {
@@ -928,9 +1001,8 @@ func (s *Service) sendExceptional(kind, threadID, turnID, text string) {
 
 func (s *Service) sendOnce(key, threadID, title, text string) {
 	s.goRun(func() {
-		lock := s.threadSyncLock("event/" + key)
-		lock.Lock()
-		defer lock.Unlock()
+		unlock := s.lockSync("event/" + key)
+		defer unlock()
 		s.mu.Lock()
 		cfg := s.model.Config
 		delivered := s.model.LiveDelivered[key]

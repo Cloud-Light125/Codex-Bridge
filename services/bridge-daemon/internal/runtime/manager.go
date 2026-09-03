@@ -35,6 +35,7 @@ const (
 	StateCompleted           = StatePersisted
 	StateFailed              = "failed"
 	StateUnknown             = "unknown"
+	maxRuntimeStates         = 512
 )
 
 type Status struct {
@@ -65,6 +66,11 @@ type deltaBuffer struct {
 	FlushAt  time.Time
 }
 
+type keyedThreadLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 type Manager struct {
 	mu           sync.RWMutex
 	status       Status
@@ -84,7 +90,7 @@ type Manager struct {
 	starting map[string]bool
 
 	threadLocksMu sync.Mutex
-	threadLocks   map[string]*sync.Mutex
+	threadLocks   map[string]*keyedThreadLock
 
 	deltaMu sync.Mutex
 	deltas  map[string]*deltaBuffer
@@ -139,7 +145,7 @@ func NewManager(version, listenAddress, codexPath, sandboxMode string, broker *e
 		status: status, detection: detection, codexPath: codexPath, cwd: cwd,
 		broker: broker, logger: logger, ctx: ctx, cancel: cancel,
 		interactions: interactions.NewStore(), registry: registry, states: make(map[string]control.RuntimeState),
-		starting: make(map[string]bool), threadLocks: make(map[string]*sync.Mutex),
+		starting: make(map[string]bool), threadLocks: make(map[string]*keyedThreadLock),
 		deltas: make(map[string]*deltaBuffer), traces: make(map[string]*turnTrace),
 		lastVerifications:    make(map[string]control.PersistenceVerification),
 		autoPersistenceProbe: status.AutomaticPersistenceProbe,
@@ -618,15 +624,52 @@ func (m *Manager) Close() error {
 	return nil
 }
 
-func (m *Manager) threadLock(threadID string) *sync.Mutex {
+func (m *Manager) lockThread(threadID string) func() {
 	m.threadLocksMu.Lock()
-	defer m.threadLocksMu.Unlock()
-	lock := m.threadLocks[threadID]
-	if lock == nil {
-		lock = &sync.Mutex{}
+	lock, ok := m.threadLocks[threadID]
+	if !ok {
+		lock = &keyedThreadLock{}
 		m.threadLocks[threadID] = lock
 	}
-	return lock
+	lock.refs++
+	m.threadLocksMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		m.threadLocksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 && m.threadLocks[threadID] == lock {
+			delete(m.threadLocks, threadID)
+		}
+		m.threadLocksMu.Unlock()
+	}
+}
+
+// Runtime state is a live projection, not an unbounded history. Keep enough
+// recent terminal/idle entries for the desktop while allowing old thread IDs
+// to leave the process after large browsing sessions.
+func (m *Manager) pruneStatesLocked() {
+	for len(m.states) > maxRuntimeStates {
+		oldestID := ""
+		var oldestAt time.Time
+		for id, state := range m.states {
+			if isActiveState(state.State) || state.PendingInteractionCount > 0 {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339Nano, state.LastActivityAt)
+			if err != nil {
+				at = time.Time{}
+			}
+			if oldestID == "" || at.Before(oldestAt) {
+				oldestID, oldestAt = id, at
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		delete(m.states, oldestID)
+	}
 }
 
 func textValue(value any) string {
