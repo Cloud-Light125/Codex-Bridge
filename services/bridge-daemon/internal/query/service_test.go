@@ -167,6 +167,22 @@ func TestHistoryReturnsLastCompletedUserAssistantRounds(t *testing.T) {
 	}
 }
 
+func TestHistoryDoesNotUseUnphasedAssistantForPaginatedThreads(t *testing.T) {
+	turn := control.Turn{TurnID: "turn-1", Status: "completed", Items: []control.Item{
+		{Type: "userMessage", Text: "问题"},
+		{Type: "agentMessage", Role: "assistant", Text: "WRONG-PROGRESS"},
+	}}
+	user, assistant := historyTexts(turn, control.FinalSelectionModePaginated)
+	if user != "问题" || assistant != "" {
+		t.Fatalf("paginated history accepted an unphased assistant: user=%q assistant=%q", user, assistant)
+	}
+	turn.Items = append(turn.Items, control.Item{Type: "agentMessage", Role: "assistant", Phase: "final_answer", Text: "CORRECT-FINAL"})
+	_, assistant = historyTexts(turn, control.FinalSelectionModePaginated)
+	if assistant != "CORRECT-FINAL" {
+		t.Fatalf("paginated history did not select explicit final: %q", assistant)
+	}
+}
+
 func TestRunningWaitingRecentAndFailedUseReadOnlyRuntimeTruth(t *testing.T) {
 	now := time.Date(2026, 8, 11, 18, 0, 0, 0, time.Local)
 	threads := []control.ThreadSummary{

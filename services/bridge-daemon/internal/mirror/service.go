@@ -124,11 +124,12 @@ type Service struct {
 	observedFinals    map[string]bool
 	resolvedFinals    map[string]bool
 	completedFinals   map[string]bool
+	finalCandidateLog map[string]bool
 	lastTelegramError string
 	lastQQError       string
 	lastQQErrorCode   string
 }
-type visibleMessage struct{ Key, TurnID, ItemID, Kind, Text, Origin string }
+type visibleMessage struct{ Key, TurnID, ItemID, Kind, Text, Origin, Phase string }
 type turnOrigin struct {
 	Origin string
 	At     time.Time
@@ -137,7 +138,15 @@ type keyedSyncLock struct {
 	mu   sync.Mutex
 	refs int
 }
-type rolloutFinal struct{ ThreadID, TurnID, ItemID, Text, CompletedAt string }
+type rolloutFinal struct{ ThreadID, TurnID, ItemID, Phase, Text, CompletedAt string }
+type mirrorCursorMigration struct {
+	Platform string
+	OldKey   string
+	Key      string
+	TurnID   string
+	Result   string
+	Changed  bool
+}
 
 type mirrorTargetError struct {
 	message string
@@ -152,7 +161,7 @@ func DefaultConfig() Config {
 
 func New(path string, controlService Control, _ Runtime, registry any, broker *events.Broker, logger *bridgelog.SafeLogger, telegram, qq Target) (*Service, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Service{path: path, control: controlService, registry: registry, broker: broker, logger: logger, telegram: telegram, qq: qq, ctx: ctx, cancel: cancel, done: make(chan struct{}), turnOrigins: map[string]turnOrigin{}, retry: map[string]bool{}, syncLocks: map[string]*keyedSyncLock{}, pendingSync: map[string]string{}, rolloutFinals: map[string]rolloutFinal{}, observedFinals: map[string]bool{}, resolvedFinals: map[string]bool{}, completedFinals: map[string]bool{}, model: diskModel{Version: 1, Config: DefaultConfig(), Cursors: map[string]Cursor{}, LiveDelivered: map[string]liveCursor{}, Finals: map[string]finalRecord{}}}
+	s := &Service{path: path, control: controlService, registry: registry, broker: broker, logger: logger, telegram: telegram, qq: qq, ctx: ctx, cancel: cancel, done: make(chan struct{}), turnOrigins: map[string]turnOrigin{}, retry: map[string]bool{}, syncLocks: map[string]*keyedSyncLock{}, pendingSync: map[string]string{}, rolloutFinals: map[string]rolloutFinal{}, observedFinals: map[string]bool{}, resolvedFinals: map[string]bool{}, completedFinals: map[string]bool{}, finalCandidateLog: map[string]bool{}, model: diskModel{Version: 1, Config: DefaultConfig(), Cursors: map[string]Cursor{}, LiveDelivered: map[string]liveCursor{}, Finals: map[string]finalRecord{}}}
 	if err := s.load(); err != nil {
 		cancel()
 		return nil, err
@@ -364,30 +373,62 @@ func (s *Service) baselineAll() {
 		if len(messages) > 0 {
 			last = messages[len(messages)-1].Key
 		}
+		var migrations []mirrorCursorMigration
 		s.mu.Lock()
-		for _, message := range messages {
-			s.model.Finals[message.Key] = finalRecord{
-				ThreadID: thread.ThreadID, TurnID: message.TurnID, AssistantMessageID: message.ItemID,
-				Fingerprint: fingerprint(message.Text), TelegramMirrored: true, QQMirrored: true, FinalMirrored: true,
-			}
-		}
 		c, exists := s.model.Cursors[thread.ThreadID]
 		if !exists {
+			for _, message := range messages {
+				s.setBaselineFinalLocked(thread.ThreadID, message, true, true)
+			}
 			c = Cursor{LastObservedMessage: last, LastTelegramMirrored: last, LastQQMirrored: last}
 			s.model.Cursors[thread.ThreadID] = c
 		} else {
-			// A 0.6.1 cursor can point at a User Message. User messages are absent
-			// from the 0.6.2 final-only sequence, so normalize such cursors to the
-			// current baseline instead of leaving the Thread permanently stuck.
-			if cursorNeedsNormalization(messages, c.LastObservedMessage) ||
-				cursorNeedsNormalization(messages, c.LastTelegramMirrored) ||
-				cursorNeedsNormalization(messages, c.LastQQMirrored) {
-				c = Cursor{LastObservedMessage: last, LastTelegramMirrored: last, LastQQMirrored: last}
-				s.model.Cursors[thread.ThreadID] = c
+			// Migrate cursors from older final semantics. A cursor that points at
+			// an invalid progress item for a Turn is moved just before that Turn's
+			// current formal final so the final can be delivered once. An unknown
+			// cursor is normalized to the current safe baseline to avoid replaying
+			// the entire bounded history.
+			for _, migration := range []struct {
+				name  string
+				value *string
+			}{
+				{name: "observed", value: &c.LastObservedMessage},
+				{name: "telegram", value: &c.LastTelegramMirrored},
+				{name: "qq", value: &c.LastQQMirrored},
+			} {
+				result := normalizeMirrorCursor(messages, *migration.value, s.model.Finals)
+				if result.Changed {
+					result.Platform = migration.name
+					migrations = append(migrations, result)
+					*migration.value = result.Key
+				}
+			}
+			for _, message := range messages {
+				s.ensureFinalRecordLocked(thread.ThreadID, message)
+			}
+			for _, migration := range migrations {
+				if migration.Result != "safe_baseline" {
+					continue
+				}
+				for _, message := range messages {
+					s.setPlatformMirroredLocked(message.Key, migration.Platform, true)
+				}
+			}
+			s.model.Cursors[thread.ThreadID] = c
+		}
+		for _, message := range messages {
+			if record, ok := s.model.Finals[message.Key]; ok {
+				if record.TelegramMirrored && record.QQMirrored {
+					record.FinalMirrored = true
+					s.model.Finals[message.Key] = record
+				}
 			}
 		}
 		_ = s.saveLocked()
 		s.mu.Unlock()
+		for _, migration := range migrations {
+			s.logCursorMigration(thread.ThreadID, migration)
+		}
 	}
 	s.mu.Lock()
 	s.baselineComplete = true
@@ -405,6 +446,86 @@ func containsMessageKey(messages []visibleMessage, key string) bool {
 
 func cursorNeedsNormalization(messages []visibleMessage, key string) bool {
 	return key != "" && !containsMessageKey(messages, key)
+}
+
+func normalizeMirrorCursor(messages []visibleMessage, cursor string, finals map[string]finalRecord) mirrorCursorMigration {
+	result := mirrorCursorMigration{OldKey: cursor, Key: cursor}
+	if !cursorNeedsNormalization(messages, cursor) {
+		return result
+	}
+	if record, ok := finals[cursor]; ok && strings.TrimSpace(record.TurnID) != "" {
+		for index, message := range messages {
+			if message.TurnID != record.TurnID {
+				continue
+			}
+			previous := ""
+			if index > 0 {
+				previous = messages[index-1].Key
+			}
+			return mirrorCursorMigration{OldKey: cursor, Key: previous, TurnID: record.TurnID, Result: "same_turn_final", Changed: true}
+		}
+	}
+	last := ""
+	if len(messages) > 0 {
+		last = messages[len(messages)-1].Key
+	}
+	return mirrorCursorMigration{OldKey: cursor, Key: last, Result: "safe_baseline", Changed: true}
+}
+
+func (s *Service) ensureFinalRecordLocked(threadID string, message visibleMessage) {
+	if _, found := s.model.Finals[message.Key]; found {
+		return
+	}
+	s.model.Finals[message.Key] = finalRecord{
+		ThreadID: threadID, TurnID: message.TurnID, AssistantMessageID: message.ItemID,
+		Fingerprint: fingerprint(message.Text),
+	}
+}
+
+func (s *Service) setBaselineFinalLocked(threadID string, message visibleMessage, telegramMirrored, qqMirrored bool) {
+	s.ensureFinalRecordLocked(threadID, message)
+	record := s.model.Finals[message.Key]
+	record.ThreadID = firstNonEmpty(record.ThreadID, threadID)
+	record.TurnID = message.TurnID
+	record.AssistantMessageID = message.ItemID
+	record.Fingerprint = fingerprint(message.Text)
+	if telegramMirrored {
+		record.TelegramMirrored = true
+	}
+	if qqMirrored {
+		record.QQMirrored = true
+	}
+	record.FinalMirrored = record.TelegramMirrored && record.QQMirrored
+	s.model.Finals[message.Key] = record
+}
+
+func (s *Service) setPlatformMirroredLocked(key, platform string, mirrored bool) {
+	record, ok := s.model.Finals[key]
+	if !ok {
+		return
+	}
+	if platform == "telegram" {
+		record.TelegramMirrored = mirrored
+	} else if platform == "qq" || platform == "qqbot" {
+		record.QQMirrored = mirrored
+	}
+	record.FinalMirrored = record.TelegramMirrored && record.QQMirrored
+	s.model.Finals[key] = record
+}
+
+func (s *Service) logCursorMigration(threadID string, migration mirrorCursorMigration) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Printf("mirrorCursorMigration threadId=%s platform=%s result=%s turnId=%s oldCursor=%s newCursor=%s", threadID, migration.Platform, migration.Result, migration.TurnID, diagnosticKey(migration.OldKey), diagnosticKey(migration.Key))
+}
+
+func diagnosticKey(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 96 {
+		return value[:96]
+	}
+	return value
 }
 
 func (s *Service) triggerSync(threadID, source, turnID string) {
@@ -482,6 +603,7 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 		}
 	}
 	_, _ = store.EnsureBackend(conversationregistry.BackendCodex, conversationregistry.Metadata{Backend: conversationregistry.BackendCodex, TargetID: detail.ThreadID, Title: detail.Title, CWD: detail.CWD, CreatedAt: detail.CreatedAt, LastSeenAt: detail.UpdatedAt})
+	s.logFinalCandidates(detail, "appserver")
 	messages := visibleMessages(detail, s.originForTurn)
 	if expectedTurnID != "" {
 		for _, message := range messages {
@@ -497,19 +619,15 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 	useRollout := rollout.TurnID != "" && !containsTurn(messages, rollout.TurnID) &&
 		((expectedTurnID != "" && rollout.TurnID == expectedTurnID) || source == "watcher")
 	if useRollout {
-		messages = append(messages, visibleMessage{Key: rollout.TurnID + "/" + rollout.ItemID, TurnID: rollout.TurnID, ItemID: rollout.ItemID, Kind: "assistant", Text: rollout.Text})
+		s.logRolloutFinalCandidate(rollout)
+		messages = append(messages, visibleMessage{Key: rollout.TurnID + "/" + rollout.ItemID, TurnID: rollout.TurnID, ItemID: rollout.ItemID, Kind: "assistant", Phase: rollout.Phase, Text: rollout.Text})
 	}
 	s.mu.Lock()
 	cursor, exists := s.model.Cursors[threadID]
 	cfg := s.model.Config
 	baselineComplete := s.baselineComplete
 	for _, message := range messages {
-		if _, found := s.model.Finals[message.Key]; !found {
-			s.model.Finals[message.Key] = finalRecord{
-				ThreadID: threadID, TurnID: message.TurnID, AssistantMessageID: message.ItemID,
-				Fingerprint: fingerprint(message.Text),
-			}
-		}
+		s.ensureFinalRecordLocked(threadID, message)
 	}
 	s.mu.Unlock()
 	if !exists {
@@ -529,6 +647,38 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 	if len(messages) == 0 {
 		return
 	}
+	var migrations []mirrorCursorMigration
+	if exists {
+		s.mu.Lock()
+		for _, migration := range []struct {
+			name  string
+			value *string
+		}{
+			{name: "observed", value: &cursor.LastObservedMessage},
+			{name: "telegram", value: &cursor.LastTelegramMirrored},
+			{name: "qq", value: &cursor.LastQQMirrored},
+		} {
+			result := normalizeMirrorCursor(messages, *migration.value, s.model.Finals)
+			if result.Changed {
+				result.Platform = migration.name
+				migrations = append(migrations, result)
+				*migration.value = result.Key
+			}
+		}
+		for _, migration := range migrations {
+			if migration.Result != "safe_baseline" {
+				continue
+			}
+			for _, message := range messages {
+				s.setPlatformMirroredLocked(message.Key, migration.Platform, true)
+			}
+		}
+		_ = s.saveLocked()
+		s.mu.Unlock()
+		for _, migration := range migrations {
+			s.logCursorMigration(threadID, migration)
+		}
+	}
 	if expectedTurnID != "" {
 		for _, message := range messages {
 			if message.TurnID == expectedTurnID {
@@ -540,7 +690,11 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 	var deliveries sync.WaitGroup
 	deliver := func(platform string, last *string) {
 		defer deliveries.Done()
-		for _, message := range afterCursor(messages, *last) {
+		pending, cursorKnown := afterCursor(messages, *last)
+		if !cursorKnown {
+			return
+		}
+		for _, message := range pending {
 			if !cfg.Enabled || (platform == "telegram" && !cfg.Telegram.Enabled) || (platform == "qqbot" && !cfg.QQ.Enabled) || !messageEnabled(cfg.Messages, message.Kind) {
 				*last = message.Key
 				continue
@@ -558,7 +712,9 @@ func (s *Service) syncThreadSource(threadID, source, expectedTurnID string) {
 			if stage == "qqbot" {
 				stage = "qq"
 			}
-			s.logger.Printf("latency stage=%s_sent threadId=%s turnId=%s at=%s source=%s", stage, threadID, message.TurnID, time.Now().UTC().Format(time.RFC3339Nano), source)
+			if s.logger != nil {
+				s.logger.Printf("latency stage=%s_sent threadId=%s turnId=%s at=%s source=%s", stage, threadID, message.TurnID, time.Now().UTC().Format(time.RFC3339Nano), source)
+			}
 		}
 	}
 	deliveries.Add(2)
@@ -596,7 +752,52 @@ func (s *Service) logFinalMilestone(stage, threadID, turnID, source string) {
 	seen[key] = true
 	trimMirrorDedupe(seen)
 	s.mu.Unlock()
-	s.logger.Printf("latency stage=%s threadId=%s turnId=%s at=%s source=%s", stage, threadID, turnID, time.Now().UTC().Format(time.RFC3339Nano), source)
+	if s.logger != nil {
+		s.logger.Printf("latency stage=%s threadId=%s turnId=%s at=%s source=%s", stage, threadID, turnID, time.Now().UTC().Format(time.RFC3339Nano), source)
+	}
+}
+
+func (s *Service) logFinalCandidates(detail control.ThreadDetail, source string) {
+	mode := control.FinalSelectionModeForHistory(detail.HistoryMode)
+	for _, turn := range detail.Turns {
+		if !strings.EqualFold(strings.TrimSpace(turn.Status), "completed") {
+			continue
+		}
+		selection := control.ResolveFinalAssistantItem(turn, mode)
+		if selection.Found {
+			selectedID := control.FinalAssistantItemID(turn.TurnID, selection.Item)
+			s.logFinalCandidate(detail.ThreadID, turn.TurnID, selectedID, selection.Item.Phase, source, "selected")
+		}
+		for _, item := range turn.Items {
+			if !control.IsAssistantMessageItem(item) || strings.TrimSpace(item.Text) == "" || control.IsExplicitFinalPhase(item.Phase) {
+				continue
+			}
+			if selection.Found && item.ItemID == selection.Item.ItemID && strings.TrimSpace(item.Text) == strings.TrimSpace(selection.Item.Text) {
+				continue
+			}
+			s.logFinalCandidate(detail.ThreadID, turn.TurnID, item.ItemID, item.Phase, source, "rejected_non_final_phase")
+		}
+	}
+}
+
+func (s *Service) logRolloutFinalCandidate(final rolloutFinal) {
+	s.logFinalCandidate(final.ThreadID, final.TurnID, final.ItemID, final.Phase, "rollout", "selected")
+}
+
+func (s *Service) logFinalCandidate(threadID, turnID, itemID, phase, source, result string) {
+	if s.logger == nil {
+		return
+	}
+	key := strings.Join([]string{source, threadID, turnID, itemID, phase, result}, "\x00")
+	s.mu.Lock()
+	if s.finalCandidateLog[key] {
+		s.mu.Unlock()
+		return
+	}
+	s.finalCandidateLog[key] = true
+	trimMirrorDedupe(s.finalCandidateLog)
+	s.mu.Unlock()
+	s.logger.Printf("finalCandidate source=%s threadId=%s turnId=%s itemId=%s phase=%s result=%s", source, threadID, turnID, itemID, strings.TrimSpace(phase), result)
 }
 
 func trimMirrorDedupe(values map[string]bool) {
@@ -710,35 +911,27 @@ func (s *Service) retryAll() {
 
 func visibleMessages(detail control.ThreadDetail, origin func(string) string) []visibleMessage {
 	result := []visibleMessage{}
+	mode := control.FinalSelectionModeForHistory(detail.HistoryMode)
 	for _, turn := range detail.Turns {
-		if !strings.EqualFold(strings.TrimSpace(turn.Status), "completed") {
+		item, ok := control.SelectFinalAssistantItem(turn, mode)
+		if !ok {
 			continue
 		}
-		for index := len(turn.Items) - 1; index >= 0; index-- {
-			item := turn.Items[index]
-			if !(item.Type == "agentMessage" || strings.EqualFold(item.Role, "assistant")) || strings.TrimSpace(item.Text) == "" {
-				continue
-			}
-			id := strings.TrimSpace(item.ItemID)
-			if id == "" {
-				id = fingerprint(turn.TurnID, "assistant", item.Text)
-			}
-			result = append(result, visibleMessage{Key: turn.TurnID + "/" + id, TurnID: turn.TurnID, ItemID: id, Kind: "assistant", Text: strings.TrimSpace(item.Text), Origin: origin(turn.TurnID)})
-			break
-		}
+		id := control.FinalAssistantItemID(turn.TurnID, item)
+		result = append(result, visibleMessage{Key: turn.TurnID + "/" + id, TurnID: turn.TurnID, ItemID: id, Kind: "assistant", Phase: item.Phase, Text: strings.TrimSpace(item.Text), Origin: origin(turn.TurnID)})
 	}
 	return result
 }
-func afterCursor(messages []visibleMessage, cursor string) []visibleMessage {
+func afterCursor(messages []visibleMessage, cursor string) ([]visibleMessage, bool) {
 	if cursor == "" {
-		return messages
+		return messages, true
 	}
 	for i, m := range messages {
 		if m.Key == cursor {
-			return messages[i+1:]
+			return messages[i+1:], true
 		}
 	}
-	return nil
+	return nil, false
 }
 func messageEnabled(types MessageTypes, kind string) bool {
 	return kind == "assistant" && types.Assistant

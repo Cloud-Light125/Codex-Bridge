@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.2.4",
+    [string]$Version = "1.3.0",
     [string]$OutputDirectory = "",
     [switch]$SelfContained,
     [switch]$ExcludeSymbols

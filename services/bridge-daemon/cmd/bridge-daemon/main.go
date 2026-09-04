@@ -28,7 +28,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/taskcenter"
 )
 
-var version = "1.2.4"
+var version = "1.3.0"
 
 func main() {
 	options := config.Options{Version: version}

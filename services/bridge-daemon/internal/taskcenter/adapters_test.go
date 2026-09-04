@@ -32,6 +32,20 @@ func (persistedCodexRuntime) InterruptTurn(context.Context, string, string) (con
 	return control.InterruptResult{}, nil
 }
 
+type finalCodexControl struct{ detail control.ThreadDetail }
+
+func (f finalCodexControl) ListThreads(context.Context, int, string) (control.ThreadList, error) {
+	return control.ThreadList{Threads: []control.ThreadSummary{f.detail.ThreadSummary}}, nil
+}
+
+func (f finalCodexControl) ReadThread(context.Context, string, bool) (control.ThreadDetail, error) {
+	return f.detail, nil
+}
+
+func (f finalCodexControl) ReadThreadHistory(context.Context, string, int) (control.ThreadDetail, error) {
+	return f.detail, nil
+}
+
 func TestCodexTaskAdapterDoesNotTreatPersistedTurnIDAsActive(t *testing.T) {
 	adapter := NewCodexTaskAdapter(persistedCodexControl{}, persistedCodexRuntime{}, nil)
 	ref, err := adapter.ResolveConversation(context.Background(), 0, "thread-1")
@@ -48,5 +62,26 @@ func TestCodexTaskAdapterDoesNotTreatPersistedTurnIDAsActive(t *testing.T) {
 	}
 	if len(conversations) != 1 || conversations[0].HasActiveRun || conversations[0].ActiveRunID != "" {
 		t.Fatalf("persisted conversation list reported active: %#v", conversations)
+	}
+}
+
+func TestCodexTaskAdapterReadFinalAnswerUsesSharedSelector(t *testing.T) {
+	controlService := finalCodexControl{detail: control.ThreadDetail{
+		ThreadSummary: control.ThreadSummary{ThreadID: "thread-1", HistoryMode: "paginated"},
+		Turns: []control.Turn{{TurnID: "turn-1", Status: "completed", Items: []control.Item{
+			{Type: "agentMessage", Phase: "commentary", Text: "WRONG-1"},
+			{Type: "agentMessage", Text: "WRONG-2"},
+			{Type: "agentMessage", Phase: "final_answer", ItemID: "final-1", Text: "CORRECT-FINAL"},
+		}}},
+	}}
+	adapter := NewCodexTaskAdapter(controlService, persistedCodexRuntime{}, nil)
+	item, found, err := adapter.ReadFinalAnswer(context.Background(), "thread-1", "turn-1")
+	if err != nil || !found || item.ItemID != "final-1" || item.Text != "CORRECT-FINAL" {
+		t.Fatalf("final answer selection=%#v found=%t err=%v", item, found, err)
+	}
+	controlService.detail.Turns[0].Items = controlService.detail.Turns[0].Items[:2]
+	item, found, err = adapter.ReadFinalAnswer(context.Background(), "thread-1", "turn-1")
+	if err != nil || found || item.ItemID != "" {
+		t.Fatalf("paginated progress was accepted as final: item=%#v found=%t err=%v", item, found, err)
 	}
 }

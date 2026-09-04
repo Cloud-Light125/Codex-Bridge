@@ -94,14 +94,15 @@ type Service struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu             sync.Mutex
-	routes         map[string]*turnRoute
-	selections     map[string]threadSelection
-	flows          map[string]*interactionFlow
-	flowByInput    map[string]string
-	selfID         string
-	reconfiguring  bool
-	activeHandlers int
+	mu              sync.Mutex
+	routes          map[string]*turnRoute
+	selections      map[string]threadSelection
+	flows           map[string]*interactionFlow
+	flowByInput     map[string]string
+	completionRetry map[string]bool
+	selfID          string
+	reconfiguring   bool
+	activeHandlers  int
 }
 
 func NewService(controlService Control, runtime Runtime, repository *bindings.Repository, broker *events.Broker, logger *bridgelog.SafeLogger) *Service {
@@ -109,7 +110,7 @@ func NewService(controlService Control, runtime Runtime, repository *bindings.Re
 	service := &Service{
 		control: controlService, runtime: runtime, bindings: repository, broker: broker, logger: logger,
 		ctx: ctx, cancel: cancel, done: make(chan struct{}), routes: make(map[string]*turnRoute),
-		selections: make(map[string]threadSelection), flows: make(map[string]*interactionFlow), flowByInput: make(map[string]string),
+		selections: make(map[string]threadSelection), flows: make(map[string]*interactionFlow), flowByInput: make(map[string]string), completionRetry: make(map[string]bool),
 	}
 	service.adapter = NewAdapter(service.HandleMessage)
 	service.transport = service.adapter
@@ -868,12 +869,12 @@ func (s *Service) deliverCompleted(ctx context.Context, route *turnRoute) {
 	}
 	thread, err := control.ReadThreadHistory(ctx, s.control, route.ThreadID, 1)
 	if err != nil || thread.ThreadID != route.ThreadID {
-		s.finishRoute(ctx, route, "任务已持久化，但无法读取正式回复。请在 WPF 中查看。")
+		s.retryCompletedFinal(route)
 		return
 	}
 	text := finalAssistantText(thread, route.TurnID)
 	if text == "" {
-		s.finishRoute(ctx, route, "任务已持久化，但未读取到该 Turn 的正式 assistant 回复。请在 WPF 中查看。")
+		s.retryCompletedFinal(route)
 		return
 	}
 	if !s.send(ctx, route.Address, "任务完成\n"+text) {
@@ -881,6 +882,54 @@ func (s *Service) deliverCompleted(ctx context.Context, route *turnRoute) {
 		return
 	}
 	s.removeRoute(route.TurnID)
+}
+
+func (s *Service) retryCompletedFinal(route *turnRoute) {
+	if !s.routeActive(route) {
+		return
+	}
+	s.mu.Lock()
+	if s.completionRetry == nil {
+		s.completionRetry = make(map[string]bool)
+	}
+	if s.completionRetry[route.TurnID] {
+		s.mu.Unlock()
+		return
+	}
+	s.completionRetry[route.TurnID] = true
+	s.mu.Unlock()
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.completionRetry, route.TurnID)
+			s.mu.Unlock()
+		}()
+		previous := time.Duration(0)
+		for _, elapsed := range []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second} {
+			timer := time.NewTimer(elapsed - previous)
+			select {
+			case <-s.ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if !s.routeActive(route) {
+				return
+			}
+			ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
+			s.deliverCompleted(ctx, route)
+			cancel()
+			if !s.routeActive(route) {
+				return
+			}
+			previous = elapsed
+		}
+		if s.routeActive(route) {
+			ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+			s.finishRoute(ctx, route, "任务已持久化，但仍未读取到该 Turn 的正式 assistant 回复。请在 WPF 中查看。")
+			cancel()
+		}
+	}()
 }
 
 func (s *Service) finishRoute(ctx context.Context, route *turnRoute, text string) {
@@ -1209,15 +1258,14 @@ func (s *Service) hasFlowForAddress(address channels.ChannelAddress) bool {
 }
 
 func finalAssistantText(thread control.ThreadDetail, turnID string) string {
+	mode := control.FinalSelectionModeForHistory(thread.HistoryMode)
 	for _, turn := range thread.Turns {
 		if turn.TurnID != turnID {
 			continue
 		}
-		for index := len(turn.Items) - 1; index >= 0; index-- {
-			item := turn.Items[index]
-			if (strings.EqualFold(item.Role, "assistant") || strings.EqualFold(item.Type, "agentMessage")) && strings.TrimSpace(item.Text) != "" {
-				return strings.TrimSpace(item.Text)
-			}
+		item, ok := control.SelectFinalAssistantItem(turn, mode)
+		if ok {
+			return strings.TrimSpace(item.Text)
 		}
 	}
 	return ""

@@ -120,3 +120,38 @@ func TestTurnCompletedErrorFailsClosed(t *testing.T) {
 		t.Fatal("null turn/completed.error must not be treated as an error")
 	}
 }
+
+func TestPersistenceSnapshotUsesFormalFinalAssistantItem(t *testing.T) {
+	raw := map[string]any{"thread": map[string]any{
+		"id": "thread-217", "historyMode": "paginated",
+		"turns": []any{map[string]any{"id": "turn-217", "status": "completed", "items": []any{
+			map[string]any{"id": "commentary", "type": "agentMessage", "role": "assistant", "phase": "commentary", "text": "PROGRESS"},
+			map[string]any{"id": "wrong", "type": "agentMessage", "role": "assistant", "text": "WRONG-PROGRESS"},
+			map[string]any{"id": "correct", "type": "agentMessage", "role": "assistant", "phase": "final_answer", "text": "CORRECT-FINAL"},
+		}}},
+	}}
+	snapshot := persistenceSnapshot(raw, "turn-217")
+	if snapshot.AssistantMessageItemID != "correct" {
+		t.Fatalf("persistence snapshot selected %q; want formal final item", snapshot.AssistantMessageItemID)
+	}
+
+	rawPaginatedWithoutFinal := map[string]any{"thread": map[string]any{
+		"id": "thread-paginated", "historyMode": "paginated",
+		"turns": []any{map[string]any{"id": "turn-1", "status": "completed", "items": []any{
+			map[string]any{"id": "wrong", "type": "agentMessage", "role": "assistant", "text": "WRONG-PROGRESS"},
+		}}},
+	}}
+	if snapshot := persistenceSnapshot(rawPaginatedWithoutFinal, "turn-1"); snapshot.AssistantMessageItemID != "" {
+		t.Fatalf("paginated persistence snapshot accepted unphased assistant %q", snapshot.AssistantMessageItemID)
+	}
+
+	rawLegacy := map[string]any{"thread": map[string]any{
+		"id": "thread-legacy", "historyMode": "legacy",
+		"turns": []any{map[string]any{"id": "turn-1", "status": "completed", "items": []any{
+			map[string]any{"id": "legacy-final", "type": "agentMessage", "role": "assistant", "text": "LEGACY-FINAL"},
+		}}},
+	}}
+	if snapshot := persistenceSnapshot(rawLegacy, "turn-1"); snapshot.AssistantMessageItemID != "legacy-final" {
+		t.Fatalf("legacy persistence snapshot rejected legacy fallback: %q", snapshot.AssistantMessageItemID)
+	}
+}

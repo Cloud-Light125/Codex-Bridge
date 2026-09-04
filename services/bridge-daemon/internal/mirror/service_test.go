@@ -40,6 +40,12 @@ func (f *fakeControl) setTurns(turns ...control.Turn) {
 	f.mu.Unlock()
 }
 
+func (f *fakeControl) setHistoryMode(mode string) {
+	f.mu.Lock()
+	f.detail.HistoryMode = mode
+	f.mu.Unlock()
+}
+
 type fakeRuntime struct{}
 
 func (fakeRuntime) RuntimeState(id string) control.RuntimeState {
@@ -96,6 +102,76 @@ func TestRolloutFallbackRequiresTaskCompleteAndSkipsCommentary(t *testing.T) {
 	}
 }
 
+func TestRolloutTaskCompleteDoesNotPromoteProgressBeforeFinalFlush(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-order.jsonl")
+	lines := []string{
+		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"thread"}}`,
+		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","id":"comment","content":[{"type":"output_text","text":"PROGRESS-1"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}`,
+		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"wrong","content":[{"type":"output_text","text":"WRONG-PROGRESS"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}`,
+		`{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if final, ok := readCompletedRolloutFinal(path); ok || final.Text != "" {
+		t.Fatalf("progress was promoted before final flush: %#v ok=%t", final, ok)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = file.WriteString(`{"timestamp":"2026-01-01T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","id":"correct","content":[{"type":"output_text","text":"CORRECT-FINAL"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}` + "\n")
+	_ = file.Close()
+	final, ok := readCompletedRolloutFinal(path)
+	if !ok || final.Text != "CORRECT-FINAL" || final.ItemID != "correct" || final.Phase != "final_answer" {
+		t.Fatalf("final flush was not selected: %#v ok=%t", final, ok)
+	}
+}
+
+func TestAppServerAndRolloutShareFallbackFinalItemID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-fallback-id.jsonl")
+	lines := []string{
+		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"thread"}}`,
+		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"CORRECT-FINAL"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}`,
+		`{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rollout, ok := readCompletedRolloutFinal(path)
+	if !ok {
+		t.Fatal("rollout final without protocol ID was not selected")
+	}
+	detail := control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "thread", HistoryMode: "paginated"}, Turns: []control.Turn{{
+		TurnID: "turn-1", Status: "completed", Items: []control.Item{{
+			Type: "agentMessage", Phase: "final_answer", Text: "CORRECT-FINAL",
+		}},
+	}}}
+	messages := visibleMessages(detail, func(string) string { return "" })
+	if len(messages) != 1 || messages[0].ItemID != rollout.ItemID {
+		t.Fatalf("App Server/Rollout fallback IDs differ: appserver=%#v rollout=%#v", messages, rollout)
+	}
+}
+
+func TestRolloutAndAppServerSameFinalAreDeduped(t *testing.T) {
+	dir := t.TempDir()
+	tg, qq := &sendRecorder{}, &sendRecorder{}
+	service, reader, _, _ := newFixture(t, filepath.Join(dir, "mirror.json"), tg, qq)
+	defer service.Close()
+	service.mu.Lock()
+	service.rolloutFinals["thread"] = rolloutFinal{ThreadID: "thread", TurnID: "turn-1", ItemID: "final-1", Phase: "final_answer", Text: "CORRECT-FINAL"}
+	service.mu.Unlock()
+	service.syncThreadSource("thread", "watcher", "turn-1")
+	reader.setHistoryMode("paginated")
+	reader.setTurns(control.Turn{TurnID: "turn-1", Status: "completed", Items: []control.Item{{
+		Type: "agentMessage", ItemID: "final-1", Phase: "final_answer", Text: "CORRECT-FINAL",
+	}}})
+	service.syncThread("thread")
+	if tg.count() != 1 || qq.count() != 1 {
+		t.Fatalf("same final was delivered more than once after source convergence: telegram=%d qq=%d", tg.count(), qq.count())
+	}
+}
+
 func TestFinalPlatformsSendInParallel(t *testing.T) {
 	dir := t.TempDir()
 	tg, qq := &sendRecorder{delay: 250 * time.Millisecond}, &sendRecorder{delay: 250 * time.Millisecond}
@@ -135,7 +211,7 @@ func newFixture(t *testing.T, path string, telegram, qq *sendRecorder) (*Service
 		t.Fatal(err)
 	}
 	_, _ = registry.Ensure(threadregistry.Metadata{ThreadID: "thread", Title: "Title", CreatedAt: "2026-01-01T00:00:00Z"})
-	reader := &fakeControl{detail: control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "thread", Number: 1, Title: "Title", CreatedAt: "2026-01-01T00:00:00Z"}}}
+	reader := &fakeControl{detail: control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "thread", Number: 1, Title: "Title", CreatedAt: "2026-01-01T00:00:00Z", HistoryMode: "legacy"}}}
 	broker := events.NewBroker()
 	service, err := New(path, reader, fakeRuntime{}, registry, broker, nil, telegram.target(), qq.target())
 	if err != nil {
@@ -160,6 +236,90 @@ func completedTurn(id, itemID, text string) control.Turn {
 		{ItemID: "user-" + id, Type: "userMessage", Role: "user", Text: "prompt " + id},
 		{ItemID: itemID, Type: "agentMessage", Role: "assistant", Text: text},
 	}}
+}
+
+func TestThread217ProgressIsNeverMirroredAsFinal(t *testing.T) {
+	dir := t.TempDir()
+	tg, qq := &sendRecorder{}, &sendRecorder{}
+	service, reader, _, _ := newFixture(t, filepath.Join(dir, "mirror.json"), tg, qq)
+	defer service.Close()
+	reader.setHistoryMode("paginated")
+	reader.setTurns(control.Turn{TurnID: "turn-217", Status: "completed", Items: []control.Item{
+		{ItemID: "user-217", Type: "userMessage", Role: "user", Text: "审查 Canonical Import Audit"},
+		{ItemID: "commentary-1", Type: "agentMessage", Role: "assistant", Phase: "commentary", Text: "我会先把 Canonical 观察、schema 迁移..."},
+		{ItemID: "progress-217", Type: "agentMessage", Role: "assistant", Text: "5C.3 已提交并确认 clean，commit 为 ca5631...\n现在进入 5D.0：先定向搜索并完整阅读..."},
+		{ItemID: "commentary-2", Type: "agentMessage", Role: "assistant", Phase: "commentary", Text: "真实 audit 已启动..."},
+		{ItemID: "command-217", Type: "commandExecution", Output: "hidden command output"},
+		{ItemID: "final-217", Type: "agentMessage", Role: "assistant", Phase: "final_answer", Text: "已完成，未调用子代理。\n\n### Part A：Phase 5C.3\n\n- 审查通过...\n\n### Part B：Phase 5D.0\n\n..."},
+	}})
+	service.syncThread("thread")
+	for name, recorder := range map[string]*sendRecorder{"telegram": tg, "qq": qq} {
+		body := recorder.first()
+		if !strings.Contains(body, "已完成，未调用子代理。") || strings.Contains(body, "现在进入 5D.0：先定向搜索") {
+			t.Fatalf("%s mirrored the wrong body: %q", name, body)
+		}
+	}
+}
+
+func TestMirrorStaleProgressCursorMigratesToPendingFormalFinal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mirror.json")
+	tg, qq := &sendRecorder{}, &sendRecorder{}
+	service, reader, _, _ := newFixture(t, path, tg, qq)
+	defer service.Close()
+	reader.setHistoryMode("paginated")
+	reader.setTurns(control.Turn{TurnID: "turn-1", Status: "completed", Items: []control.Item{
+		{ItemID: "user-1", Type: "userMessage", Role: "user", Text: "prompt"},
+		{ItemID: "correct-final-id", Type: "agentMessage", Role: "assistant", Phase: "final_answer", Text: "CORRECT-FINAL"},
+	}})
+	service.mu.Lock()
+	oldKey := "turn-1/old-progress-key"
+	service.model.Finals[oldKey] = finalRecord{ThreadID: "thread", TurnID: "turn-1", AssistantMessageID: "old-progress-key", Fingerprint: "old", TelegramMirrored: true, QQMirrored: true, FinalMirrored: true}
+	service.model.Cursors["thread"] = Cursor{LastObservedMessage: oldKey, LastTelegramMirrored: oldKey, LastQQMirrored: oldKey}
+	_ = service.saveLocked()
+	service.mu.Unlock()
+	service.baselineAll()
+	service.mu.Lock()
+	migrated := service.model.Cursors["thread"]
+	service.mu.Unlock()
+	if migrated.LastTelegramMirrored != "" || migrated.LastQQMirrored != "" || migrated.LastObservedMessage != "" {
+		t.Fatalf("stale cursor was not moved before the Turn final: %#v", migrated)
+	}
+	service.syncThread("thread")
+	if tg.count() != 1 || qq.count() != 1 || !strings.Contains(tg.first(), "CORRECT-FINAL") || !strings.Contains(qq.first(), "CORRECT-FINAL") {
+		t.Fatalf("stale progress cursor did not release the formal final: telegram=%d/%q qq=%d/%q", tg.count(), tg.first(), qq.count(), qq.first())
+	}
+	service.syncThread("thread")
+	if tg.count() != 1 || qq.count() != 1 {
+		t.Fatalf("migrated final was duplicated: telegram=%d qq=%d", tg.count(), qq.count())
+	}
+}
+
+func TestInitialMirrorBaselineDoesNotReplayExistingFinals(t *testing.T) {
+	dir := t.TempDir()
+	registry, err := threadregistry.New(filepath.Join(dir, "threads.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = registry.Ensure(threadregistry.Metadata{ThreadID: "thread", Title: "Title", CreatedAt: "2026-01-01T00:00:00Z"})
+	tg, qq := &sendRecorder{}, &sendRecorder{}
+	reader := &fakeControl{detail: control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "thread", Number: 1, Title: "Title", HistoryMode: "paginated"}, Turns: []control.Turn{
+		{TurnID: "old-1", Status: "completed", Items: []control.Item{{Type: "agentMessage", Role: "assistant", Phase: "final_answer", Text: "OLD-1"}}},
+		{TurnID: "old-2", Status: "completed", Items: []control.Item{{Type: "agentMessage", Role: "assistant", Phase: "final_answer", Text: "OLD-2"}}},
+	}}}
+	service, err := New(filepath.Join(dir, "mirror.json"), reader, fakeRuntime{}, registry, events.NewBroker(), nil, tg.target(), qq.target())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	service.baselineAll()
+	if _, err := service.Configure(Config{Enabled: true, Messages: MessageTypes{Assistant: true}, Telegram: TelegramConfig{Enabled: true, ChatID: "telegram-chat"}, QQ: QQConfig{Enabled: true, ConversationType: "c2c", OpenID: "qq-open-id"}}); err != nil {
+		t.Fatal(err)
+	}
+	service.syncThread("thread")
+	if tg.count() != 0 || qq.count() != 0 {
+		t.Fatalf("initial baseline replayed existing finals: telegram=%d qq=%d", tg.count(), qq.count())
+	}
 }
 
 func waitFor(t *testing.T, condition func() bool) {

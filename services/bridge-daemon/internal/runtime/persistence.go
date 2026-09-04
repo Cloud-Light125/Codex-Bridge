@@ -717,10 +717,12 @@ func persistenceSnapshot(raw map[string]any, expectedTurnID string) control.Thre
 	turns := objectSlice(payload["turns"])
 	snapshot.TurnCount = len(turns)
 	if len(turns) > 0 {
-		snapshot.LastTurnID = textValue(turns[len(turns)-1]["id"])
+		snapshot.LastTurnID = firstNonEmpty(textValue(turns[len(turns)-1]["id"]), textValue(turns[len(turns)-1]["turnId"]))
 	}
-	for _, turn := range turns {
-		turnID := firstNonEmpty(textValue(turn["id"]), textValue(turn["turnId"]))
+	detail := control.NormalizeThreadDetail(raw)
+	mode := control.FinalSelectionModeForHistory(detail.HistoryMode)
+	for _, turn := range detail.Turns {
+		turnID := turn.TurnID
 		if expectedTurnID != "" && turnID != expectedTurnID {
 			continue
 		}
@@ -728,16 +730,14 @@ func persistenceSnapshot(raw map[string]any, expectedTurnID string) control.Thre
 			continue
 		}
 		snapshot.FoundTurn = turnID != ""
-		snapshot.TurnStatus = statusText(turn["status"])
-		for _, item := range objectSlice(turn["items"]) {
-			itemType := textValue(item["type"])
-			itemID := firstNonEmpty(textValue(item["id"]), textValue(item["itemId"]))
-			switch itemType {
-			case "userMessage":
-				snapshot.UserMessageItemID = itemID
-			case "agentMessage":
-				snapshot.AssistantMessageItemID = itemID
+		snapshot.TurnStatus = turn.Status
+		for _, item := range turn.Items {
+			if item.Type == "userMessage" {
+				snapshot.UserMessageItemID = item.ItemID
 			}
+		}
+		if item, ok := control.SelectFinalAssistantItem(turn, mode); ok {
+			snapshot.AssistantMessageItemID = item.ItemID
 		}
 		break
 	}

@@ -50,7 +50,7 @@ public sealed class BackupViewModel : ObservableObject
     public ObservableCollection<string> RecentOperations { get; } = [];
     public string CodexHome => _service.CodexHome;
     public string BridgeData => _service.BridgeLocalData;
-    public string AppVersion => Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.2.4";
+    public string AppVersion => Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.3.0";
 
     public bool IncludeCodex { get => _includeCodex; set => SetProperty(ref _includeCodex, value); }
     public bool IncludeBridge { get => _includeBridge; set => SetProperty(ref _includeBridge, value); }

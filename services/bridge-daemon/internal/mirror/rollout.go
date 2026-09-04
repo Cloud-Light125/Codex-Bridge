@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 )
 
 func (s *Service) watchRollouts() {
@@ -161,6 +163,7 @@ func (s *Service) onRolloutChanged(path string) {
 	if !ok {
 		return
 	}
+	s.logRolloutFinalCandidate(final)
 	s.mu.Lock()
 	previous := s.rolloutFinals[final.ThreadID]
 	if previous.TurnID == final.TurnID && previous.ItemID == final.ItemID {
@@ -218,7 +221,7 @@ func readCompletedRolloutFinal(path string) (rolloutFinal, bool) {
 		}
 		if row.Type == "response_item" && stringField(row.Payload, "type") == "message" && stringField(row.Payload, "role") == "assistant" {
 			phase := stringField(row.Payload, "phase")
-			if phase == "commentary" {
+			if !control.IsExplicitFinalPhase(phase) {
 				continue
 			}
 			turnID := nestedString(row.Payload, "internal_chat_message_metadata_passthrough", "turn_id")
@@ -231,9 +234,9 @@ func readCompletedRolloutFinal(path string) (rolloutFinal, bool) {
 			}
 			id := stringField(row.Payload, "id")
 			if id == "" {
-				id = fingerprint(turnID, text)
+				id = control.FinalAssistantItemID(turnID, control.Item{Text: text})
 			}
-			items[turnID] = rolloutFinal{ThreadID: threadID, TurnID: turnID, ItemID: id, Text: text, CompletedAt: row.Timestamp}
+			items[turnID] = rolloutFinal{ThreadID: threadID, TurnID: turnID, ItemID: id, Phase: phase, Text: text, CompletedAt: row.Timestamp}
 		}
 		if row.Type == "event_msg" && stringField(row.Payload, "type") == "task_complete" {
 			finalTurn = stringField(row.Payload, "turn_id")

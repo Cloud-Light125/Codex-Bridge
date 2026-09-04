@@ -179,7 +179,13 @@ func convertCodexEvent(event events.Event) (Event, bool) {
 	case events.AssistantDelta:
 		result.Delta = stringValue(event.Payload, "delta")
 	case events.AssistantCompleted:
-		result.Text = stringValue(event.Payload, "text")
+		// Assistant completion is an item-level notification, not proof of a
+		// formal Turn answer. Expose text to generic conversation consumers only
+		// when the protocol explicitly marks this item as final; the Task Center
+		// and history readers use the shared selector for legacy compatibility.
+		if control.IsExplicitFinalPhase(stringValue(event.Payload, "phase")) {
+			result.Text = stringValue(event.Payload, "text")
+		}
 	case events.TurnFailed:
 		result.Error = stringValue(event.Payload, "error")
 	}

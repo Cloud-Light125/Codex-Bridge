@@ -192,6 +192,45 @@ func TestHistoryReaderLegacyUsesFullRead(t *testing.T) {
 	}
 }
 
+func TestHistoryReaderMarksResolvedHistoryModeForFinalSelection(t *testing.T) {
+	legacy := &fakeHistoryRPC{
+		read: func(includeTurns bool) (map[string]any, error) {
+			if !includeTurns {
+				return paginatedMetadata("legacy-marker", ""), nil
+			}
+			return map[string]any{"thread": map[string]any{
+				"id": "legacy-marker", "turns": []map[string]any{{"id": "turn-1", "status": "completed"}},
+			}}, nil
+		},
+	}
+	legacyResult, err := NewHistoryReader(legacy, nil).ReadThread(context.Background(), "legacy-marker", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := historyMode(legacyResult); mode != "legacy" {
+		t.Fatalf("legacy compatibility mode = %q; want legacy", mode)
+	}
+
+	paginated := &fakeHistoryRPC{
+		read: func(bool) (map[string]any, error) {
+			return paginatedMetadata("paged-marker", "paginated"), nil
+		},
+		turns: func(ThreadTurnsListOptions) (map[string]any, error) {
+			return map[string]any{"data": []map[string]any{{"id": "turn-1", "status": "completed"}}}, nil
+		},
+		items: func(ThreadItemsListOptions) (map[string]any, error) {
+			return map[string]any{"data": []map[string]any{}}, nil
+		},
+	}
+	paginatedResult, err := NewHistoryReader(paginated, nil).ReadThread(context.Background(), "paged-marker", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := historyMode(paginatedResult); mode != "paginated" {
+		t.Fatalf("paginated compatibility mode = %q; want paginated", mode)
+	}
+}
+
 func TestHistoryReaderFallsBackToLegacyWhenPagingIsUnavailable(t *testing.T) {
 	probeFailed := false
 	fake := &fakeHistoryRPC{

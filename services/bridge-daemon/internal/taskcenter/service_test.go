@@ -140,11 +140,40 @@ func TestTaskServiceRoutesAndCompletes(t *testing.T) {
 		t.Fatalf("waiting task=%#v", waiting)
 	}
 	service.HandleEvent(events.Event{EventType: events.InteractionResolved, ThreadID: "thread-7", TurnID: task.CurrentRunID, Payload: map[string]any{"interaction": map[string]any{"id": "input-1"}}})
-	service.HandleEvent(events.Event{EventType: events.AssistantCompleted, ThreadID: "thread-7", TurnID: task.CurrentRunID, Payload: map[string]any{"text": "已修复\n\ngo test ./... PASS"}})
+	service.HandleEvent(events.Event{EventType: events.AssistantCompleted, ThreadID: "thread-7", TurnID: task.CurrentRunID, Payload: map[string]any{"phase": "commentary", "text": "WRONG-PROGRESS"}})
+	service.HandleEvent(events.Event{EventType: events.AssistantCompleted, ThreadID: "thread-7", TurnID: task.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "已修复\n\ngo test ./... PASS"}})
 	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: "thread-7", TurnID: task.CurrentRunID, Payload: map[string]any{"status": "persisted"}})
 	completed, _ := tasks.Get(1)
-	if completed.Status != StatusCompleted || !completed.Result.Success || completed.Result.FinalText == "" || len(completed.Summary.TestResults) != 1 {
+	if completed.Status != StatusCompleted || !completed.Result.Success || completed.Result.FinalText == "" || strings.Contains(completed.Result.FinalText, "WRONG-PROGRESS") || len(completed.Summary.TestResults) != 1 {
 		t.Fatalf("completed task=%#v", completed)
+	}
+}
+
+func TestTaskServiceWaitsForFormalFinalWhenCompletionArrivesFirst(t *testing.T) {
+	adapter := &fakeTaskAdapter{backend: BackendCodex, refs: []ConversationRef{{Backend: BackendCodex, Number: 7, TargetID: "thread-7"}}}
+	service, tasks, projects := newTestService(t, adapter)
+	project, err := projects.Create(ProjectInput{Name: "Late final", DefaultBackend: BackendCodex, DefaultConversationNumber: intPointer(7)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateTask(context.Background(), TaskInput{ProjectID: project.ProjectID, Description: "等待正式回答"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: task.TargetID, TurnID: task.CurrentRunID, Payload: map[string]any{"status": "persisted"}})
+	pending, _ := tasks.Get(task.TaskNumber)
+	if pending.Status != StatusRunning || pending.Result.FinalText != "" {
+		t.Fatalf("completion without formal final was accepted: %#v", pending)
+	}
+	service.HandleEvent(events.Event{EventType: events.AssistantCompleted, ThreadID: task.TargetID, TurnID: task.CurrentRunID, Payload: map[string]any{"phase": "commentary", "text": "WRONG-PROGRESS"}})
+	pending, _ = tasks.Get(task.TaskNumber)
+	if pending.Status != StatusRunning {
+		t.Fatalf("commentary completed the pending task: %#v", pending)
+	}
+	service.HandleEvent(events.Event{EventType: events.AssistantCompleted, ThreadID: task.TargetID, TurnID: task.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "CORRECT-FINAL"}})
+	completed, _ := tasks.Get(task.TaskNumber)
+	if completed.Status != StatusCompleted || completed.Result.FinalText != "CORRECT-FINAL" {
+		t.Fatalf("late formal final was not completed: %#v", completed)
 	}
 }
 
@@ -480,7 +509,7 @@ func TestTaskServiceRemoteCommandsShareCoreHandler(t *testing.T) {
 		t.Fatal("tasks waiting filter did not list T3")
 	}
 	service.HandleEvent(events.Event{EventType: events.InteractionResolved, ThreadID: retried.TargetID, TurnID: retried.CurrentRunID, Payload: map[string]any{"interaction": map[string]any{"id": "remote-input"}}})
-	service.HandleEvent(events.Event{EventType: events.AssistantCompleted, ThreadID: retried.TargetID, TurnID: retried.CurrentRunID, Payload: map[string]any{"text": "completed from remote command test"}})
+	service.HandleEvent(events.Event{EventType: events.AssistantCompleted, ThreadID: retried.TargetID, TurnID: retried.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "completed from remote command test"}})
 	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: retried.TargetID, TurnID: retried.CurrentRunID, Payload: map[string]any{"status": "persisted"}})
 	if !strings.Contains(run("/tasks completed"), "T3") || !strings.Contains(run("/tasks"), "T3") {
 		t.Fatal("tasks completed/all filters did not list T3")

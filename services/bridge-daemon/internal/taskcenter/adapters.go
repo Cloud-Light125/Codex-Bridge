@@ -79,6 +79,13 @@ type TaskBackendAdapter interface {
 	QueryRunState(context.Context, ConversationRef, string) (RunState, error)
 }
 
+// FinalAnswerReader is the optional, protocol-aware completion read path.
+// Backends that expose a multi-item history must use it instead of guessing
+// from the last assistant item.
+type FinalAnswerReader interface {
+	ReadFinalAnswer(context.Context, string, string) (control.Item, bool, error)
+}
+
 type CodexTaskAdapter struct {
 	control  codexTaskControl
 	runtime  codexTaskRuntime
@@ -288,6 +295,29 @@ func (a *CodexTaskAdapter) QueryRunState(ctx context.Context, ref ConversationRe
 		RunID:        state.TurnID, State: state.State, Error: state.Error,
 	}
 	return result, nil
+}
+
+func (a *CodexTaskAdapter) ReadFinalAnswer(ctx context.Context, threadID, turnID string) (control.Item, bool, error) {
+	if a.control == nil {
+		return control.Item{}, false, errors.New("Codex backend is unavailable")
+	}
+	threadID, turnID = strings.TrimSpace(threadID), strings.TrimSpace(turnID)
+	if threadID == "" || turnID == "" {
+		return control.Item{}, false, errors.New("Codex final answer requires a Thread and Turn")
+	}
+	detail, err := control.ReadThreadHistory(ctx, a.control, threadID, control.DefaultHistoryTurnLimit)
+	if err != nil {
+		return control.Item{}, false, err
+	}
+	mode := control.FinalSelectionModeForHistory(detail.HistoryMode)
+	for _, turn := range detail.Turns {
+		if turn.TurnID != turnID {
+			continue
+		}
+		item, ok := control.SelectFinalAssistantItem(turn, mode)
+		return item, ok, nil
+	}
+	return control.Item{}, false, nil
 }
 
 func matchingCodexTurn(turns []control.Turn, runID string) *control.Turn {

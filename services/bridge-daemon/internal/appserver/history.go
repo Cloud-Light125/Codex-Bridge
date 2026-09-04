@@ -260,7 +260,7 @@ func (r *HistoryReader) readUnknownMode(ctx context.Context, metadata map[string
 	if err == nil {
 		r.setCapability(HistoryCapabilityLegacyOnly, nil)
 		r.noteMode("legacy")
-		return legacy, nil
+		return withHistoryMode(legacy, "legacy"), nil
 	}
 	if !isPaginatedReadUnsupportedError(err) {
 		return nil, err
@@ -279,7 +279,15 @@ func (r *HistoryReader) readUnknownMode(ctx context.Context, metadata map[string
 }
 
 func (r *HistoryReader) readLegacy(ctx context.Context, threadID string) (map[string]any, error) {
-	return r.rpc.ThreadRead(ctx, threadID, true)
+	raw, err := r.rpc.ThreadRead(ctx, threadID, true)
+	if err != nil {
+		return nil, err
+	}
+	// Older servers often omit historyMode from the thread payload. Preserve
+	// the compatibility decision made by this reader so downstream final
+	// selection can allow the legacy unphased fallback without treating an
+	// arbitrary empty mode as legacy.
+	return withHistoryMode(raw, "legacy"), nil
 }
 
 func (r *HistoryReader) paginatedUnavailable(threadID string) error {
@@ -321,7 +329,7 @@ func (r *HistoryReader) readPaginated(ctx context.Context, metadata map[string]a
 		}
 	}
 	r.setCapability(HistoryCapabilityPaginatedSupported, nil)
-	return withTurns(metadata, turns), nil
+	return withHistoryMode(withTurns(metadata, turns), "paginated"), nil
 }
 
 func (r *HistoryReader) readTurns(ctx context.Context, threadID string, limit int) ([]map[string]any, error) {
@@ -548,6 +556,17 @@ func withTurns(raw map[string]any, turns []map[string]any) map[string]any {
 		return result
 	}
 	result["turns"] = turns
+	return result
+}
+
+func withHistoryMode(raw map[string]any, mode string) map[string]any {
+	result := cloneHistoryMap(raw)
+	if nested, ok := raw["thread"].(map[string]any); ok {
+		result["thread"] = cloneHistoryMap(nested)
+		result["thread"].(map[string]any)["historyMode"] = mode
+		return result
+	}
+	result["historyMode"] = mode
 	return result
 }
 

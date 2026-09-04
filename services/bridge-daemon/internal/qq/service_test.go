@@ -176,7 +176,7 @@ func TestStopRequiresExactAddressUserBindingAndRuntimeOwnership(t *testing.T) {
 }
 
 func TestOnlyPersistedTurnCompletedDeliversFormalAssistantText(t *testing.T) {
-	detail := control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "thread-1"}, Turns: []control.Turn{{TurnID: "turn-1", Items: []control.Item{{Type: "agentMessage", Role: "assistant", Text: "formal answer"}}}}}
+	detail := control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "thread-1", HistoryMode: "legacy"}, Turns: []control.Turn{{TurnID: "turn-1", Status: "completed", Items: []control.Item{{Type: "agentMessage", Role: "assistant", Text: "formal answer"}}}}}
 	service, adapter, repository := newServiceFixture(t, &fakeControl{detail: detail}, &fakeRuntime{})
 	address := channels.ChannelAddress{ChannelType: "qq", AccountID: "100", ConversationType: "private", ChatID: "200"}
 	_, _, err := repository.UpsertAddress(bindings.CreateRequest{ChannelType: "qq", AccountID: "100", ConversationType: "private", ChatID: "200", ThreadID: "thread-1"})
@@ -192,6 +192,23 @@ func TestOnlyPersistedTurnCompletedDeliversFormalAssistantText(t *testing.T) {
 	service.handleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: "thread-1", TurnID: "turn-1", Payload: map[string]any{"status": "persisted"}})
 	if len(adapter.sent) != 1 || adapter.sent[0].Text != "任务完成\nformal answer" {
 		t.Fatalf("messages=%#v", adapter.sent)
+	}
+}
+
+func TestFinalAssistantTextSelectsExplicitPhaseFromMultipleAssistantItems(t *testing.T) {
+	thread := control.ThreadDetail{ThreadSummary: control.ThreadSummary{ThreadID: "thread-1", HistoryMode: "paginated"}, Turns: []control.Turn{{
+		TurnID: "turn-1", Status: "completed", Items: []control.Item{
+			{Type: "agentMessage", Role: "assistant", Phase: "commentary", Text: "PROGRESS-1"},
+			{Type: "agentMessage", Role: "assistant", Text: "WRONG-PROGRESS"},
+			{Type: "agentMessage", Role: "assistant", Phase: "final_answer", Text: "CORRECT-FINAL"},
+		},
+	}}}
+	if got := finalAssistantText(thread, "turn-1"); got != "CORRECT-FINAL" {
+		t.Fatalf("QQ direct final path selected %q", got)
+	}
+	thread.Turns[0].Items = thread.Turns[0].Items[:2]
+	if got := finalAssistantText(thread, "turn-1"); got != "" {
+		t.Fatalf("QQ direct paginated path accepted progress %q", got)
 	}
 }
 

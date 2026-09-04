@@ -551,8 +551,9 @@ func (s *Service) history(ctx context.Context, arguments []string) Result {
 	}
 	type round struct{ user, assistant string }
 	rounds := make([]round, 0, len(detail.Turns))
+	selectionMode := control.FinalSelectionModeForHistory(detail.HistoryMode)
 	for _, turn := range detail.Turns {
-		user, assistant := historyTexts(turn)
+		user, assistant := historyTexts(turn, selectionMode)
 		if user == "" {
 			continue
 		}
@@ -578,33 +579,18 @@ func (s *Service) history(ctx context.Context, arguments []string) Result {
 	return Result{Parts: splitPrefixed(prefix, body.String(), 3200)}
 }
 
-func historyTexts(turn control.Turn) (string, string) {
+func historyTexts(turn control.Turn, mode control.FinalSelectionMode) (string, string) {
 	user := ""
-	final := ""
-	legacy := ""
 	for _, item := range turn.Items {
-		switch item.Type {
-		case "userMessage":
-			if strings.TrimSpace(item.Text) != "" {
-				user = strings.TrimSpace(item.Text)
-			}
-		case "agentMessage":
-			text := strings.TrimSpace(item.Text)
-			if text == "" {
-				continue
-			}
-			switch strings.ToLower(strings.TrimSpace(item.Phase)) {
-			case "final_answer", "final", "answer":
-				final = text
-			case "":
-				legacy = text
-			}
+		if item.Type == "userMessage" && strings.TrimSpace(item.Text) != "" {
+			user = strings.TrimSpace(item.Text)
 		}
 	}
-	if final == "" && strings.EqualFold(turn.Status, "completed") {
-		final = legacy
+	final, ok := control.SelectFinalAssistantItem(turn, mode)
+	if !ok {
+		return user, ""
 	}
-	return user, final
+	return user, strings.TrimSpace(final.Text)
 }
 
 func (s *Service) running(ctx context.Context, arguments []string) string {

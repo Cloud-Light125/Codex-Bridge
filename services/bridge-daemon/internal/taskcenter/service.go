@@ -13,6 +13,7 @@ import (
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/gitquery"
 	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
@@ -23,6 +24,8 @@ var (
 	ErrProjectNotFound = errors.New("项目不存在")
 )
 
+const maxFinalCandidates = 512
+
 type Service struct {
 	projects *ProjectRegistry
 	tasks    *TaskRegistry
@@ -31,22 +34,26 @@ type Service struct {
 	git      *gitquery.Service
 	actions  *TaskActionRegistry
 
-	mu              sync.RWMutex
-	adapters        map[string]TaskBackendAdapter
-	projectContexts map[string]string
-	pendingActions  map[string]PendingTaskAction
-	started         bool
-	cancel          context.CancelFunc
-	done            chan struct{}
-	unsubscribe     func()
-	dispatchMu      sync.Mutex
+	mu                sync.RWMutex
+	adapters          map[string]TaskBackendAdapter
+	projectContexts   map[string]string
+	pendingActions    map[string]PendingTaskAction
+	finalCandidates   map[string]control.Item
+	completionPending map[string]bool
+	completionRetry   map[string]bool
+	ctx               context.Context
+	started           bool
+	cancel            context.CancelFunc
+	done              chan struct{}
+	unsubscribe       func()
+	dispatchMu        sync.Mutex
 }
 
 func NewService(projects *ProjectRegistry, tasks *TaskRegistry, broker *events.Broker, logger *bridgelog.SafeLogger, adapters ...TaskBackendAdapter) *Service {
 	service := &Service{
 		projects: projects, tasks: tasks, broker: broker, logger: logger,
 		git: gitquery.New(), actions: NewTaskActionRegistry(),
-		adapters: make(map[string]TaskBackendAdapter), projectContexts: make(map[string]string), pendingActions: make(map[string]PendingTaskAction), done: make(chan struct{}),
+		adapters: make(map[string]TaskBackendAdapter), projectContexts: make(map[string]string), pendingActions: make(map[string]PendingTaskAction), finalCandidates: make(map[string]control.Item), completionPending: make(map[string]bool), completionRetry: make(map[string]bool), ctx: context.Background(), done: make(chan struct{}),
 	}
 	for _, adapter := range adapters {
 		service.SetAdapter(adapter)
@@ -93,6 +100,7 @@ func (s *Service) Start() {
 	s.started = true
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
+	s.ctx = ctx
 	if s.broker == nil {
 		close(s.done)
 		s.mu.Unlock()
@@ -173,8 +181,16 @@ func (s *Service) HandleEvent(event events.Event) {
 			s.touchTask(task)
 		}
 	case events.AssistantCompleted:
-		if text := firstNonEmpty(payloadString(event.Payload, "text"), payloadString(event.Payload, "message")); text != "" {
-			task.Result.FinalText = text
+		phase := payloadString(event.Payload, "phase")
+		if control.IsExplicitFinalPhase(phase) {
+			if text := firstNonEmpty(payloadString(event.Payload, "text"), payloadString(event.Payload, "message")); text != "" {
+				s.rememberFinalCandidate(event.ThreadID, event.TurnID, control.Item{ItemID: event.ItemID, Role: "assistant", Phase: phase, Text: text})
+				s.collectSummary(&task, event.Payload)
+				if s.takeCompletionPending(event.ThreadID, event.TurnID) {
+					s.completeTask(task, text)
+					return
+				}
+			}
 		}
 		s.collectSummary(&task, event.Payload)
 		s.touchTask(task)
@@ -184,7 +200,31 @@ func (s *Service) HandleEvent(event events.Event) {
 	case events.TurnCompleted, events.OpenClawMessageCompleted:
 		// Codex emits TurnCompleted only after its existing persistence
 		// verification succeeds. OpenClaw emits its terminal message event.
-		finalText := firstNonEmpty(payloadString(event.Payload, "finalText"), payloadString(event.Payload, "text"), payloadString(event.Payload, "message"))
+		finalText := ""
+		if event.EventType == events.OpenClawMessageCompleted {
+			finalText = firstNonEmpty(payloadString(event.Payload, "finalText"), payloadString(event.Payload, "text"), payloadString(event.Payload, "message"))
+		} else {
+			finalText = s.rememberedFinalText(event.ThreadID, event.TurnID)
+			if finalText == "" && control.IsExplicitFinalPhase(payloadString(event.Payload, "phase")) {
+				finalText = firstNonEmpty(payloadString(event.Payload, "finalText"), payloadString(event.Payload, "text"), payloadString(event.Payload, "message"))
+				if finalText != "" {
+					s.rememberFinalCandidate(event.ThreadID, event.TurnID, control.Item{ItemID: event.ItemID, Role: "assistant", Phase: payloadString(event.Payload, "phase"), Text: finalText})
+				}
+			}
+			if finalText == "" {
+				finalText = s.readCodexFinalText(task, event.TurnID)
+			}
+			if finalText == "" {
+				// A completed Turn without a formal final item is not a completed
+				// Task Answer. Keep the task active and let the late item event,
+				// bounded retry, or recovery scanner resolve it later.
+				s.markCompletionPending(event.ThreadID, event.TurnID)
+				s.retryCodexFinal(task, event.TurnID)
+				s.collectSummary(&task, event.Payload)
+				s.touchTask(task)
+				return
+			}
+		}
 		if finalText != "" {
 			task.Result.FinalText = finalText
 		}
@@ -199,6 +239,156 @@ func (s *Service) HandleEvent(event events.Event) {
 		reason := firstNonEmpty(payloadString(event.Payload, "error"), payloadString(event.Payload, "message"), "Backend 运行被中断")
 		s.interruptTask(task, reason)
 	}
+}
+
+func completionKey(threadID, turnID string) string {
+	return strings.TrimSpace(threadID) + "\x00" + strings.TrimSpace(turnID)
+}
+
+func (s *Service) markCompletionPending(threadID, turnID string) {
+	key := completionKey(threadID, turnID)
+	s.mu.Lock()
+	if s.completionPending == nil {
+		s.completionPending = make(map[string]bool)
+	}
+	s.completionPending[key] = true
+	s.mu.Unlock()
+}
+
+func (s *Service) takeCompletionPending(threadID, turnID string) bool {
+	key := completionKey(threadID, turnID)
+	s.mu.Lock()
+	pending := s.completionPending[key]
+	if pending {
+		delete(s.completionPending, key)
+	}
+	s.mu.Unlock()
+	return pending
+}
+
+func (s *Service) isCompletionPending(threadID, turnID string) bool {
+	key := completionKey(threadID, turnID)
+	s.mu.RLock()
+	pending := s.completionPending[key]
+	s.mu.RUnlock()
+	return pending
+}
+
+func (s *Service) retryCodexFinal(task Task, turnID string) {
+	adapter, ok := s.Adapter(task.Backend)
+	if !ok {
+		return
+	}
+	if _, ok := adapter.(FinalAnswerReader); !ok {
+		return
+	}
+	key := completionKey(task.TargetID, turnID)
+	s.mu.Lock()
+	if s.completionRetry == nil {
+		s.completionRetry = make(map[string]bool)
+	}
+	if s.completionRetry[key] {
+		s.mu.Unlock()
+		return
+	}
+	s.completionRetry[key] = true
+	baseContext := s.ctx
+	s.mu.Unlock()
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.completionRetry, key)
+			s.mu.Unlock()
+		}()
+		previous := time.Duration(0)
+		for _, elapsed := range []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second} {
+			timer := time.NewTimer(elapsed - previous)
+			select {
+			case <-baseContext.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			current, exists := s.tasks.Get(task.TaskNumber)
+			if !exists || !current.IsActive() || current.CurrentRunID != turnID || !s.isCompletionPending(current.TargetID, turnID) {
+				return
+			}
+			finalText := s.rememberedFinalText(current.TargetID, turnID)
+			if finalText == "" {
+				finalText = s.readCodexFinalText(current, turnID)
+			}
+			if finalText != "" {
+				if !s.takeCompletionPending(current.TargetID, turnID) {
+					return
+				}
+				s.completeTask(current, finalText)
+				return
+			}
+			previous = elapsed
+		}
+		if s.logger != nil {
+			s.logger.Printf("finalCandidate source=taskcenter threadId=%s turnId=%s phase= result=%s", task.TargetID, turnID, control.FinalNotAvailableYet)
+		}
+	}()
+}
+
+func (s *Service) rememberFinalCandidate(threadID, turnID string, item control.Item) {
+	key := strings.TrimSpace(threadID) + "\x00" + strings.TrimSpace(turnID)
+	s.mu.Lock()
+	if s.finalCandidates == nil {
+		s.finalCandidates = make(map[string]control.Item)
+	}
+	s.finalCandidates[key] = item
+	for len(s.finalCandidates) > maxFinalCandidates {
+		for candidate := range s.finalCandidates {
+			delete(s.finalCandidates, candidate)
+			break
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) rememberedFinalText(threadID, turnID string) string {
+	key := strings.TrimSpace(threadID) + "\x00" + strings.TrimSpace(turnID)
+	s.mu.RLock()
+	item := s.finalCandidates[key]
+	s.mu.RUnlock()
+	return strings.TrimSpace(item.Text)
+}
+
+func (s *Service) readCodexFinalText(task Task, turnID string) string {
+	adapter, ok := s.Adapter(task.Backend)
+	if !ok {
+		return ""
+	}
+	reader, ok := adapter.(FinalAnswerReader)
+	if !ok {
+		return ""
+	}
+	s.mu.RLock()
+	baseContext := s.ctx
+	s.mu.RUnlock()
+	if baseContext == nil {
+		baseContext = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseContext, 10*time.Second)
+	defer cancel()
+	item, found, err := reader.ReadFinalAnswer(ctx, task.TargetID, turnID)
+	if err != nil || !found || !control.IsExplicitFinalPhase(item.Phase) && strings.TrimSpace(item.Phase) != "" {
+		return ""
+	}
+	if strings.TrimSpace(item.Text) == "" {
+		return ""
+	}
+	s.rememberFinalCandidate(task.TargetID, turnID, item)
+	return strings.TrimSpace(item.Text)
+}
+
+func (s *Service) forgetFinalCandidate(threadID, turnID string) {
+	key := completionKey(threadID, turnID)
+	s.mu.Lock()
+	delete(s.finalCandidates, key)
+	s.mu.Unlock()
 }
 
 func (s *Service) CreateTask(ctx context.Context, input TaskInput) (Task, error) {
@@ -499,6 +689,15 @@ func (s *Service) Recover(ctx context.Context) {
 			s.dispatchMu.Unlock()
 			continue
 		}
+		if s.isCompletionPending(task.TargetID, task.CurrentRunID) {
+			// A persisted Turn can become visible before its formal final item
+			// reaches the history reader. Keep it pending while the protocol-aware
+			// reader retries; never convert the missing final into a success or an
+			// arbitrary progress result during recovery.
+			s.retryCodexFinal(task, task.CurrentRunID)
+			s.dispatchMu.Unlock()
+			continue
+		}
 		if task.DispatchState == Dispatching {
 			s.interruptTask(task, "Bridge 重启时任务仍处于 dispatching，无法安全确认是否已发送")
 			s.dispatchMu.Unlock()
@@ -588,6 +787,11 @@ func (s *Service) Recover(ctx context.Context) {
 			} else {
 				s.updateTask(task, StatusRunning, "")
 			}
+			s.dispatchMu.Unlock()
+			continue
+		}
+		if finalText := s.readCodexFinalText(task, task.CurrentRunID); finalText != "" {
+			s.completeTask(task, finalText)
 			s.dispatchMu.Unlock()
 			continue
 		}
@@ -690,6 +894,8 @@ func (s *Service) completeTask(task Task, message string) {
 	task.Result.Success = true
 	task.Summary = summaryFromResult(task)
 	s.updateTask(task, StatusCompleted, "")
+	s.takeCompletionPending(task.TargetID, task.CurrentRunID)
+	s.forgetFinalCandidate(task.TargetID, task.CurrentRunID)
 }
 
 func (s *Service) failTask(task Task, message string) {
@@ -699,6 +905,7 @@ func (s *Service) failTask(task Task, message string) {
 	task.Result.Success = false
 	task.Summary = summaryFromResult(task)
 	s.updateTask(task, StatusFailed, strings.TrimSpace(message))
+	s.takeCompletionPending(task.TargetID, task.CurrentRunID)
 }
 
 func (s *Service) interruptTask(task Task, message string) {
@@ -707,6 +914,7 @@ func (s *Service) interruptTask(task Task, message string) {
 	}
 	task.Result.Success = false
 	s.updateTask(task, StatusInterrupted, strings.TrimSpace(message))
+	s.takeCompletionPending(task.TargetID, task.CurrentRunID)
 }
 
 func (s *Service) latestTask(task Task) Task {

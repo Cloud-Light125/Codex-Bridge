@@ -86,7 +86,7 @@ func TestExecutionActionsCreateChildTasksAndPreserveActionSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"text": "完成"}})
+	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "完成"}})
 
 	testResponse, err := service.ExecuteAction(context.Background(), parent.TaskNumber, TaskActionRequest{ActionID: TaskActionTest})
 	if err != nil || testResponse.Task == nil {
@@ -106,7 +106,7 @@ func TestContinueAndRetryActionsReuseExistingTaskFlow(t *testing.T) {
 	service, tasks, projects := newTestService(t, adapter)
 	project, _ := projects.Create(ProjectInput{Name: "Action Flow", DefaultBackend: BackendCodex, DefaultConversationNumber: intPointer(203)})
 	parent, _ := service.CreateTask(context.Background(), TaskInput{ProjectID: project.ProjectID, Description: "原始任务"})
-	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"text": "完成"}})
+	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "完成"}})
 
 	continuedResponse, err := service.ExecuteAction(context.Background(), parent.TaskNumber, TaskActionRequest{ActionID: TaskActionContinue, Text: "继续处理"})
 	if err != nil || continuedResponse.Task == nil || continuedResponse.Task.ParentTaskNumber != parent.TaskNumber || continuedResponse.Task.ActionID != TaskActionContinue || continuedResponse.Task.ActionSourceTaskNumber != parent.TaskNumber {
@@ -135,7 +135,7 @@ func TestCommitPushRequiresConfirmationBeforeCreatingTask(t *testing.T) {
 	service, tasks, projects := newTestService(t, adapter)
 	project, _ := projects.Create(ProjectInput{Name: "Action Repo", DefaultBackend: BackendCodex, WorkingDirectory: directory, DefaultConversationNumber: intPointer(203)})
 	parent, _ := service.CreateTask(context.Background(), TaskInput{ProjectID: project.ProjectID, Description: "原始任务"})
-	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"text": "完成"}})
+	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "完成"}})
 	before := len(tasks.List(TaskFilter{}))
 	response, err := service.ExecuteAction(context.Background(), parent.TaskNumber, TaskActionRequest{ActionID: TaskActionCommitPush})
 	if err != nil || !response.ConfirmationRequired || len(tasks.List(TaskFilter{})) != before {
@@ -153,7 +153,7 @@ func TestCommitActionCreatesChildAndProjectGitStatusIsReadOnly(t *testing.T) {
 	service, _, projects := newTestService(t, adapter)
 	project, _ := projects.Create(ProjectInput{Name: "Action Repo", DefaultBackend: BackendCodex, WorkingDirectory: directory, DefaultConversationNumber: intPointer(203)})
 	parent, _ := service.CreateTask(context.Background(), TaskInput{ProjectID: project.ProjectID, Description: "原始任务"})
-	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"text": "完成"}})
+	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "完成"}})
 
 	status, err := service.GetProjectGitStatus(context.Background(), project.ProjectID)
 	if err != nil || !status.GitRepository || status.WorkingTree != "modified" || strings.TrimSpace(status.Branch) == "" || !strings.Contains(status.LatestCommit, "initial") {
@@ -171,7 +171,7 @@ func TestRemoteActionsAndConfirmationAuthorization(t *testing.T) {
 	service, tasks, projects := newTestService(t, adapter)
 	project, _ := projects.Create(ProjectInput{Name: "Action Repo", DefaultBackend: BackendCodex, WorkingDirectory: directory, DefaultConversationNumber: intPointer(203)})
 	parent, _ := service.CreateTask(context.Background(), TaskInput{ProjectID: project.ProjectID, Description: "原始任务"})
-	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"text": "完成"}})
+	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "完成"}})
 	commands := commandregistry.NewInMemory()
 	message := channels.InboundMessage{Address: channels.ChannelAddress{ChannelType: "telegram", ChannelProfileID: "profile", AccountID: "account", ConversationType: "private", ChatID: "chat"}, UserID: "owner"}
 	invoke := func(message channels.InboundMessage, text string) string {
@@ -250,7 +250,7 @@ func TestRemoteDiffReturnsSummaryAndFullOutputIsBounded(t *testing.T) {
 	service, _, projects := newTestService(t, adapter)
 	project, _ := projects.Create(ProjectInput{Name: "Action Repo", DefaultBackend: BackendCodex, WorkingDirectory: directory, DefaultConversationNumber: intPointer(203)})
 	parent, _ := service.CreateTask(context.Background(), TaskInput{ProjectID: project.ProjectID, Description: "原始任务"})
-	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"text": "完成"}})
+	service.HandleEvent(events.Event{EventType: events.TurnCompleted, ThreadID: parent.TargetID, TurnID: parent.CurrentRunID, Payload: map[string]any{"phase": "final_answer", "text": "完成"}})
 	response, err := service.ExecuteAction(context.Background(), parent.TaskNumber, TaskActionRequest{ActionID: TaskActionDiff, Remote: true})
 	if err != nil || response.Result == nil || !strings.Contains(response.Result.Result, "test.txt") || strings.Contains(response.Result.Result, "完整 Diff：") {
 		t.Fatalf("summary response=%#v err=%v", response, err)
