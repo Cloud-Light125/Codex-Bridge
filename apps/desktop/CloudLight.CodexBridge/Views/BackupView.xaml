@@ -1,6 +1,6 @@
 <UserControl x:Class="CloudLight.CodexBridge.Views.BackupView" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel MaxWidth="1080" HorizontalAlignment="Left">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+        <StackPanel MaxWidth="1480" HorizontalAlignment="Center">
             <Grid Margin="0,0,0,16"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                 <Border Style="{StaticResource CardStyle}"><StackPanel>
                     <TextBlock Text="Codex 数据位置" Style="{StaticResource EyebrowTextStyle}"/>

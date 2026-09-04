@@ -50,10 +50,16 @@ type User struct {
 	IsBot     bool   `json:"is_bot"`
 	Username  string `json:"username"`
 	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 
 type Chat struct {
-	ID int64 `json:"id"`
+	ID        int64  `json:"id"`
+	Type      string `json:"type"`
+	Title     string `json:"title"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 
 type Message struct {

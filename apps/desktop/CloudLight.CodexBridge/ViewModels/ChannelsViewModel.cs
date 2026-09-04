@@ -244,7 +244,7 @@ public sealed class ChannelsViewModel : ObservableObject
                 {
                     ApplyStatus(status);
                     if (string.IsNullOrWhiteSpace(token))
-                        OperationMessage = "未找到已保存的 Token；可以在此完成配置。";
+                    OperationMessage = "未找到已保存的机器人密钥；可以在此完成配置。";
                 });
             }
 
@@ -279,7 +279,7 @@ public sealed class ChannelsViewModel : ObservableObject
         token = token.Trim();
         if (string.IsNullOrWhiteSpace(token))
         {
-            OperationMessage = "请输入 Telegram Bot Token。";
+            OperationMessage = "请输入 Telegram 机器人密钥。";
             return false;
         }
         if (!TryApplyEditorSettings(requireAllowedUser: false)) return false;
@@ -301,7 +301,7 @@ public sealed class ChannelsViewModel : ObservableObject
                 {
                     _logs.AddException("desktop", "DPAPI 保存失败后，清除后端 Telegram Token 也失败。", rollbackException);
                     throw new InvalidOperationException(
-                        "无法保存 DPAPI Token，且后端 Token 回滚失败；后端可能仍暂时持有该 Token。请停止 Bridge 后重新配置。",
+                        "无法保存机器人密钥，且连接服务回滚失败；请停止 Bridge 后重新配置。",
                         new AggregateException(saveException, rollbackException));
                 }
                 throw;
@@ -333,7 +333,7 @@ public sealed class ChannelsViewModel : ObservableObject
             Running = false;
             Connected = false;
             TokenSummary = "未保存";
-            OperationMessage = "Telegram Token 已删除。";
+            OperationMessage = "Telegram 机器人密钥已删除。";
             await InitializeCoreHandledAsync(cancellationToken);
         }
         catch (Exception exception)
@@ -488,7 +488,7 @@ public sealed class ChannelsViewModel : ObservableObject
             var token = await _secretService.LoadAsync(_lifetime.Token);
             if (string.IsNullOrWhiteSpace(token))
             {
-                OperationMessage = "请先保存 Telegram Bot Token。";
+                OperationMessage = "请先保存 Telegram 机器人密钥。";
                 return;
             }
             await _settingsService.SaveAsync(_settings);
@@ -540,7 +540,7 @@ public sealed class ChannelsViewModel : ObservableObject
             var token = await _secretService.LoadAsync(_lifetime.Token);
             if (string.IsNullOrWhiteSpace(token))
             {
-                OperationMessage = "启动前必须先保存 Telegram Bot Token。";
+                OperationMessage = "启动前必须先保存 Telegram 机器人密钥。";
                 return;
             }
             await _settingsService.SaveAsync(_settings);

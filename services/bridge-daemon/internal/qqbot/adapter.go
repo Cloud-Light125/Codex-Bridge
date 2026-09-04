@@ -176,9 +176,8 @@ func (a *Adapter) Configure(request ConfigureRequest) (AdapterStatus, error) {
 	defer a.mu.Unlock()
 	if a.status.Running {
 		if normalized.Enabled != a.config.Enabled || normalized.AppID != a.config.AppID ||
-			normalized.Environment != a.config.Environment || normalized.ProxyMode != a.config.ProxyMode ||
-			normalized.ProxyURL != a.config.ProxyURL {
-			return AdapterStatus{}, errors.New("stop QQ Official Bot before changing AppID, environment, enabled state, or proxy")
+			normalized.Environment != a.config.Environment {
+			return AdapterStatus{}, errors.New("stop QQ Official Bot before changing AppID, environment, or enabled state")
 		}
 		a.config = normalized
 		a.applyConfigurationStatusLocked(normalized)

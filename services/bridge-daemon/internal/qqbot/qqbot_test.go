@@ -400,6 +400,29 @@ func TestAdapterRetriesDuplicatePassiveReplyWithNextSequence(t *testing.T) {
 	}
 }
 
+func TestConfigureAllowsProxyAndRoutingChangesWhileRunning(t *testing.T) {
+	adapter := NewAdapter(nil)
+	if _, err := adapter.Configure(ConfigureRequest{Enabled: true, AppID: "12345", Environment: "production", ProxyMode: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.SetSecret("test-secret"); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	adapter.status.Running = true
+	adapter.status.Connected = true
+	adapter.config.ProxyMode = "direct"
+	adapter.mu.Unlock()
+
+	status, err := adapter.Configure(ConfigureRequest{Enabled: true, AppID: "12345", Environment: "production", ProxyMode: "environment", SendProgressUpdates: true})
+	if err != nil {
+		t.Fatalf("ordinary option change while running failed: %v", err)
+	}
+	if status.ProxyMode != "environment" || !status.Running {
+		t.Fatalf("unexpected status after ordinary option change: %#v", status)
+	}
+}
+
 func TestAdapterStartPersistsAuthenticationFailureAfterHTTP200TokenError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("X-Tps-Trace-Id", "start-trace-100016")

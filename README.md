@@ -2,7 +2,7 @@
 
 CloudLight Codex Bridge 是面向 Windows 的 Codex 与 OpenClaw 桌面助手。它可以浏览并继续现有 Codex 会话，也可以通过 OpenClaw Gateway 选择已有 Session；Telegram 或 QQ 机器人始终由 Bridge 统一接收消息，再转发给选定后端。
 
-当前版本：`1.3.0`
+当前版本：`1.3.1`
 
 ## 主要能力
 
@@ -28,22 +28,22 @@ CloudLight Codex Bridge 是面向 Windows 的 Codex 与 OpenClaw 桌面助手。
 
 ## 下载与安装
 
-1.3.0 的发布目录：
+1.3.1 的发布目录：
 
 ```text
-artifacts\win-x64-1.3.0
+artifacts\win-x64-1.3.1
 ```
 
 完整安装包：
 
 ```text
-artifacts\win-x64-1.3.0\CloudLight-CodexBridge-Setup-1.3.0-win-x64.exe
+artifacts\win-x64-1.3.1\CloudLight-CodexBridge-Setup-1.3.1-win-x64.exe
 ```
 
 便携版可以直接运行：
 
 ```text
-artifacts\win-x64-1.3.0\CloudLight.CodexBridge.exe
+artifacts\win-x64-1.3.1\CloudLight.CodexBridge.exe
 ```
 
 安装器只为当前 Windows 用户安装，不需要管理员权限。卸载软件不会删除 Codex 数据、应用设置、关联会话、聊天编号、日志或已保存的机器人密钥。
@@ -203,13 +203,13 @@ QQ 配置中仍会使用 OpenID，这是 QQ 开放平台提供的用户或群聊
 
 开发环境与构建说明见 [docs/development.md](docs/development.md)，架构说明见 [docs/architecture.md](docs/architecture.md)。
 
-生成 1.3.0 Release：
+生成 1.3.1 Release：
 
 ```powershell
-.\scripts\build.ps1 -Version 1.3.0
+.\scripts\build.ps1 -Version 1.3.1
 ```
 
-脚本输出到 `artifacts\win-x64-1.3.0`，并拒绝覆盖已存在的版本目录。构建不会执行 Git 提交、标签或推送。
+脚本输出到 `artifacts\win-x64-1.3.1`，并拒绝覆盖已存在的版本目录。构建不会执行 Git 提交、标签或推送。
 
 ## 许可证与第三方说明
 
@@ -220,4 +220,4 @@ QQ 配置中仍会使用 OpenID，这是 QQ 开放平台提供的用户或群聊
 - [licenses/gorilla-websocket-LICENSE.txt](licenses/gorilla-websocket-LICENSE.txt)
 - [docs/upstream-sources.md](docs/upstream-sources.md)
 
-1.3.0 安装包尚未进行商业代码签名，也不包含自动更新。
+1.3.1 安装包尚未进行商业代码签名，也不包含自动更新。

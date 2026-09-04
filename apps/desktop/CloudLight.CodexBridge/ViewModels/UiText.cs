@@ -29,15 +29,19 @@ internal static class UiText
             "running-external" => "由其他 Codex 客户端运行",
             "waiting" or "waiting-user-input" => "等待回复",
             "waiting-approval" => "等待确认",
-            "connected" or "ready" => "已连接",
-            "disconnected" => "未连接",
-            "stopped" or "disabled" => "已停止",
-            "failed" or "error" => "失败",
-			"gateway-failed" => "QQ Gateway 连接失败",
-            "configured" => "已配置",
-            "not-configured" or "unconfigured" => "未配置",
-            "reconnecting" or "connecting" => "正在重连",
-            "authentication-failed" or "auth-failed" => "凭据无效",
+			"connected" or "ready" => "已连接",
+			"disconnected" or "stopped" => "未连接",
+			"disabled" => "未启用",
+			"failed" or "error" => "连接失败",
+			"gateway-failed" or "gateway-unavailable" => "暂时无法连接 QQ 服务，请稍后重试。",
+			"configured" => "已配置",
+			"not-configured" or "unconfigured" => "机器人配置暂时不可用，请刷新后重试。",
+			"channel-unavailable" => "机器人当前未连接。",
+			"profile-unavailable" => "机器人配置暂时不可用，请刷新后重试。",
+			"reconnecting" or "connecting" => "正在连接",
+			"authentication-failed" or "auth-failed" or "qqbot-auth" => "机器人 ID 或密钥不正确，请检查后重试。",
+			"invalid-token" or "token-invalid" or "telegram-token-invalid" => "机器人密钥无效，请检查后重试。",
+			"conflict" or "polling-conflict" => "这个 Telegram 机器人正在被其他程序使用，请关闭另一个机器人程序后再连接。",
             "interrupting" => "正在停止",
             "completed" => "已完成",
             "completed-unverified" => "已完成，等待确认保存状态",
@@ -58,8 +62,23 @@ internal static class UiText
     {
         var value = LogService.Redact(detail ?? string.Empty);
         var normalized = value.ToLowerInvariant().Replace('-', '_');
-        if (normalized.Contains("qqbot_auth") || normalized.Contains("authentication") || normalized.Contains("http 401") || normalized.Contains("unauthorized"))
-            return "无法连接 QQ 机器人，请检查应用凭据。";
+        var actionText = (action ?? string.Empty).ToLowerInvariant();
+        if (normalized.Contains("polling_conflict") || normalized.Contains("another getupdates") || normalized.Contains("conflict"))
+            return "这个 Telegram 机器人正在被其他程序使用，请关闭另一个机器人程序后再连接。";
+        if (normalized.Contains("token_invalid") || normalized.Contains("invalid_token") || normalized.Contains("invalid-token") || normalized.Contains("token invalid") || normalized.Contains("invalid token") || normalized.Contains("telegram bot token is invalid") || normalized.Contains("telegram rejected the bot token"))
+            return "机器人密钥无效，请检查后重试。";
+        if (normalized.Contains("must_be_stopped") || normalized.Contains("must be stopped") || normalized.Contains("stop qq official bot") || normalized.Contains("stop telegram before"))
+            return "机器人正在重新连接，请稍后重试。";
+        if (normalized.Contains("channel_profiles_unavailable") || normalized.Contains("channel_profile_not_found") || normalized.Contains("profile_unavailable") || normalized.Contains("profile unavailable"))
+            return "机器人配置暂时不可用，请刷新后重试。";
+        if (normalized.Contains("channel_unavailable") || normalized.Contains("channel unavailable") || normalized.Contains("adapter is not started") || normalized.Contains("resource is unavailable"))
+            return "机器人当前未连接。";
+        if (normalized.Contains("gateway_unavailable") || normalized.Contains("gateway unavailable") || normalized.Contains("unable to connect to qq gateway") || normalized.Contains("gateway_lookup"))
+            return "暂时无法连接 QQ 服务，请稍后重试。";
+        if (normalized.Contains("qqbot_secret_invalid") || normalized.Contains("secret_invalid") || normalized.Contains("appid_invalid") || normalized.Contains("credentials_missing") || normalized.Contains("qqbot_auth") || normalized.Contains("authentication failed") || normalized.Contains("authentication_failed") || normalized.Contains("http 401") || normalized.Contains("unauthorized"))
+            return "机器人 ID 或密钥不正确，请检查后重试。";
+        if (normalized.Contains("authentication") && (actionText.Contains("qq") || normalized.Contains("appid") || normalized.Contains("appsecret")))
+            return "机器人 ID 或密钥不正确，请检查后重试。";
         if (normalized.Contains("permission") || normalized.Contains("forbidden") || normalized.Contains("http 403") || normalized.Contains("intent_not_enabled"))
             return "QQ 机器人权限不足，请检查开放平台中的消息权限。";
         if (normalized.Contains("timeout") || normalized.Contains("timed out") || normalized.Contains("超时"))
@@ -74,17 +93,18 @@ internal static class UiText
             return "无法确认会话保存状态，请重新检查会话。";
         if (normalized.Contains("backend") || normalized.Contains("api_error") || normalized.Contains("not ready") || normalized.Contains("尚未连接本地"))
             return "本地服务尚未就绪，请稍后重试。";
+        if (ContainsChinese(value)) return value;
         return string.IsNullOrWhiteSpace(value)
             ? $"{action}未完成，请重试。"
             : $"{action}未完成，请重试。详情已写入运行日志。";
     }
 
-    public static string ConversationType(string? value) => value?.Trim().ToLowerInvariant() switch
-    {
-        "c2c" => "私聊",
-        "group" => "群聊",
-        _ => "会话"
-    };
+	public static string ConversationType(string? value) => value?.Trim().ToLowerInvariant() switch
+	{
+		"c2c" or "private" => "私聊",
+		"group" or "supergroup" or "channel" => "群聊",
+		_ => "会话"
+	};
 
     private static bool ContainsChinese(string value) => value.Any(character => character >= '\u4e00' && character <= '\u9fff');
 }

@@ -3,9 +3,11 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Xml.Linq;
+using CloudLight.CodexBridge.Controls;
 using CloudLight.CodexBridge.Services;
 using CloudLight.CodexBridge.Models;
 using CloudLight.CodexBridge.ViewModels;
+using CloudLight.CodexBridge.Views;
 using Microsoft.Win32;
 
 if (args.Contains("--codex-discovery-retry-tests", StringComparer.OrdinalIgnoreCase))
@@ -358,7 +360,7 @@ if (args.Contains("--qq-profile-start-failure-regression-tests", StringComparer.
         Id = "qq-start-failure", Platform = "qqbot", State = "stopped", SecretConfigured = true
     });
     profile.ApplyOperationFailure("authentication-failed", "QQ 访问凭证请求返回 HTTP 200、错误码 100016：AppID 或 AppSecret 无效或已重置。");
-    Assert(profile.StatusText == "凭据无效" && profile.ConnectionText == "已停止" && profile.LastError.Contains("100016", StringComparison.Ordinal),
+    Assert(profile.StatusText == "机器人 ID 或密钥不正确，请检查后重试。" && profile.ConnectionText == "未连接" && profile.LastError.Contains("100016", StringComparison.Ordinal),
         "Configure 有凭据但 Start 失败时，桌面必须显示 authentication-failed 与真实 LastError");
 
     var operationError = new BridgeApiException(System.Net.HttpStatusCode.Conflict, "channel_profile_start_failed",
@@ -367,8 +369,8 @@ if (args.Contains("--qq-profile-start-failure-regression-tests", StringComparer.
         "Profile Start HTTP 错误必须把 daemon 的 currentState 和 lastError 传给桌面端");
 
     profile.ApplyOperationFailure("gateway-failed", "Gateway connection failed");
-    Assert(profile.StatusText == "QQ Gateway 连接失败",
-        "Gateway 失败状态不得显示为“状态未知”");
+    Assert(profile.StatusText == "暂时无法连接 QQ 服务，请稍后重试。",
+        "QQ 服务连接失败状态不得显示为“状态未知”");
 
     Console.WriteLine("PASS QQ Profile Start failure preserves status and LastError");
     return;
@@ -386,6 +388,50 @@ if (args.Contains("--settings-startup-regression-tests", StringComparer.OrdinalI
            discoveryRun.Attribute("Text")?.Value.Contains("Mode=OneWay", StringComparison.Ordinal) == true,
         "OpenClawDiscoverySource 是只读属性；SettingsView 启动绑定必须显式为 OneWay");
     Console.WriteLine("PASS settings startup binding is OneWay for the read-only OpenClaw discovery source");
+    return;
+}
+
+if (args.Contains("--ui-contract-tests", StringComparer.OrdinalIgnoreCase))
+{
+    const string authMessage = "机器人 ID 或密钥不正确，请检查后重试。";
+    const string reconnectMessage = "机器人正在重新连接，请稍后重试。";
+    const string gatewayMessage = "暂时无法连接 QQ 服务，请稍后重试。";
+    const string channelMessage = "机器人当前未连接。";
+    const string profileMessage = "机器人配置暂时不可用，请刷新后重试。";
+    const string conflictMessage = "这个 Telegram 机器人正在被其他程序使用，请关闭另一个机器人程序后再连接。";
+    const string tokenMessage = "机器人密钥无效，请检查后重试。";
+
+    Assert(!ChannelCredentialChange.HasChanged(true, "10001", "10001", "", "old-secret"),
+        "QQ 空密钥保存不得判定为凭据变化");
+    Assert(!ChannelCredentialChange.HasChanged(true, "10001", "10001", "old-secret", "old-secret"),
+        "QQ 相同密钥保存不得判定为凭据变化");
+    Assert(ChannelCredentialChange.HasChanged(true, "10001", "10002", "", "old-secret"),
+        "QQ AppID 变化必须判定为凭据变化");
+    Assert(ChannelCredentialChange.HasChanged(false, "", "", "new-secret", "old-secret"),
+        "Telegram 新密钥必须判定为凭据变化");
+    Assert(!ChannelCredentialChange.HasChanged(false, "", "", "", "old-secret"),
+        "Telegram 空密钥保存不得判定为凭据变化");
+
+    Assert(UiText.UserError("authentication failed", "QQ 机器人") == authMessage, "认证错误必须映射为用户提示");
+    Assert(UiText.UserError("secret_invalid QQ AppSecret is invalid", "QQ 机器人") == authMessage, "QQ 密钥错误必须映射为用户提示");
+    Assert(UiText.UserError("QQ Official Bot must be stopped before changing AppSecret") == reconnectMessage, "重新连接错误不得泄漏英文底层错误");
+    Assert(UiText.UserError("gateway unavailable") == gatewayMessage, "QQ 服务不可用必须映射为用户提示");
+    Assert(UiText.UserError("channel unavailable") == channelMessage, "机器人未连接必须映射为用户提示");
+    Assert(UiText.UserError("profile unavailable") == profileMessage, "机器人配置不可用必须映射为用户提示");
+    Assert(UiText.UserError("telegram polling conflict") == conflictMessage, "Telegram polling 冲突必须映射为用户提示");
+    Assert(UiText.UserError("token invalid") == tokenMessage, "机器人密钥无效必须映射为用户提示");
+    Assert(UiText.UserError("Telegram rejected the bot token") == tokenMessage, "Telegram 密钥错误必须映射为用户提示");
+    Assert(ChannelProfilesView.IsOfficialUrl("https://q.qq.com") &&
+           ChannelProfilesView.IsOfficialUrl("https://t.me/BotFather") &&
+           ChannelProfilesView.IsOfficialUrl("https://core.telegram.org/bots/tutorial") &&
+           !ChannelProfilesView.IsOfficialUrl("https://example.com"),
+        "教程链接必须严格限制为三个固定官方地址");
+
+    Assert(ResponsiveCardPanel.CalculateColumnCount(1100, 5, 220, 0, 5, 16) >= 1 &&
+           ResponsiveCardPanel.CalculateColumnCount(double.NaN, 5, 220, 0, 5, 16) == 1 &&
+           ResponsiveCardPanel.CalculateColumnCount(double.PositiveInfinity, 5, 220, 0, 5, 16) == 1,
+        "响应式卡片列数必须对正常和异常可用宽度保持安全");
+    Console.WriteLine("PASS UI contracts: credential change, Chinese error mapping, official URL allowlist, responsive column safety");
     return;
 }
 

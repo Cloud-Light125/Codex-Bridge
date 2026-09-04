@@ -16,7 +16,7 @@
                     <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                         <Button Content="重试" Command="{Binding RetryCommand}" />
                         <Button Content="打开日志目录" Command="{Binding OpenLogsCommand}" />
-                        <Button Content="删除已保存的 Telegram Token" Click="DeleteToken_Click" Visibility="{Binding TokenRecoveryVisibility}" />
+                        <Button Content="删除已保存的 Telegram 机器人密钥" Click="DeleteToken_Click" Visibility="{Binding TokenRecoveryVisibility}" />
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -49,12 +49,12 @@
                         <Grid Margin="0,14,0,0">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <StackPanel>
-                                <TextBlock Text="Bot Token" FontWeight="SemiBold" />
+                                <TextBlock Text="机器人密钥（Token）" FontWeight="SemiBold" />
                                 <TextBlock Text="机器人密钥会安全保存到本机。" Foreground="{DynamicResource MutedBrush}" Margin="0,4,0,7" />
                                 <PasswordBox x:Name="TokenBox" Padding="10,7" />
                                 <StackPanel Orientation="Horizontal" Margin="0,7,0,0">
-                                    <Button Content="安全保存 Token" Click="SaveToken_Click" />
-                                    <Button Content="删除 Token" Click="DeleteToken_Click" />
+                                    <Button Content="安全保存机器人密钥" Click="SaveToken_Click" />
+                                    <Button Content="删除机器人密钥" Click="DeleteToken_Click" />
                                     <TextBlock Text="{Binding TokenSummary}" Margin="10,0,0,0" VerticalAlignment="Center" Foreground="{DynamicResource MutedBrush}" />
                                 </StackPanel>
                                 <TextBlock Text="代理模式" FontWeight="SemiBold" Margin="0,16,0,6" />
@@ -68,12 +68,12 @@
                                 <TextBox Text="{Binding AllowedUserIdsText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="90" />
                                 <CheckBox Content="自动启动 Telegram" IsChecked="{Binding AutoStart}" Margin="0,13,0,5" />
                                 <CheckBox Content="发送进度更新" IsChecked="{Binding SendProgressUpdates}" />
-                                <Button Content="保存 Telegram 配置" Command="{Binding SaveSettingsCommand}" HorizontalAlignment="Left" Margin="0,12,0,0" />
+                                <Button Content="保存 Telegram 机器人设置" Command="{Binding SaveSettingsCommand}" HorizontalAlignment="Left" Margin="0,12,0,0" />
                             </StackPanel>
                             <Border Grid.Column="2" Background="{DynamicResource CodeBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="14">
                                 <StackPanel>
                                     <TextBlock Text="Telegram 状态" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,10" />
-                                    <TextBlock Text="Bot" Foreground="{DynamicResource MutedBrush}"/><TextBlock Text="{Binding BotName}" Margin="0,2,0,8"/>
+                                    <TextBlock Text="机器人账户" Foreground="{DynamicResource MutedBrush}"/><TextBlock Text="{Binding BotName}" Margin="0,2,0,8"/>
                                     <TextBlock Text="接收状态" Foreground="{DynamicResource MutedBrush}"/><TextBlock Text="{Binding PollingState}" Margin="0,2,0,8"/>
                                     <TextBlock Text="最近更新" Foreground="{DynamicResource MutedBrush}"/><TextBlock Text="{Binding LastUpdateAt}" Margin="0,2,0,8"/>
                                     <TextBlock Text="关联会话数" Foreground="{DynamicResource MutedBrush}"/><TextBlock Text="{Binding BindingCount}" Margin="0,2,0,8"/>
@@ -162,7 +162,7 @@
                                 <TextBlock Text="允许的群成员标识（每行一个；为空时不接受群聊控制）" FontWeight="SemiBold" Margin="0,12,0,5" TextWrapping="Wrap"/>
                                 <TextBox Text="{Binding AllowedGroupMemberOpenIdsText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="70"/>
                                 <CheckBox Content="自动启动" IsChecked="{Binding AutoStart}" Margin="0,14,0,5"/>
-                                <CheckBox Content="断线后自动重连" IsChecked="{Binding GatewayReconnectEnabled}" Margin="0,0,0,5"/>
+                                <CheckBox Content="连接中断后自动重连" IsChecked="{Binding GatewayReconnectEnabled}" Margin="0,0,0,5"/>
                                 <CheckBox Content="发送重要进度更新" IsChecked="{Binding SendProgressUpdates}"/>
                                 <Button Content="保存 QQ 机器人设置" Command="{Binding SaveSettingsCommand}" HorizontalAlignment="Left" Margin="0,12,0,0"/>
                             </StackPanel>

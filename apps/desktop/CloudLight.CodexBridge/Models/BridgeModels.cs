@@ -424,6 +424,7 @@ public sealed class QqMirrorConfig { public bool Enabled { get; set; } public st
 public sealed class MirrorConfig
 {
 	public bool Enabled { get; set; }
+	public bool FinalOnly { get; set; }
 	public bool RequireThreadNumber { get; set; } = true;
 	public MirrorMessageTypes Messages { get; set; } = new();
 	public TelegramMirrorConfig Telegram { get; set; } = new();
@@ -802,6 +803,36 @@ public sealed class ChannelProfileStatus
 	public string ProxyMode { get; set; } = "";
 	public string MaskedProxyAddress { get; set; } = "";
 	public int BindingCount { get; set; }
+	public List<TelegramRecentIdentity> RecentIdentities { get; set; } = [];
+	public List<QqDiscoveredIdentity> RecentQqIdentities { get; set; } = [];
+}
+
+public sealed class TelegramRecentIdentity
+{
+	public long UserId { get; set; }
+	public long ChatId { get; set; }
+	public string ChatType { get; set; } = "";
+	public string ChatTitle { get; set; } = "";
+	public string ChatUsername { get; set; } = "";
+	public string FirstName { get; set; } = "";
+	public string LastName { get; set; } = "";
+	public string DisplayName { get; set; } = "";
+	public string Username { get; set; } = "";
+	public string LastSeenAt { get; set; } = "";
+	public string DisplayText
+	{
+		get
+		{
+			var displayName = FirstNonEmpty(DisplayName, string.Join(" ", new[] { FirstName, LastName }.Where(value => !string.IsNullOrWhiteSpace(value))));
+			var user = string.IsNullOrWhiteSpace(Username)
+				? FirstNonEmpty(displayName, "Telegram 用户")
+				: $"{FirstNonEmpty(displayName, "Telegram 用户")} (@{Username})";
+			var chat = FirstNonEmpty(ChatTitle, string.IsNullOrWhiteSpace(ChatUsername) ? "" : $"@{ChatUsername}", UiText.ConversationType(ChatType));
+			return $"{user} · 用户 ID {UserId}\n{chat} · 会话 ID {ChatId}";
+		}
+	}
+	public string SeenText => UiText.LocalDateTime(LastSeenAt);
+	private static string FirstNonEmpty(params string[] values) => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";
 }
 
 public sealed class ChannelProfileConfigureRequest
@@ -1019,6 +1050,11 @@ public sealed class QqDiscoveredIdentity
 	public string DiscoveredAt { get; set; } = "";
     public string TypeDisplay => UiText.ConversationType(Type);
     public string DiscoveredAtDisplay => UiText.LocalDateTime(DiscoveredAt);
+    public string DisplayText => string.Equals(Type, "group", StringComparison.OrdinalIgnoreCase)
+        ? $"{(string.IsNullOrWhiteSpace(DisplayName) ? "QQ 群聊" : DisplayName)} · {GroupOpenId}"
+        : $"{(string.IsNullOrWhiteSpace(DisplayName) ? "QQ 用户" : DisplayName)} · {UserOpenIDDisplay}";
+    public string AllowText => string.Equals(Type, "group", StringComparison.OrdinalIgnoreCase) ? "允许此群聊" : "允许此用户";
+    private string UserOpenIDDisplay => string.IsNullOrWhiteSpace(UserOpenId) ? "未提供标识" : UserOpenId;
 }
 
 public sealed class BindingListResponse

@@ -40,6 +40,7 @@ type QQConfig struct {
 }
 type Config struct {
 	Enabled             bool           `json:"enabled"`
+	FinalOnly           bool           `json:"finalOnly"`
 	RequireThreadNumber bool           `json:"requireThreadNumber"`
 	Messages            MessageTypes   `json:"messages"`
 	Telegram            TelegramConfig `json:"telegram"`
@@ -226,9 +227,11 @@ func (s *Service) Status() Status {
 func (s *Service) Configure(cfg Config) (Status, error) {
 	// 0.6.2 intentionally removes event-stream mirroring. Keep the legacy JSON
 	// fields for API/state compatibility, but never allow them to re-enable the
-	// noisy User or Status paths.
+	// noisy User or Status paths. Formal final answers are always enabled by the
+	// new contract, even when an older file had assistant=false.
 	cfg.Messages.User = false
 	cfg.Messages.Status = false
+	cfg.Messages.Assistant = true
 	cfg.Telegram.ChatID = strings.TrimSpace(cfg.Telegram.ChatID)
 	cfg.QQ.OpenID = strings.TrimSpace(cfg.QQ.OpenID)
 	cfg.QQ.ConversationType = strings.ToLower(strings.TrimSpace(cfg.QQ.ConversationType))
@@ -1200,6 +1203,12 @@ func (s *Service) sendOnce(key, threadID, title, text string) {
 		cfg := s.model.Config
 		delivered := s.model.LiveDelivered[key]
 		s.mu.Unlock()
+		// FinalOnly is intentionally enforced here as a second line of
+		// defence.  Final answers use the formal-final delivery path below;
+		// this path is reserved for optional input/failure/stop reminders.
+		if cfg.FinalOnly {
+			return
+		}
 		payload := strings.TrimSpace(s.header(threadID, title) + "\n" + strings.TrimSpace(text))
 		if cfg.Enabled && cfg.Telegram.Enabled && !delivered.Telegram {
 			ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
@@ -1231,6 +1240,20 @@ func (s *Service) load() error {
 	if err := json.Unmarshal(data, &model); err != nil {
 		return fmt.Errorf("decode mirror state: %w", err)
 	}
+	// Version 1 mirror files predate the independent FinalOnly switch.  Keep
+	// their behaviour: old input/error flags become the opt-in extra-reminder
+	// settings, while both disabled means strict final-only delivery.
+	var raw struct {
+		Config struct {
+			FinalOnly *bool `json:"finalOnly"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("decode mirror compatibility state: %w", err)
+	}
+	if raw.Config.FinalOnly == nil {
+		model.Config.FinalOnly = !model.Config.Messages.RequestUserInput && !model.Config.Messages.Error
+	}
 	if model.Version != 1 {
 		return fmt.Errorf("unsupported mirror state version %d", model.Version)
 	}
@@ -1245,6 +1268,7 @@ func (s *Service) load() error {
 	}
 	model.Config.Messages.User = false
 	model.Config.Messages.Status = false
+	model.Config.Messages.Assistant = true
 	s.model = model
 	return nil
 }

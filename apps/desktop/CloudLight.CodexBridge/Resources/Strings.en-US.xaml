@@ -23,7 +23,7 @@
     <system:String x:Key="ChannelsIntro">Configure Telegram and QQ bots and manage their linked Codex sessions.</system:String>
     <system:String x:Key="TelegramPlan">Connect Telegram through a Telegram bot.</system:String>
     <system:String x:Key="QqPlan">Connect QQ through the official QQ bot.</system:String>
-    <system:String x:Key="TelegramToken">Telegram Bot Token</system:String>
+    <system:String x:Key="TelegramToken">Telegram bot token</system:String>
     <system:String x:Key="TelegramSaveToken">Securely save token</system:String>
     <system:String x:Key="TelegramDeleteToken">Delete token</system:String>
     <system:String x:Key="TelegramSaveConfig">Save configuration</system:String>

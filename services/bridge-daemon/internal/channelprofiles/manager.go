@@ -95,28 +95,30 @@ type BackendRouting struct {
 }
 
 type ProfileStatus struct {
-	ID                  string   `json:"id"`
-	Name                string   `json:"name"`
-	Platform            string   `json:"platform"`
-	Enabled             bool     `json:"enabled"`
-	ResourceID          string   `json:"resourceId"`
-	SharedWithProfileID string   `json:"sharedWithProfileId,omitempty"`
-	AssignedBackends    []string `json:"assignedBackends"`
-	Configured          bool     `json:"configured"`
-	Running             bool     `json:"running"`
-	Connected           bool     `json:"connected"`
-	State               string   `json:"state"`
-	TokenSet            bool     `json:"tokenSet,omitempty"`
-	SecretConfigured    bool     `json:"secretConfigured,omitempty"`
-	AccountID           string   `json:"accountId,omitempty"`
-	BotUsername         string   `json:"botUsername,omitempty"`
-	LastConnectedAt     string   `json:"lastConnectedAt,omitempty"`
-	LastUpdateAt        string   `json:"lastUpdateAt,omitempty"`
-	ReconnectCount      int      `json:"reconnectCount"`
-	LastError           string   `json:"lastError,omitempty"`
-	ProxyMode           string   `json:"proxyMode,omitempty"`
-	MaskedProxyAddress  string   `json:"maskedProxyAddress,omitempty"`
-	BindingCount        int      `json:"bindingCount"`
+	ID                  string                     `json:"id"`
+	Name                string                     `json:"name"`
+	Platform            string                     `json:"platform"`
+	Enabled             bool                       `json:"enabled"`
+	ResourceID          string                     `json:"resourceId"`
+	SharedWithProfileID string                     `json:"sharedWithProfileId,omitempty"`
+	AssignedBackends    []string                   `json:"assignedBackends"`
+	Configured          bool                       `json:"configured"`
+	Running             bool                       `json:"running"`
+	Connected           bool                       `json:"connected"`
+	State               string                     `json:"state"`
+	TokenSet            bool                       `json:"tokenSet,omitempty"`
+	SecretConfigured    bool                       `json:"secretConfigured,omitempty"`
+	AccountID           string                     `json:"accountId,omitempty"`
+	BotUsername         string                     `json:"botUsername,omitempty"`
+	LastConnectedAt     string                     `json:"lastConnectedAt,omitempty"`
+	LastUpdateAt        string                     `json:"lastUpdateAt,omitempty"`
+	ReconnectCount      int                        `json:"reconnectCount"`
+	LastError           string                     `json:"lastError,omitempty"`
+	ProxyMode           string                     `json:"proxyMode,omitempty"`
+	MaskedProxyAddress  string                     `json:"maskedProxyAddress,omitempty"`
+	BindingCount        int                        `json:"bindingCount"`
+	RecentIdentities    []telegram.RecentIdentity  `json:"recentIdentities,omitempty"`
+	RecentQQIdentities  []qqbot.DiscoveredIdentity `json:"recentQqIdentities,omitempty"`
 }
 
 type ListResponse struct {
@@ -850,6 +852,7 @@ func (m *Manager) statusLocked(item *profile) ProfileStatus {
 		status.Configured, status.Running, status.Connected, status.State = adapter.Configured, adapter.Running, adapter.Connected, adapter.State
 		status.TokenSet, status.AccountID, status.BotUsername = adapter.TokenSet, adapter.BotID, adapter.BotUsername
 		status.LastUpdateAt, status.LastError, status.ProxyMode, status.MaskedProxyAddress, status.BindingCount = adapter.LastUpdateAt, adapter.LastError, adapter.ProxyMode, adapter.MaskedProxyAddress, adapter.BindingCount
+		status.RecentIdentities = append([]telegram.RecentIdentity(nil), adapter.RecentIdentities...)
 	}
 	if item.resource.qq != nil {
 		adapter := item.resource.qq.Adapter().QQBotStatus()
@@ -859,6 +862,7 @@ func (m *Manager) statusLocked(item *profile) ProfileStatus {
 		}
 		status.SecretConfigured, status.AccountID = adapter.SecretConfigured, adapter.AppID
 		status.LastConnectedAt, status.ReconnectCount, status.LastError, status.ProxyMode, status.MaskedProxyAddress, status.BindingCount = adapter.LastConnectedAt, adapter.ReconnectCount, adapter.LastErrorMessage, adapter.ProxyMode, adapter.MaskedProxyAddress, adapter.BindingCount
+		status.RecentQQIdentities = append([]qqbot.DiscoveredIdentity(nil), item.resource.qq.Adapter().DiscoveredIdentities()...)
 	}
 	return status
 }

@@ -1,8 +1,8 @@
 <UserControl x:Class="CloudLight.CodexBridge.Views.CommandsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel MaxWidth="1080" HorizontalAlignment="Left">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+        <StackPanel MaxWidth="1480" HorizontalAlignment="Center">
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
                 <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

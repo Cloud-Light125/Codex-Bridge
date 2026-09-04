@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	minPollingTimeout = 10
-	maxPollingTimeout = 60
+	minPollingTimeout   = 10
+	maxPollingTimeout   = 60
+	recentIdentityLimit = 50
 )
 
 type ConfigureRequest struct {
@@ -64,35 +65,51 @@ type AdapterEvent struct {
 }
 
 type AdapterStatus struct {
-	Type                  string   `json:"type"`
-	ChannelType           string   `json:"channelType"`
-	Configured            bool     `json:"configured"`
-	Running               bool     `json:"running"`
-	Connected             bool     `json:"connected"`
-	State                 string   `json:"state"`
-	PollingState          string   `json:"pollingState"`
-	TokenSet              bool     `json:"tokenSet"`
-	TokenFingerprint      string   `json:"tokenFingerprint,omitempty"`
-	BotID                 string   `json:"botId"`
-	BotUsername           string   `json:"botUsername"`
-	BotDisplayName        string   `json:"botDisplayName"`
-	AllowedUserIDs        []int64  `json:"allowedUserIds"`
-	AllowedUserCount      int      `json:"allowedUserCount"`
-	PollingTimeoutSeconds int      `json:"pollingTimeoutSeconds"`
-	SendProgressUpdates   bool     `json:"sendProgressUpdates"`
-	AutoStart             bool     `json:"autoStart"`
-	StartedAt             string   `json:"startedAt"`
-	StoppedAt             string   `json:"stoppedAt,omitempty"`
-	LastUpdateAt          string   `json:"lastUpdateAt"`
-	LastError             string   `json:"lastError"`
-	LastErrorCategory     string   `json:"lastErrorCategory,omitempty"`
-	ProxyMode             string   `json:"proxyMode"`
-	MaskedProxyAddress    string   `json:"maskedProxyAddress"`
-	EffectiveProxyMode    string   `json:"effectiveProxyMode"`
-	LastNetworkStage      string   `json:"lastNetworkStage"`
-	LastRequestDurationMS int64    `json:"lastRequestDurationMs"`
-	BindingCount          int      `json:"bindingCount"`
-	BoundAddressSummaries []string `json:"boundAddressSummaries"`
+	Type                  string           `json:"type"`
+	ChannelType           string           `json:"channelType"`
+	Configured            bool             `json:"configured"`
+	Running               bool             `json:"running"`
+	Connected             bool             `json:"connected"`
+	State                 string           `json:"state"`
+	PollingState          string           `json:"pollingState"`
+	TokenSet              bool             `json:"tokenSet"`
+	TokenFingerprint      string           `json:"tokenFingerprint,omitempty"`
+	BotID                 string           `json:"botId"`
+	BotUsername           string           `json:"botUsername"`
+	BotDisplayName        string           `json:"botDisplayName"`
+	AllowedUserIDs        []int64          `json:"allowedUserIds"`
+	AllowedUserCount      int              `json:"allowedUserCount"`
+	PollingTimeoutSeconds int              `json:"pollingTimeoutSeconds"`
+	SendProgressUpdates   bool             `json:"sendProgressUpdates"`
+	AutoStart             bool             `json:"autoStart"`
+	StartedAt             string           `json:"startedAt"`
+	StoppedAt             string           `json:"stoppedAt,omitempty"`
+	LastUpdateAt          string           `json:"lastUpdateAt"`
+	LastError             string           `json:"lastError"`
+	LastErrorCategory     string           `json:"lastErrorCategory,omitempty"`
+	ProxyMode             string           `json:"proxyMode"`
+	MaskedProxyAddress    string           `json:"maskedProxyAddress"`
+	EffectiveProxyMode    string           `json:"effectiveProxyMode"`
+	LastNetworkStage      string           `json:"lastNetworkStage"`
+	LastRequestDurationMS int64            `json:"lastRequestDurationMs"`
+	BindingCount          int              `json:"bindingCount"`
+	BoundAddressSummaries []string         `json:"boundAddressSummaries"`
+	RecentIdentities      []RecentIdentity `json:"recentIdentities"`
+}
+
+// RecentIdentity contains only bounded contact metadata from inbound
+// updates. It intentionally excludes message bodies and bot credentials.
+type RecentIdentity struct {
+	UserID       int64  `json:"userId"`
+	ChatID       int64  `json:"chatId"`
+	ChatType     string `json:"chatType,omitempty"`
+	ChatTitle    string `json:"chatTitle,omitempty"`
+	ChatUsername string `json:"chatUsername,omitempty"`
+	FirstName    string `json:"firstName,omitempty"`
+	LastName     string `json:"lastName,omitempty"`
+	DisplayName  string `json:"displayName,omitempty"`
+	Username     string `json:"username,omitempty"`
+	LastSeenAt   string `json:"lastSeenAt"`
 }
 
 type MessageHandler func(context.Context, channels.InboundMessage)
@@ -111,6 +128,7 @@ type Adapter struct {
 	baseURL  string
 	clientFn func(string, ProxyConfig) (*Client, error)
 	probeFn  func(context.Context, ProxyConfig) (int, time.Duration, error)
+	recent   []RecentIdentity
 }
 
 func NewAdapter(handler MessageHandler) *Adapter {
@@ -118,7 +136,7 @@ func NewAdapter(handler MessageHandler) *Adapter {
 		handler: handler, seen: newDedupSet(4096), baseURL: defaultAPIBase,
 		clientFn: NewClientWithProxy, probeFn: probeTelegram,
 		config: ConfigureRequest{PollingTimeoutSeconds: 30, ProxyMode: ProxyModeEnvironment},
-		status: AdapterStatus{Type: "telegram", ChannelType: "telegram", State: "stopped", PollingState: "stopped", PollingTimeoutSeconds: 30, ProxyMode: ProxyModeEnvironment, EffectiveProxyMode: ProxyModeEnvironment, AllowedUserIDs: []int64{}, BoundAddressSummaries: []string{}},
+		status: AdapterStatus{Type: "telegram", ChannelType: "telegram", State: "stopped", PollingState: "stopped", PollingTimeoutSeconds: 30, ProxyMode: ProxyModeEnvironment, EffectiveProxyMode: ProxyModeEnvironment, AllowedUserIDs: []int64{}, BoundAddressSummaries: []string{}, RecentIdentities: []RecentIdentity{}},
 	}
 }
 
@@ -132,7 +150,21 @@ func (a *Adapter) Configure(request ConfigureRequest) (AdapterStatus, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.status.Running {
-		return AdapterStatus{}, errors.New("stop Telegram before changing its configuration")
+		if request.Token != nil {
+			token := strings.TrimSpace(*request.Token)
+			if token == "" {
+				return AdapterStatus{}, errors.New("token cannot be empty; use DELETE token")
+			}
+			if token != a.token {
+				return AdapterStatus{}, errors.New("stop Telegram before changing its token")
+			}
+		}
+		request.Token = nil
+		a.config = request
+		a.refreshStatusLocked()
+		a.status.LastError = ""
+		a.status.LastErrorCategory = ""
+		return cloneStatus(a.status), nil
 	}
 	if request.Token != nil {
 		token := strings.TrimSpace(*request.Token)
@@ -481,7 +513,11 @@ func (a *Adapter) handleUpdate(ctx context.Context, update Update, botID int64) 
 	} else {
 		return
 	}
-	if user == nil || user.IsBot || user.ID == botID || !containsID(allowed, user.ID) {
+	if user == nil || user.IsBot || user.ID == botID {
+		return
+	}
+	a.rememberIdentity(*user, update)
+	if !containsID(allowed, user.ID) {
 		return
 	}
 	inbound.UserID = int64Text(user.ID)
@@ -714,7 +750,45 @@ func nowText() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 func cloneStatus(status AdapterStatus) AdapterStatus {
 	status.AllowedUserIDs = append([]int64(nil), status.AllowedUserIDs...)
 	status.BoundAddressSummaries = append([]string(nil), status.BoundAddressSummaries...)
+	status.RecentIdentities = append([]RecentIdentity(nil), status.RecentIdentities...)
 	return status
+}
+
+func (a *Adapter) rememberIdentity(user User, update Update) {
+	chat := Chat{}
+	if update.Message != nil {
+		chat = update.Message.Chat
+	} else if update.CallbackQuery != nil && update.CallbackQuery.Message != nil {
+		chat = update.CallbackQuery.Message.Chat
+	}
+	if user.ID <= 0 || chat.ID == 0 {
+		return
+	}
+	displayName := strings.TrimSpace(strings.Join([]string{user.FirstName, user.LastName}, " "))
+	if displayName == "" {
+		displayName = strings.TrimSpace(user.Username)
+	}
+	chatTitle := strings.TrimSpace(chat.Title)
+	if chatTitle == "" {
+		chatTitle = strings.TrimSpace(strings.Join([]string{chat.FirstName, chat.LastName}, " "))
+	}
+	if chatTitle == "" {
+		chatTitle = strings.TrimSpace(chat.Username)
+	}
+	identity := RecentIdentity{UserID: user.ID, ChatID: chat.ID, ChatType: strings.TrimSpace(chat.Type), ChatTitle: chatTitle, ChatUsername: strings.TrimSpace(chat.Username), FirstName: strings.TrimSpace(user.FirstName), LastName: strings.TrimSpace(user.LastName), DisplayName: displayName, Username: strings.TrimSpace(user.Username), LastSeenAt: nowText()}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for index, existing := range a.recent {
+		if existing.UserID == identity.UserID && existing.ChatID == identity.ChatID {
+			a.recent = append(a.recent[:index], a.recent[index+1:]...)
+			break
+		}
+	}
+	a.recent = append([]RecentIdentity{identity}, a.recent...)
+	if len(a.recent) > recentIdentityLimit {
+		a.recent = a.recent[:recentIdentityLimit]
+	}
+	a.status.RecentIdentities = append([]RecentIdentity(nil), a.recent...)
 }
 
 type dedupSet struct {

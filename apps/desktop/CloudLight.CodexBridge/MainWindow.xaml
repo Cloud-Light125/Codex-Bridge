@@ -19,8 +19,8 @@
                     <RadioButton Content="项目工作区" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsProjectsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="projects"/>
                     <RadioButton Content="Codex" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsSessionsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="sessions"/>
                     <RadioButton Content="OpenClaw" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsOpenClawPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="openclaw"/>
-                    <RadioButton Content="QQ" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsQqPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="qq"/>
-                    <RadioButton Content="Telegram" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsTelegramPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="telegram"/>
+                    <RadioButton Content="QQ 机器人" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsQqPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="qq"/>
+                    <RadioButton Content="Telegram 机器人" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsTelegramPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="telegram"/>
                     <RadioButton Content="Codex 指令" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsCommandsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="commands"/>
                     <RadioButton Content="OpenClaw 指令" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsOpenClawCommandsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="openclaw-commands"/>
                     <RadioButton Content="消息同步" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsMirrorPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="mirror"/>
@@ -30,7 +30,7 @@
                 </StackPanel>
                 <StackPanel Grid.Row="2" Margin="0,0,0,12">
                     <RadioButton Content="设置" Style="{StaticResource NavigationButtonStyle}" GroupName="Navigation" IsChecked="{Binding IsSettingsPage, Mode=OneWay}" Command="{Binding NavigateCommand}" CommandParameter="settings"/>
-                    <TextBlock Text="v1.3.0" Style="{StaticResource SecondaryTextStyle}" Margin="20,8,0,5"/>
+                    <TextBlock Text="v1.3.1" Style="{StaticResource SecondaryTextStyle}" Margin="20,8,0,5"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -44,7 +44,7 @@
                     </StackPanel>
                 </Grid>
             </Border>
-            <ContentControl Grid.Row="1" Content="{Binding CurrentPage}" Margin="{StaticResource PagePadding}"/>
+            <ContentControl Grid.Row="1" Content="{Binding CurrentPage}" Margin="{StaticResource PagePadding}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
             <Border Grid.RowSpan="2" Background="{DynamicResource WarningSurfaceBrush}" BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" CornerRadius="8" Padding="14" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="24" MaxWidth="620" Visibility="{Binding ErrorVisibility}">
                 <TextBox Text="{Binding ErrorMessage, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" Foreground="{DynamicResource WarningBrush}"/>
             </Border>

@@ -19,7 +19,7 @@ public sealed class OpenClawViewModel : ObservableObject
     private const int MaximumInitialMessages = 200;
     private const int MaximumVisibleMessages = 256;
     private const int MaximumMessageCharacters = 128 * 1024;
-    private const string TruncatedMessageMarker = "\n\n[消息过长，界面已截断；原始内容仍保留在 Gateway 历史中。]";
+    private const string TruncatedMessageMarker = "\n\n[消息过长，界面已截断；原始内容仍保留在 OpenClaw 历史中。]";
     private const int StreamingFlushCharacters = 512;
     private readonly BridgeApiClient _api;
     private readonly LogService _logs;
@@ -110,15 +110,15 @@ public sealed class OpenClawViewModel : ObservableObject
     public Visibility ErrorVisibility => !string.IsNullOrWhiteSpace(ErrorText) ? Visibility.Visible : Visibility.Collapsed;
     public bool CanSend => SelectedDetail is not null && !_isSending && !_gateway.Connected.Equals(false) && !SelectedDetail.HasActiveRun && SelectedDetail.Archived != true && !string.IsNullOrWhiteSpace(MessageText);
     public bool CanStop => SelectedDetail?.HasActiveRun == true && !_isSending;
-    public string GatewayStatusText => $"{UiText.Status(_gateway.State)} · {(_gateway.Connected ? "已连接" : _gateway.Running ? "重连中" : "未连接")}";
+    public string GatewayStatusText => $"{UiText.Status(_gateway.State)} · {(_gateway.Connected ? "已连接" : _gateway.Running ? "正在连接" : "未连接")}";
     public string GatewayDetailText => string.Join(" · ", new[]
     {
-        string.IsNullOrWhiteSpace(_gateway.GatewayUrl) ? "未设置 Gateway 地址" : _gateway.GatewayUrl,
-        _gateway.SessionCount > 0 ? $"{_gateway.SessionCount} 个 Session" : "未读取 Session",
-        _gateway.ReconnectCount > 0 ? $"已重连 {_gateway.ReconnectCount} 次" : "自动重连待命"
+        string.IsNullOrWhiteSpace(_gateway.GatewayUrl) ? "未设置连接地址" : _gateway.GatewayUrl,
+        _gateway.SessionCount > 0 ? $"{_gateway.SessionCount} 个会话" : "未读取会话",
+        _gateway.ReconnectCount > 0 ? $"已重新连接 {_gateway.ReconnectCount} 次" : "自动重连待命"
     });
-    public string GatewayError => _gateway.LastError;
-    public string CurrentRunText => SelectedDetail?.HasActiveRun == true ? $"运行中 · {SelectedDetail.ActiveRunIds.FirstOrDefault()}" : "空闲";
+    public string GatewayError => string.IsNullOrWhiteSpace(_gateway.LastError) ? "" : UiText.UserError(_gateway.LastError, "OpenClaw 连接");
+    public string CurrentRunText => SelectedDetail?.HasActiveRun == true ? "运行中" : "空闲";
 
     public async Task RefreshAsync(CancellationToken cancellationToken = default, bool reloadSelected = true)
     {
@@ -126,7 +126,7 @@ public sealed class OpenClawViewModel : ObservableObject
         ErrorText = "";
         try
         {
-            // Gateway health remains useful even when listing sessions fails
+            // Connection health remains useful even when listing sessions fails
             // (for example while the remote daemon is reconnecting), so update
             // the two pieces independently instead of hiding the status behind
             // a Task.WhenAll failure.
@@ -181,7 +181,7 @@ public sealed class OpenClawViewModel : ObservableObject
                 SetActiveRun(bridgeEvent.TurnId, false);
                 break;
             case "openclaw.message.failed":
-                AppendMessage(bridgeEvent, "OpenClaw", PayloadText(bridgeEvent, "error", "Gateway 返回错误"), "失败", "status", failure: true);
+                AppendMessage(bridgeEvent, "OpenClaw", PayloadText(bridgeEvent, "error", "连接服务返回错误"), "失败", "status", failure: true);
                 SetActiveRun(bridgeEvent.TurnId, false);
                 break;
         }
@@ -416,7 +416,7 @@ public sealed class OpenClawViewModel : ObservableObject
     {
         if (SelectedDetail is null) return;
         try { Clipboard.SetText(SelectedDetail.Key); }
-        catch (Exception exception) { ErrorText = $"复制 Session Key 失败：{exception.Message}"; }
+        catch (Exception) { ErrorText = "复制会话标识失败，请重试。"; }
     }
 
     private void CancelDetailLoad()

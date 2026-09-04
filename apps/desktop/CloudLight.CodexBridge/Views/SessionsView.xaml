@@ -1,11 +1,11 @@
 <UserControl x:Class="CloudLight.CodexBridge.Views.SessionsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid>
+    <Grid MaxWidth="1480" HorizontalAlignment="Center">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="330" />
+            <ColumnDefinition Width="2*" />
             <ColumnDefinition Width="10" />
-            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="3*" />
         </Grid.ColumnDefinitions>
 
         <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="0">

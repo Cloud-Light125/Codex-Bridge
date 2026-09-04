@@ -1,8 +1,8 @@
 <UserControl x:Class="CloudLight.CodexBridge.Views.ProjectsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid>
-        <Grid.ColumnDefinitions><ColumnDefinition Width="320"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Grid MaxWidth="1480" HorizontalAlignment="Center">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="3*"/></Grid.ColumnDefinitions>
         <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="0">
             <Grid>
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -30,12 +30,12 @@
         <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Center" Background="{DynamicResource BorderBrush}"/>
         <Border Grid.Column="2" Style="{StaticResource CardStyle}">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <StackPanel MaxWidth="760">
+                <StackPanel MaxWidth="1100">
                     <Grid>
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <StackPanel>
-                            <TextBlock Text="Project 设置" Style="{StaticResource SectionTitleStyle}"/>
-                            <TextBlock Text="项目只保存工作区与路由偏好；凭据仍由现有 Channel/Profile 管理。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                            <TextBlock Text="项目设置" Style="{StaticResource SectionTitleStyle}"/>
+                            <TextBlock Text="项目保存工作目录、默认处理方式和会话偏好；机器人密钥在对应机器人页面管理。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,4,0,0"/>
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal">
                             <Button Content="删除" Command="{Binding DeleteCommand}" Foreground="{DynamicResource ErrorBrush}" Margin="0,0,8,0"/>
@@ -62,12 +62,12 @@
                             <TextBlock Text="查询固定只读 Git 状态，不会修改工作区。" Style="{StaticResource SecondaryTextStyle}" Margin="0,4,0,8"/>
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <TextBlock Text="Git Repository" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="1" Text="{Binding GitStatus.RepositoryDisplay}"/>
-                                <TextBlock Grid.Column="2" Text="Branch" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="3" Text="{Binding GitStatus.Branch}" TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Text="Git 仓库" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="1" Text="{Binding GitStatus.RepositoryDisplay}" TextWrapping="Wrap"/>
+                                <TextBlock Grid.Column="2" Text="分支" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="3" Text="{Binding GitStatus.Branch}" TextTrimming="CharacterEllipsis"/>
                             </Grid>
                             <Grid Margin="0,8,0,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <TextBlock Text="Working Tree" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="1" Text="{Binding GitStatus.WorkingTreeDisplay}"/>
+                                <TextBlock Text="工作区状态" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="1" Text="{Binding GitStatus.WorkingTreeDisplay}"/>
                                 <TextBlock Grid.Column="2" Text="最新提交" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Grid.Column="3" Text="{Binding GitStatus.LatestCommit}" TextTrimming="CharacterEllipsis"/>
                             </Grid>
                             <TextBlock Text="{Binding GitStatus.Error}" Foreground="{DynamicResource WarningBrush}" TextWrapping="Wrap" Margin="0,8,0,0" Visibility="{Binding GitStatusErrorVisibility}"/>
@@ -79,14 +79,14 @@
                     <Grid Margin="0,14,0,0">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                         <StackPanel>
-                            <TextBlock Text="默认 Backend" Style="{StaticResource EyebrowTextStyle}" Margin="0,0,0,4"/>
+                            <TextBlock Text="默认处理方式" Style="{StaticResource EyebrowTextStyle}" Margin="0,0,0,4"/>
                             <ComboBox SelectedValue="{Binding DefaultBackend}" SelectedValuePath="Tag">
                                 <ComboBoxItem Content="Codex" Tag="codex"/>
                                 <ComboBoxItem Content="OpenClaw" Tag="openclaw"/>
                             </ComboBox>
                         </StackPanel>
                         <StackPanel Grid.Column="1" Margin="12,0,0,0">
-                            <TextBlock Text="默认 Conversation" Style="{StaticResource EyebrowTextStyle}" Margin="0,0,0,4"/>
+                            <TextBlock Text="默认会话" Style="{StaticResource EyebrowTextStyle}" Margin="0,0,0,4"/>
                             <ComboBox ItemsSource="{Binding ConversationView}" DisplayMemberPath="Label" SelectedValuePath="Number" SelectedValue="{Binding DefaultConversationNumber}"/>
                         </StackPanel>
                         <StackPanel Grid.Column="2" Margin="12,0,0,0">
@@ -99,8 +99,8 @@
                             </ComboBox>
                         </StackPanel>
                     </Grid>
-                    <CheckBox Content="没有合适会话时自动创建 Conversation（需 Backend 支持）" IsChecked="{Binding AutoCreateConversation}" Margin="0,16,0,0"/>
-                    <CheckBox Content="启用此 Project" IsChecked="{Binding Enabled}" Margin="0,8,0,0"/>
+                    <CheckBox Content="没有合适会话时自动创建会话（需当前处理方式支持）" IsChecked="{Binding AutoCreateConversation}" Margin="0,16,0,0"/>
+                    <CheckBox Content="启用此项目" IsChecked="{Binding Enabled}" Margin="0,8,0,0"/>
                     <TextBlock Text="标签（逗号分隔）" Style="{StaticResource EyebrowTextStyle}" Margin="0,14,0,4"/>
                     <TextBox Text="{Binding TagsText, UpdateSourceTrigger=PropertyChanged}"/>
                     <Border Background="{DynamicResource WarningSurfaceBrush}" BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" Padding="10" Margin="0,18,0,0" Visibility="{Binding ErrorVisibility}">

@@ -42,6 +42,7 @@ public sealed class SettingsViewModel : ObservableObject
 	private bool _qqMirrorEnabled;
 	private string _qqMirrorConversationType = "c2c";
 	private string _qqMirrorOpenId = "";
+	private bool _mirrorFinalOnly;
 	private bool _mirrorAssistant = true, _mirrorInput = true, _mirrorError = true;
 	private bool _requireThreadNumber = true;
 	private string _mirrorStatusText = "等待读取";
@@ -110,7 +111,7 @@ public sealed class SettingsViewModel : ObservableObject
 	public bool OpenClawAutoReconnect { get => _openClawAutoReconnect; set => SetProperty(ref _openClawAutoReconnect, value); }
 	public string OpenClawStatusText { get => _openClawStatusText; private set => SetProperty(ref _openClawStatusText, value); }
 	public string OpenClawDiscoverySource { get => _openClawDiscoverySource; private set => SetProperty(ref _openClawDiscoverySource, value); }
-	public string OpenClawCredentialSummary => _openClawCredentialsConfigured || !string.IsNullOrWhiteSpace(_openClawToken) || !string.IsNullOrWhiteSpace(_openClawPassword) ? "已配置（Bridge 使用 DPAPI 保存）" : "未配置 Token/Password";
+	public string OpenClawCredentialSummary => _openClawCredentialsConfigured || !string.IsNullOrWhiteSpace(_openClawToken) || !string.IsNullOrWhiteSpace(_openClawPassword) ? "已保存访问凭据" : "未保存访问凭据";
 
 	public void SetOpenClawToken(string value)
 	{
@@ -206,7 +207,7 @@ public sealed class SettingsViewModel : ObservableObject
 			await DiscoverOpenClawCoreAsync(onlyIfNeeded: true, cancellationToken).ConfigureAwait(false);
 			if (!_openClawCredentialsConfigured)
 			{
-				await RunOnUiAsync(() => { OpenClawStatusText = "未配置 Token/Password"; OnPropertyChanged(nameof(OpenClawCredentialSummary)); }).ConfigureAwait(false);
+				await RunOnUiAsync(() => { OpenClawStatusText = "未配置访问凭据"; OnPropertyChanged(nameof(OpenClawCredentialSummary)); }).ConfigureAwait(false);
 				return;
 			}
 			var status = await _api.ConfigureOpenClawAsync(new OpenClawConfigureRequest
@@ -243,7 +244,7 @@ public sealed class SettingsViewModel : ObservableObject
 		try
 		{
 			await DiscoverOpenClawCoreAsync(onlyIfNeeded: false, CancellationToken.None).ConfigureAwait(false);
-			SaveResult = OpenClawDiscoverySource.Length == 0 ? "未发现 OpenClawTray Gateway。" : $"已发现 {OpenClawGatewayUrl}（{OpenClawDiscoverySource}）。";
+			SaveResult = OpenClawDiscoverySource.Length == 0 ? "未发现本机 OpenClaw。" : $"已找到 OpenClaw：{OpenClawGatewayUrl}（{OpenClawDiscoverySource}）。";
 		}
 		catch (Exception exception)
 		{
@@ -282,7 +283,7 @@ public sealed class SettingsViewModel : ObservableObject
 				AutoReconnect = false, Start = true
 			}).ConfigureAwait(false);
 			ApplyOpenClawStatus(status);
-			SaveResult = status.Connected ? "OpenClaw Gateway 测试连接成功。" : "OpenClaw Gateway 测试未连接，请查看状态和日志。";
+			SaveResult = status.Connected ? "OpenClaw 测试连接成功。" : "OpenClaw 暂未连接，请查看状态和日志。";
 		}
 		catch (Exception exception)
 		{
@@ -309,9 +310,9 @@ public sealed class SettingsViewModel : ObservableObject
 	private void ApplyOpenClawStatus(OpenClawConnectionStatus status)
 	{
 		if (!string.IsNullOrWhiteSpace(status.GatewayUrl)) OpenClawGatewayUrl = status.GatewayUrl;
-		var connection = status.Connected ? "已连接" : status.Running ? "正在连接/重连" : status.Configured ? "已停止" : "未配置";
+		var connection = status.Connected ? "已连接" : status.Running ? "正在连接" : status.Configured ? "未连接" : "未配置";
 		OpenClawStatusText = $"{connection} · {OpenClawGatewayUrl}" +
-			(string.IsNullOrWhiteSpace(status.ServerVersion) ? "" : $" · Gateway {status.ServerVersion}") +
+			(string.IsNullOrWhiteSpace(status.ServerVersion) ? "" : $" · 版本 {status.ServerVersion}") +
 			(string.IsNullOrWhiteSpace(status.LastError) ? "" : $"\n{UiText.UserError(status.LastError, "OpenClaw")}");
 		OnPropertyChanged(nameof(OpenClawCredentialSummary));
 	}
@@ -340,7 +341,12 @@ public sealed class SettingsViewModel : ObservableObject
         get => _saveResult;
         private set => SetProperty(ref _saveResult, value);
     }
-	public bool MirrorEnabled { get=>_mirrorEnabled; set=>SetProperty(ref _mirrorEnabled,value); }
+	public bool MirrorEnabled { get=>_mirrorEnabled; set { if (!SetProperty(ref _mirrorEnabled,value)) return; OnPropertyChanged(nameof(MirrorRemindersEnabled)); OnPropertyChanged(nameof(MirrorReminderStateText)); } }
+	public bool MirrorFinalOnly { get=>_mirrorFinalOnly; set { if (!SetProperty(ref _mirrorFinalOnly,value)) return; OnPropertyChanged(nameof(MirrorRemindersEnabled)); OnPropertyChanged(nameof(MirrorReminderStateText)); } }
+	public bool MirrorRemindersEnabled => !MirrorFinalOnly;
+	public string MirrorReminderStateText => MirrorFinalOnly
+		? "已启用“仅同步最终消息”；额外提醒暂不发送，当前选择会保留。"
+		: "需要我回答、任务失败或被停止时，可按上面的选择发送额外提醒。";
 	public bool TelegramMirrorEnabled { get=>_telegramMirrorEnabled; set=>SetProperty(ref _telegramMirrorEnabled,value); }
 	public string TelegramMirrorChatId { get=>_telegramMirrorChatId; set=>SetProperty(ref _telegramMirrorChatId,value); }
 	public bool QqMirrorEnabled { get=>_qqMirrorEnabled; set=>SetProperty(ref _qqMirrorEnabled,value); }
@@ -392,11 +398,12 @@ public sealed class SettingsViewModel : ObservableObject
 
 	private void ApplyMirrorStatus(MirrorStatus status)
 	{
-		MirrorEnabled=status.Config.Enabled;RequireThreadNumber=status.Config.RequireThreadNumber;
+		MirrorEnabled=status.Config.Enabled;MirrorFinalOnly=status.Config.FinalOnly;RequireThreadNumber=status.Config.RequireThreadNumber;
 		TelegramMirrorEnabled=status.Config.Telegram.Enabled;TelegramMirrorChatId=status.Config.Telegram.ChatId;
 		QqMirrorEnabled=status.Config.Qq.Enabled;QqMirrorConversationType=status.Config.Qq.ConversationType;QqMirrorOpenId=status.Config.Qq.OpenId;
-		MirrorAssistant=status.Config.Messages.Assistant;MirrorInput=status.Config.Messages.RequestUserInput;MirrorError=status.Config.Messages.Error;
-		MirrorStatusText=$"Telegram：{FormatMirrorState(status.TelegramState)}；QQ：{FormatQqMirrorState(status.QqState)}" + (string.IsNullOrWhiteSpace(status.LastQqError) ? "" : $"；{UiText.UserError(status.LastQqError, "QQ 同步")}");
+		MirrorAssistant=true;MirrorInput=status.Config.Messages.RequestUserInput;MirrorError=status.Config.Messages.Error;
+		var mode = !MirrorEnabled ? "未启用" : MirrorFinalOnly ? "已启用\n仅同步最终消息" : "已启用\n包含额外提醒";
+		MirrorStatusText=$"{mode}\nTelegram：{FormatMirrorState(status.TelegramState)}；QQ：{FormatQqMirrorState(status.QqState)}" + (string.IsNullOrWhiteSpace(status.LastQqError) ? "" : $"\n{UiText.UserError(status.LastQqError, "QQ 同步")}");
 		QqCapabilityNotice="QQ 主动消息受平台权限、回复窗口和发送额度限制。";
 	}
 
@@ -507,7 +514,7 @@ public sealed class SettingsViewModel : ObservableObject
                 UpdateRuntimeStatus(codexStatus, BackendStatus);
                 _logs.Add("codex-config", $"[codex-config] runtime path updated path={codexStatus.CodexCliPath} target=daemon");
             }
-			var mirror = await _api.ConfigureMirrorAsync(new MirrorConfig { Enabled=MirrorEnabled,RequireThreadNumber=RequireThreadNumber,Telegram=new TelegramMirrorConfig{Enabled=TelegramMirrorEnabled,ChatId=TelegramMirrorChatId.Trim()},Qq=new QqMirrorConfig{Enabled=QqMirrorEnabled,ConversationType=QqMirrorConversationType,OpenId=QqMirrorOpenId.Trim()},Messages=new MirrorMessageTypes{User=false,Assistant=MirrorAssistant,Status=false,RequestUserInput=MirrorInput,Error=MirrorError} });
+			var mirror = await _api.ConfigureMirrorAsync(new MirrorConfig { Enabled=MirrorEnabled,FinalOnly=MirrorFinalOnly,RequireThreadNumber=RequireThreadNumber,Telegram=new TelegramMirrorConfig{Enabled=TelegramMirrorEnabled,ChatId=TelegramMirrorChatId.Trim()},Qq=new QqMirrorConfig{Enabled=QqMirrorEnabled,ConversationType=QqMirrorConversationType,OpenId=QqMirrorOpenId.Trim()},Messages=new MirrorMessageTypes{User=false,Assistant=true,Status=false,RequestUserInput=MirrorInput,Error=MirrorError} });
 			ApplyMirrorStatus(mirror);
 			var status = await _api.UpdateSecurityAsync(_settings.SandboxMode);
 			ApprovalPolicy = status.ApprovalPolicy;

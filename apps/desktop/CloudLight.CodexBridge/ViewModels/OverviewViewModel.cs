@@ -48,10 +48,12 @@ public sealed class OverviewViewModel : ObservableObject
     public string SessionCount => $"{_sessions.Threads.Count:N0} 个会话";
     public string CurrentThread => _sessions.SelectedThread is null ? "未选择会话" : $"{_sessions.SelectedThread.NumberPrefix}  {_sessions.SelectedThread.Title}";
     public string RunningTurn => _sessions.CanStop ? "正在运行" : "当前无运行任务";
-    public string OpenClawState => $"{_openClaw.Sessions.Count:N0} 个 Session · {_openClaw.GatewayStatusText}";
+    public string OpenClawState => $"{_openClaw.Sessions.Count:N0} 个会话 · {_openClaw.GatewayStatusText}";
     public string TelegramState => ProfileState("telegram");
     public string QqState => ProfileState("qqbot");
-    public string MirrorState => _settings.MirrorEnabled ? "已启用 · 仅同步最终回答" : "未启用";
+    public string MirrorState => !_settings.MirrorEnabled
+        ? "未启用"
+        : _settings.MirrorFinalOnly ? "已启用\n仅同步最终消息" : "已启用\n包含额外提醒";
     public string RecentActivity => _sessions.SelectedThread is null ? "等待选择 Codex 会话" : $"最近查看：{_sessions.SelectedThread.Title}";
     public string RecentTasks => _tasks.Tasks.Count == 0
         ? "暂无任务"

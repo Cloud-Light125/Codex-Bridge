@@ -454,6 +454,72 @@ func TestRequestUserInputStillMirrorsOnce(t *testing.T) {
 	}
 }
 
+func TestFinalOnlySuppressesExtraRemindersButKeepsFormalFinal(t *testing.T) {
+	dir := t.TempDir()
+	tg, qq := &sendRecorder{}, &sendRecorder{}
+	service, reader, _, _ := newFixture(t, filepath.Join(dir, "mirror.json"), tg, qq)
+	defer service.Close()
+	_, err := service.Configure(Config{
+		Enabled: true, FinalOnly: true, RequireThreadNumber: true,
+		Messages: MessageTypes{Assistant: true, RequestUserInput: true, Error: true},
+		Telegram: TelegramConfig{Enabled: true, ChatID: "telegram-chat"},
+		QQ:       QQConfig{Enabled: true, ConversationType: "c2c", OpenID: "qq-open-id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interaction := interactions.PendingInteraction{
+		ID: "input-final-only", Kind: interactions.KindUserInput, ThreadID: "thread", TurnID: "turn-final-only",
+		Questions: []interactions.Question{{ID: "choice", Text: "选择方案", Options: []interactions.QuestionOption{{Label: "A"}}}},
+	}
+	service.handleEvent(events.Event{EventType: events.InteractionRequested, ThreadID: "thread", TurnID: "turn-final-only", Payload: map[string]any{"interaction": interaction}})
+	service.handleEvent(events.Event{EventType: events.TurnFailed, ThreadID: "thread", TurnID: "turn-final-only", Payload: map[string]any{"error": "failure detail"}})
+	time.Sleep(40 * time.Millisecond)
+	if tg.count() != 0 || qq.count() != 0 {
+		t.Fatalf("FinalOnly delivered an extra reminder: telegram=%d qq=%d", tg.count(), qq.count())
+	}
+	reader.setTurns(completedTurn("turn-final-only", "assistant-final-only", "formal final answer"))
+	service.syncThread("thread")
+	waitFor(t, func() bool { return tg.count() == 1 && qq.count() == 1 })
+	if !strings.Contains(tg.first(), "formal final answer") {
+		t.Fatalf("formal final answer was not mirrored: %q", tg.first())
+	}
+}
+
+func TestMirrorFinalOnlyMigratesFromLegacyReminderFlags(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mirror.json")
+	data := []byte(`{"version":1,"config":{"enabled":true,"messages":{"assistant":false,"requestUserInput":false,"error":false}}}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := threadregistry.New(filepath.Join(filepath.Dir(path), "threads.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &sendRecorder{}
+	service, err := New(path, &fakeControl{}, fakeRuntime{}, registry, events.NewBroker(), nil, recorder.target(), recorder.target())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.Status().Config.FinalOnly || !service.Status().Config.Messages.Assistant {
+		t.Fatal("legacy config with both reminder flags disabled was not migrated to FinalOnly")
+	}
+	service.Close()
+
+	data = []byte(`{"version":1,"config":{"enabled":true,"messages":{"assistant":true,"requestUserInput":true,"error":false}}}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err = New(path, &fakeControl{}, fakeRuntime{}, registry, events.NewBroker(), nil, recorder.target(), recorder.target())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if service.Status().Config.FinalOnly {
+		t.Fatal("legacy config with an enabled reminder was incorrectly migrated to FinalOnly")
+	}
+}
+
 func TestLongFinalUsesOnlyNecessaryNumberedParts(t *testing.T) {
 	parts := splitFinalMessage("#53 Title", strings.Repeat("界", 8000), 3900)
 	if len(parts) != 3 || !strings.HasPrefix(parts[0], "#53 Title (1/3)\n") || !strings.HasPrefix(parts[2], "#53 Title (3/3)\n") {

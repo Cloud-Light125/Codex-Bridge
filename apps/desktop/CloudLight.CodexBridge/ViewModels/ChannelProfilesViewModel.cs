@@ -2,17 +2,15 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows.Data;
 using System.Windows.Input;
+using CloudLight.CodexBridge.Controls;
 using CloudLight.CodexBridge.Infrastructure;
 using CloudLight.CodexBridge.Models;
 using CloudLight.CodexBridge.Services;
 
 namespace CloudLight.CodexBridge.ViewModels;
 
-// Owns the user-facing profile/routing model.  The daemon owns the live
-// physical transport de-duplication; this view model deliberately stores only
-// metadata and profile options in settings.json. Telegram credentials stay in
-// profile-scoped DPAPI; QQ AppSecrets are also persisted in settings.json for
-// restart recovery and remain mirrored to DPAPI for migration compatibility.
+// Owns the user-facing robot settings. The daemon still owns live transport
+// sharing; this view model keeps the screen focused on one robot at a time.
 public sealed class ChannelProfilesViewModel : ObservableObject
 {
     private readonly BridgeApiClient _api;
@@ -67,15 +65,23 @@ public sealed class ChannelProfilesViewModel : ObservableObject
             OnPropertyChanged(nameof(PageDescription));
             OnPropertyChanged(nameof(AddButtonText));
             OnPropertyChanged(nameof(EmptyText));
+            OnPropertyChanged(nameof(TutorialHeader));
+            OnPropertyChanged(nameof(QqTutorialVisibility));
+            OnPropertyChanged(nameof(TelegramTutorialVisibility));
         }
     }
 
-    public string PageTitle => SelectedPlatform == "qqbot" ? "QQ Bot" : "Telegram";
+    public string PageTitle => SelectedPlatform == "qqbot" ? "QQ 机器人" : "Telegram 机器人";
     public string PageDescription => SelectedPlatform == "qqbot"
-        ? "管理 QQ Bot Profile、Gateway 状态以及分配给 Codex / OpenClaw 的路由"
-        : "管理 Telegram Profile、Long Polling 状态以及分配给 Codex / OpenClaw 的路由";
-    public string AddButtonText => SelectedPlatform == "qqbot" ? "添加 QQ Profile" : "添加 Telegram Profile";
-    public string EmptyText => SelectedPlatform == "qqbot" ? "还没有 QQ Profile。" : "还没有 Telegram Profile。";
+        ? "连接 QQ 机器人，并设置哪些用户可以通过它使用 Codex 或 OpenClaw。"
+        : "连接 Telegram 机器人，并设置哪些账号可以通过它使用 Codex 或 OpenClaw。";
+    public string AddButtonText => SelectedPlatform == "qqbot" ? "添加 QQ 机器人" : "添加 Telegram 机器人";
+    public string EmptyText => SelectedPlatform == "qqbot" ? "还没有 QQ 机器人设置。" : "还没有 Telegram 机器人设置。";
+    public string TutorialHeader => SelectedPlatform == "qqbot"
+        ? "第一次使用？查看 QQ 机器人申请与填写教程"
+        : "第一次使用？查看 Telegram 机器人申请与填写教程";
+    public Visibility QqTutorialVisibility => SelectedPlatform == "qqbot" ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility TelegramTutorialVisibility => SelectedPlatform == "telegram" ? Visibility.Visible : Visibility.Collapsed;
     public string StatusMessage { get => _statusMessage; private set => SetProperty(ref _statusMessage, value); }
     public bool IsBusy { get => _isBusy; private set => SetProperty(ref _isBusy, value); }
     public Visibility BusyVisibility => IsBusy ? Visibility.Visible : Visibility.Collapsed;
@@ -92,7 +98,7 @@ public sealed class ChannelProfilesViewModel : ObservableObject
     {
         if (_initialized && !force) return;
         IsBusy = true;
-        StatusMessage = "正在恢复消息渠道 Profile…";
+        StatusMessage = "正在恢复机器人设置…";
         try
         {
             var restoredProfiles = new List<(ChannelProfileViewModel Profile, string? Secret, bool SecretLoadFailed)>();
@@ -113,7 +119,7 @@ public sealed class ChannelProfilesViewModel : ObservableObject
                     // configured and auto-started.
                     hasWarnings = true;
                     profile.SetCredentialConfigured(false);
-                    profile.ApplyOperationFailure("authentication-failed", "无法读取已保存的凭据；请在该 Profile 中重新保存凭据。");
+                    profile.ApplyOperationFailure("authentication-failed", "无法读取已保存的机器人密钥；请在机器人设置中重新保存密钥。");
                     restoredProfiles.Add((profile, null, true));
                     _logs.AddException("channels", $"恢复 {profile.Name} 的已保存凭据失败。", exception);
                 }
@@ -128,7 +134,7 @@ public sealed class ChannelProfilesViewModel : ObservableObject
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     hasWarnings = true;
-                    _logs.AddException("channels", "迁移 QQ AppSecret 到 settings.json 失败。", exception);
+                    _logs.AddException("channels", "迁移 QQ 机器人密钥失败。", exception);
                 }
             }
             var configuredProfiles = new List<(ChannelProfileViewModel Profile, bool HasCredential, bool SecretLoadFailed)>();
@@ -140,7 +146,7 @@ public sealed class ChannelProfilesViewModel : ObservableObject
                     var status = await _api.ConfigureChannelProfileAsync(profile.Id, profile.ToRequest(secret), cancellationToken);
                     profile.ApplyStatus(status);
                     if (secretLoadFailed)
-                        profile.ApplyOperationFailure("authentication-failed", "无法读取已保存的凭据；请在该 Profile 中重新保存凭据。");
+                        profile.ApplyOperationFailure("authentication-failed", "无法读取已保存的机器人密钥；请在机器人设置中重新保存密钥。");
                     configuredProfiles.Add((profile, !string.IsNullOrWhiteSpace(secret), secretLoadFailed));
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
@@ -177,8 +183,8 @@ public sealed class ChannelProfilesViewModel : ObservableObject
             await RefreshAsync(cancellationToken, preserveStatus: true);
             _initialized = true;
             StatusMessage = hasWarnings
-                ? "Profile 已恢复；部分凭据、路由或连接失败，请查看对应 Profile 的错误信息。"
-                : "Profile、路由与已保存凭据已恢复。";
+                ? "机器人设置已恢复；部分密钥、处理方式或连接失败，请查看对应机器人。"
+                : "机器人设置、处理方式与已保存密钥已恢复。";
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -200,7 +206,8 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         {
             var response = await _api.GetChannelProfilesAsync(cancellationToken);
             ApplyResponse(response);
-            if (!preserveStatus) StatusMessage = "已刷新渠道 Profile、连接状态和后端分配。";
+            await RefreshRecentIdentitiesAsync(cancellationToken);
+            if (!preserveStatus) StatusMessage = "已刷新机器人连接和处理方式。";
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -227,7 +234,7 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         Profiles.Clear();
         foreach (var profile in _settings.ChannelProfiles)
         {
-            var viewModel = new ChannelProfileViewModel(profile);
+            var viewModel = new ChannelProfileViewModel(profile, AllowRecentIdentityAsync);
             viewModel.CodexAssigned = ContainsRoute(_settings.ChannelRouting.Codex, viewModel);
             viewModel.OpenClawAssigned = ContainsRoute(_settings.ChannelRouting.OpenClaw, viewModel);
             Profiles.Add(viewModel);
@@ -243,12 +250,45 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         foreach (var profile in Profiles)
         {
             var status = (response.Profiles ?? []).FirstOrDefault(item => string.Equals(item.Id, profile.Id, StringComparison.OrdinalIgnoreCase));
-            if (status is not null) profile.ApplyStatus(status);
+            if (status is not null)
+            {
+                profile.ApplyStatus(status);
+            }
             profile.CodexAssigned = ContainsRoute(_settings.ChannelRouting.Codex, profile);
             profile.OpenClawAssigned = ContainsRoute(_settings.ChannelRouting.OpenClaw, profile);
         }
         ProfilesView.Refresh();
         OnPropertyChanged(nameof(EmptyVisibility));
+    }
+
+    private async Task RefreshRecentIdentitiesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await _api.GetQqDiscoveredIdentitiesAsync(cancellationToken);
+            var identities = response.Identities ?? [];
+            var qqProfiles = Profiles.Where(item => item.IsQq).ToList();
+            var fallback = qqProfiles.FirstOrDefault(item => string.Equals(item.Id, "qq-default", StringComparison.OrdinalIgnoreCase))
+                ?? (qqProfiles.Count == 1 ? qqProfiles[0] : null);
+            fallback?.SetRecentQqIdentities(identities);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            _logs.AddException("channels", "读取最近联系过机器人的 QQ 用户失败。", exception);
+        }
+    }
+
+    private async Task AllowRecentIdentityAsync(ChannelProfileViewModel profile, object? identity)
+    {
+        if (profile is null || identity is null) return;
+        if (identity is TelegramRecentIdentity telegram && telegram.UserId > 0)
+            profile.AddAllowedTelegramUser(telegram.UserId);
+        else if (identity is QqDiscoveredIdentity qq)
+            profile.AddAllowedQqIdentity(qq);
+        else
+            return;
+        await SaveProfileAsync(profile);
     }
 
     private void AddProfile(string platform)
@@ -266,12 +306,12 @@ public sealed class ChannelProfilesViewModel : ObservableObject
             Telegram = new TelegramProfileSettings(),
             Qq = new QqProfileSettings()
         };
-        var profile = new ChannelProfileViewModel(settings);
+        var profile = new ChannelProfileViewModel(settings, AllowRecentIdentityAsync);
         Profiles.Add(profile);
         PersistProfilesToSettings();
         ProfilesView.Refresh();
         OnPropertyChanged(nameof(EmptyVisibility));
-        StatusMessage = "已添加 Profile；输入凭据并保存后即可连接。";
+        StatusMessage = "已添加机器人设置；填写密钥并保存后即可连接。";
     }
 
     private async Task SaveProfileAsync(ChannelProfileViewModel? profile)
@@ -279,34 +319,74 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         if (profile is null) return;
         IsBusy = true;
         OnPropertyChanged(nameof(BusyVisibility));
+        var enteredSecret = "";
         try
         {
-            if (profile.HasPendingSecret)
-            {
-                await SaveSecretAsync(profile, profile.TakePendingSecret());
-                if (profile.IsQq)
-                {
-                    PersistProfilesToSettings();
-                    await _settingsService.SaveAsync(_settings);
-                }
-            }
+            enteredSecret = profile.HasPendingSecret ? profile.TakePendingSecret() : "";
             var restored = await LoadSecretAsync(profile);
-            var status = await _api.ConfigureChannelProfileAsync(profile.Id, profile.ToRequest(restored.Secret));
+            var credentialChanged = ChannelCredentialChange.HasChanged(
+                profile.IsQq,
+                profile.SavedAppId,
+                profile.AppId,
+                enteredSecret,
+                restored.Secret);
+            var enteredSecretChanged = !string.IsNullOrWhiteSpace(enteredSecret) &&
+                !string.Equals(enteredSecret, restored.Secret, StringComparison.Ordinal);
+            var wasRunning = profile.IsRunning;
+            var stoppedForSave = wasRunning && (credentialChanged || !profile.Enabled);
+
+            if (credentialChanged && wasRunning && !ReconnectConfirmationDialog.Show(profile.PlatformLabel))
+            {
+                if (!string.IsNullOrWhiteSpace(enteredSecret)) profile.SetPendingSecret(enteredSecret);
+                if (profile.IsQq) profile.AppId = profile.SavedAppId;
+                StatusMessage = "已取消保存机器人密钥更改。";
+                return;
+            }
+
+            if (stoppedForSave)
+                profile.ApplyStatus(await _api.StopChannelProfileAsync(profile.Id));
+
+            if (enteredSecretChanged)
+                await SaveSecretAsync(profile, enteredSecret);
+
+            // An AppID change needs the existing secret in the request so the
+            // daemon can derive a new physical-resource key.  For ordinary
+            // saves, null means “keep the stored secret” and avoids asking a
+            // running adapter to replace it.
+            var secretForRequest = credentialChanged
+                ? (!string.IsNullOrWhiteSpace(enteredSecret) ? enteredSecret : restored.Secret)
+                : null;
+            var status = await _api.ConfigureChannelProfileAsync(profile.Id, profile.ToRequest(secretForRequest));
             profile.ApplyStatus(status);
-            profile.SetCredentialConfigured(!string.IsNullOrWhiteSpace(restored.Secret));
+            profile.SetCredentialConfigured(!string.IsNullOrWhiteSpace(enteredSecret) || !string.IsNullOrWhiteSpace(restored.Secret));
+            profile.MarkSavedCredentialBaseline();
             PersistProfilesToSettings();
             await _settingsService.SaveAsync(_settings);
-            if (profile.Enabled && profile.AutoStart)
+
+            var routingSaved = true;
+            try
             {
-                profile.ApplyStatus(await _api.StartChannelProfileAsync(profile.Id));
+                await SaveRoutingCoreAsync();
             }
-            await SaveRoutingAsync();
-            StatusMessage = profile.IsQq
-                ? $"已保存 {profile.Name}；AppSecret 已保存到 settings.json 和 DPAPI。"
-                : $"已保存 {profile.Name}；凭据仍只保存在 DPAPI 安全存储。";
+            catch (Exception routingException) when (routingException is not OperationCanceledException)
+            {
+                routingSaved = false;
+                _logs.AddException("channels", "保存机器人处理方式失败。", routingException);
+            }
+
+            var shouldStart = profile.Enabled && (stoppedForSave ? wasRunning : !wasRunning && profile.AutoStart);
+            if (shouldStart)
+                profile.ApplyStatus(await _api.StartChannelProfileAsync(profile.Id));
+
+            await RefreshAsync(preserveStatus: true);
+            StatusMessage = routingSaved
+                ? stoppedForSave && wasRunning ? "机器人设置已保存，机器人已重新连接。" : "机器人设置已保存。"
+                : "基本设置已保存，但处理方式保存失败，请重试。";
         }
         catch (Exception exception)
         {
+            if (!string.IsNullOrWhiteSpace(enteredSecret) && !profile.HasPendingSecret)
+                profile.SetPendingSecret(enteredSecret);
             ApplyOperationFailure(profile, exception);
             StatusMessage = UiText.UserError(exception, $"保存 {profile.Name}");
             _logs.AddException("channels", "保存渠道 Profile 失败。", exception);
@@ -357,11 +437,10 @@ public sealed class ChannelProfilesViewModel : ObservableObject
 
     private static void ApplyOperationFailure(ChannelProfileViewModel profile, Exception exception)
     {
-        var message = exception is BridgeApiException api && !string.IsNullOrWhiteSpace(api.LastError)
-            ? api.LastError
-            : exception is BridgeApiException bridge && !string.IsNullOrWhiteSpace(bridge.Message)
-                ? bridge.Message
+        var detail = exception is BridgeApiException api
+            ? $"{api.Code} {(!string.IsNullOrWhiteSpace(api.LastError) ? api.LastError : api.Message)}"
             : UiText.UserError(exception, $"启动 {profile.Name}");
+		var message = UiText.UserError(detail, $"连接 {profile.PlatformLabel}");
 		var state = exception is BridgeApiException bridgeState ? bridgeState.CurrentState : "";
         profile.ApplyOperationFailure(state, message);
     }
@@ -372,7 +451,7 @@ public sealed class ChannelProfilesViewModel : ObservableObject
         try
         {
             profile.ApplyStatus(await _api.StopChannelProfileAsync(profile.Id));
-            StatusMessage = $"已停止 {profile.Name}。共享凭据只会在没有 Profile 使用时断开物理连接。";
+            StatusMessage = $"已停止 {profile.Name}，机器人当前未连接。";
         }
         catch (Exception exception) { StatusMessage = UiText.UserError(exception, $"停止 {profile.Name}"); }
     }
@@ -381,22 +460,27 @@ public sealed class ChannelProfilesViewModel : ObservableObject
     {
         try
         {
-            var routing = BuildRouting();
-            _settings.ChannelRouting = await _api.ConfigureChannelRoutingAsync(routing);
-            PersistProfilesToSettings();
-            await _settingsService.SaveAsync(_settings);
-            foreach (var profile in Profiles)
-            {
-                profile.CodexAssigned = ContainsRoute(_settings.ChannelRouting.Codex, profile);
-                profile.OpenClawAssigned = ContainsRoute(_settings.ChannelRouting.OpenClaw, profile);
-            }
-            StatusMessage = "已保存 Codex / OpenClaw 的 Channel Profile 分配。";
+            await SaveRoutingCoreAsync();
+            StatusMessage = "已保存机器人处理方式。";
         }
         catch (Exception exception)
         {
-            StatusMessage = UiText.UserError(exception, "保存后端路由");
-            _logs.AddException("channels", "保存 Channel Profile 路由失败。", exception);
+            StatusMessage = UiText.UserError(exception, "保存机器人处理方式");
+            _logs.AddException("channels", "保存机器人处理方式失败。", exception);
         }
+    }
+
+    private async Task SaveRoutingCoreAsync(CancellationToken cancellationToken = default)
+    {
+        var routing = BuildRouting();
+        _settings.ChannelRouting = await _api.ConfigureChannelRoutingAsync(routing, cancellationToken);
+        foreach (var profile in Profiles)
+        {
+            profile.CodexAssigned = ContainsRoute(_settings.ChannelRouting.Codex, profile);
+            profile.OpenClawAssigned = ContainsRoute(_settings.ChannelRouting.OpenClaw, profile);
+        }
+        PersistProfilesToSettings();
+        await _settingsService.SaveAsync(_settings);
     }
 
     private BackendChannelRoutingSettings BuildRouting() => new()
@@ -479,31 +563,54 @@ public sealed class ChannelProfilesViewModel : ObservableObject
     }
 }
 
+internal static class ChannelCredentialChange
+{
+    internal static bool HasChanged(bool isQq, string savedAppId, string currentAppId, string? enteredSecret, string? storedSecret)
+    {
+        if (isQq && !string.Equals(savedAppId?.Trim(), currentAppId?.Trim(), StringComparison.Ordinal))
+            return true;
+        if (string.IsNullOrWhiteSpace(enteredSecret)) return false;
+        return !string.Equals(enteredSecret, storedSecret, StringComparison.Ordinal);
+    }
+}
+
 public sealed class ChannelProfileViewModel : ObservableObject
 {
     private readonly ChannelProfileSettings _settings;
+    private readonly Func<ChannelProfileViewModel, object?, Task>? _allowRecentIdentity;
     private string _allowedIdsText;
+    private string _allowedGroupIdsText;
+    private string _allowedGroupMemberIdsText;
     private string _pendingSecret = "";
+    private string _savedAppId;
     private bool _credentialConfigured;
     private bool _codexAssigned;
     private bool _openClawAssigned;
     private ChannelProfileStatus _status = new();
 
-    public ChannelProfileViewModel(ChannelProfileSettings settings)
+    public ChannelProfileViewModel(ChannelProfileSettings settings, Func<ChannelProfileViewModel, object?, Task>? allowRecentIdentity = null)
     {
         _settings = settings;
+        _allowRecentIdentity = allowRecentIdentity;
         _settings.Telegram ??= new TelegramProfileSettings();
         _settings.Qq ??= new QqProfileSettings();
+        _savedAppId = _settings.Qq.AppId;
         _allowedIdsText = IsTelegram
             ? string.Join(Environment.NewLine, _settings.Telegram.AllowedUserIds)
             : string.Join(Environment.NewLine, _settings.Qq.AllowedUserOpenIds);
+        _allowedGroupIdsText = string.Join(Environment.NewLine, _settings.Qq.AllowedGroupOpenIds);
+        _allowedGroupMemberIdsText = string.Join(Environment.NewLine, _settings.Qq.AllowedGroupMemberOpenIds);
+        AllowRecentIdentityCommand = new RelayCommand(value =>
+        {
+            if (_allowRecentIdentity is not null) _ = _allowRecentIdentity(this, value);
+        });
     }
 
     public string Id => _settings.Id;
     public string Platform => _settings.Platform;
     public bool IsTelegram => Platform == "telegram";
     public bool IsQq => Platform == "qqbot";
-    public string PlatformLabel => IsTelegram ? "Telegram" : "QQ Bot";
+    public string PlatformLabel => IsTelegram ? "Telegram 机器人" : "QQ 机器人";
     public string Name { get => _settings.Name; set { if (_settings.Name == value) return; _settings.Name = value?.Trim() ?? ""; OnPropertyChanged(); } }
     public bool Enabled { get => _settings.Enabled; set { if (_settings.Enabled == value) return; _settings.Enabled = value; OnPropertyChanged(); } }
     public bool AutoStart { get => IsTelegram ? _settings.Telegram.AutoStart : _settings.Qq.AutoStart; set { if (IsTelegram) _settings.Telegram.AutoStart = value; else _settings.Qq.AutoStart = value; OnPropertyChanged(); } }
@@ -515,18 +622,25 @@ public sealed class ChannelProfileViewModel : ObservableObject
     public string ProxyMode { get => IsTelegram ? _settings.Telegram.ProxyMode : _settings.Qq.ProxyMode; set { if (IsTelegram) _settings.Telegram.ProxyMode = value; else _settings.Qq.ProxyMode = value; OnPropertyChanged(); } }
     public string ProxyUrl { get => IsTelegram ? _settings.Telegram.ProxyUrl : _settings.Qq.ProxyUrl; set { if (IsTelegram) _settings.Telegram.ProxyUrl = value?.Trim() ?? ""; else _settings.Qq.ProxyUrl = value?.Trim() ?? ""; OnPropertyChanged(); } }
     public string AllowedIdsText { get => _allowedIdsText; set => SetProperty(ref _allowedIdsText, value ?? ""); }
+    public string AllowedGroupIdsText { get => _allowedGroupIdsText; set => SetProperty(ref _allowedGroupIdsText, value ?? ""); }
+    public string AllowedGroupMemberIdsText { get => _allowedGroupMemberIdsText; set => SetProperty(ref _allowedGroupMemberIdsText, value ?? ""); }
     public bool CodexAssigned { get => _codexAssigned; set => SetProperty(ref _codexAssigned, value); }
     public bool OpenClawAssigned { get => _openClawAssigned; set => SetProperty(ref _openClawAssigned, value); }
-    public string StatusText => string.IsNullOrWhiteSpace(_status.State) ? "未配置" : UiText.Status(_status.State);
-    public string ConnectionText => _status.Connected ? "已连接" : _status.Running ? "连接中 / 重连中" : "已停止";
-    public string SharedText => string.IsNullOrWhiteSpace(_status.SharedWithProfileId) ? "独立连接" : $"与 { _status.SharedWithProfileId } 共用凭据与连接";
-    public string CredentialSummary => HasPendingSecret ? "有未保存的凭据" : _credentialConfigured
-        ? IsQq ? "AppSecret 已保存到 settings.json 和 DPAPI" : "凭据已由 DPAPI 安全保存"
-        : "尚未保存凭据";
+    public string StatusText => string.IsNullOrWhiteSpace(_status.State) ? "尚未连接" : UiText.Status(_status.State);
+    public string ConnectionText => _status.Connected ? "已连接" : _status.Running ? "正在连接" : "未连接";
+    public string SharedText => string.IsNullOrWhiteSpace(_status.SharedWithProfileId) ? "此机器人单独使用连接" : "与其他同密钥机器人共用连接";
+    public string CredentialSummary => HasPendingSecret ? "有未保存的机器人密钥" : _credentialConfigured
+        ? "机器人密钥已保存"
+        : "尚未填写机器人密钥";
     public string AccountText => IsTelegram ? (string.IsNullOrWhiteSpace(_status.BotUsername) ? _status.AccountId : $"@{_status.BotUsername}") : _status.AccountId;
-    public string LastError => _status.LastError;
-    public string BindingCountText => $"{_status.BindingCount} 个聊天绑定";
+    public string LastError => string.IsNullOrWhiteSpace(_status.LastError) ? "" : UiText.UserError(_status.LastError, $"连接 {PlatformLabel}");
+    public string BindingCountText => $"已关联 {_status.BindingCount} 个聊天";
     public bool HasPendingSecret => !string.IsNullOrWhiteSpace(_pendingSecret);
+    public bool IsRunning => _status.Running;
+    internal string SavedAppId => _savedAppId;
+    public ObservableCollection<QqDiscoveredIdentity> RecentQqIdentities { get; } = [];
+    public ObservableCollection<TelegramRecentIdentity> RecentTelegramIdentities { get; } = [];
+    public ICommand AllowRecentIdentityCommand { get; }
     public Visibility TelegramVisibility => IsTelegram ? Visibility.Visible : Visibility.Collapsed;
     public Visibility QqVisibility => IsQq ? Visibility.Visible : Visibility.Collapsed;
 
@@ -554,11 +668,21 @@ public sealed class ChannelProfileViewModel : ObservableObject
         OnPropertyChanged(nameof(CredentialSummary));
     }
 
+    public void MarkSavedCredentialBaseline() => _savedAppId = AppId;
+
     public void ApplyStatus(ChannelProfileStatus status)
     {
         _status = status;
-        if (IsTelegram) _credentialConfigured = status.TokenSet;
-        else _credentialConfigured = status.SecretConfigured;
+        if (IsTelegram)
+        {
+            _credentialConfigured = status.TokenSet;
+            SetRecentTelegramIdentities(status.RecentIdentities);
+        }
+        else
+        {
+            _credentialConfigured = status.SecretConfigured;
+            SetRecentQqIdentities(status.RecentQqIdentities);
+        }
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(ConnectionText));
         OnPropertyChanged(nameof(SharedText));
@@ -566,12 +690,9 @@ public sealed class ChannelProfileViewModel : ObservableObject
         OnPropertyChanged(nameof(AccountText));
         OnPropertyChanged(nameof(LastError));
         OnPropertyChanged(nameof(BindingCountText));
+        OnPropertyChanged(nameof(IsRunning));
     }
 
-    // Start/stop failures are returned as HTTP errors, so the normal success
-    // DTO cannot update this view model. Preserve the daemon's current state
-    // and sanitized error immediately; this prevents the UI from rendering an
-    // old "stopped" snapshot as "状态未知" until a later SSE refresh arrives.
     public void ApplyOperationFailure(string? state, string? error)
     {
         _status.State = string.IsNullOrWhiteSpace(state) ? "failed" : state;
@@ -585,6 +706,42 @@ public sealed class ChannelProfileViewModel : ObservableObject
         OnPropertyChanged(nameof(AccountText));
         OnPropertyChanged(nameof(LastError));
         OnPropertyChanged(nameof(BindingCountText));
+        OnPropertyChanged(nameof(IsRunning));
+    }
+
+    public void SetRecentQqIdentities(IEnumerable<QqDiscoveredIdentity> identities)
+    {
+        RecentQqIdentities.Clear();
+        foreach (var identity in identities.Take(20)) RecentQqIdentities.Add(identity);
+    }
+
+    public void SetRecentTelegramIdentities(IEnumerable<TelegramRecentIdentity> identities)
+    {
+        RecentTelegramIdentities.Clear();
+        foreach (var identity in identities.Take(20)) RecentTelegramIdentities.Add(identity);
+    }
+
+    public void AddAllowedTelegramUser(long userId)
+    {
+        if (userId <= 0) return;
+        var values = ParseLines(_allowedIdsText).ToList();
+        var text = userId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (!values.Contains(text, StringComparer.Ordinal)) values.Add(text);
+        AllowedIdsText = string.Join(Environment.NewLine, values);
+    }
+
+    public void AddAllowedQqIdentity(QqDiscoveredIdentity identity)
+    {
+        if (string.Equals(identity.Type, "group", StringComparison.OrdinalIgnoreCase))
+        {
+            AddLine(ref _allowedGroupIdsText, identity.GroupOpenId);
+            AddLine(ref _allowedGroupMemberIdsText, identity.GroupMemberOpenId);
+            OnPropertyChanged(nameof(AllowedGroupIdsText));
+            OnPropertyChanged(nameof(AllowedGroupMemberIdsText));
+            return;
+        }
+        AddLine(ref _allowedIdsText, identity.UserOpenId);
+        OnPropertyChanged(nameof(AllowedIdsText));
     }
 
     public ChannelProfileConfigureRequest ToRequest(string? secret)
@@ -640,13 +797,25 @@ public sealed class ChannelProfileViewModel : ObservableObject
     {
         if (IsTelegram)
         {
-            _settings.Telegram.AllowedUserIds = _allowedIdsText.Split(['\r', '\n', ',', ';', ' '], StringSplitOptions.RemoveEmptyEntries)
-                .Select(value => long.TryParse(value.Trim(), out var id) ? id : 0).Where(id => id > 0).Distinct().ToList();
+            _settings.Telegram.AllowedUserIds = ParseLines(_allowedIdsText)
+                .Select(value => long.TryParse(value, out var id) ? id : 0).Where(id => id > 0).Distinct().ToList();
         }
         else
         {
-            _settings.Qq.AllowedUserOpenIds = _allowedIdsText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-                .Select(value => value.Trim()).Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).ToList();
+            _settings.Qq.AllowedUserOpenIds = ParseLines(_allowedIdsText).ToList();
+            _settings.Qq.AllowedGroupOpenIds = ParseLines(_allowedGroupIdsText).ToList();
+            _settings.Qq.AllowedGroupMemberOpenIds = ParseLines(_allowedGroupMemberIdsText).ToList();
         }
+    }
+
+    private static IEnumerable<string> ParseLines(string? value) => (value ?? "").Split(['\r', '\n', ',', ';', ' '], StringSplitOptions.RemoveEmptyEntries)
+        .Select(item => item.Trim()).Where(item => item.Length > 0).Distinct(StringComparer.Ordinal);
+
+    private static void AddLine(ref string target, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        var values = ParseLines(target).ToList();
+        if (!values.Contains(value.Trim(), StringComparer.Ordinal)) values.Add(value.Trim());
+        target = string.Join(Environment.NewLine, values);
     }
 }

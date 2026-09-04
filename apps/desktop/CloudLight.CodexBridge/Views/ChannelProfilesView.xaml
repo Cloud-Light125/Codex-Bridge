@@ -1,43 +1,184 @@
 <UserControl x:Class="CloudLight.CodexBridge.Views.ChannelProfilesView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel MaxWidth="1100" HorizontalAlignment="Left">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:CloudLight.CodexBridge.Controls">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+        <Grid MaxWidth="1480" HorizontalAlignment="Center">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
-                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock Text="{Binding PageTitle}" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="{Binding PageDescription}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,5,0,0"/><TextBlock Text="{Binding StatusMessage}" Foreground="{DynamicResource AccentBrush}" TextWrapping="Wrap" Margin="0,10,0,0"/></StackPanel>
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top"><Button Content="{Binding AddButtonText}" Command="{Binding AddCurrentProfileCommand}"/><Button Content="刷新" Command="{Binding RefreshCommand}" Margin="8,0,0,0"/></StackPanel>
-                </Grid>
+                <StackPanel>
+                    <TextBlock Text="{Binding PageTitle}" Style="{StaticResource SectionTitleStyle}"/>
+                    <TextBlock Text="{Binding PageDescription}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,5,0,0"/>
+                    <TextBlock Text="{Binding StatusMessage}" Foreground="{DynamicResource AccentBrush}" TextWrapping="Wrap" Margin="0,10,0,0"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                        <Button Content="{Binding AddButtonText}" Command="{Binding AddCurrentProfileCommand}" Style="{StaticResource PrimaryButtonStyle}"/>
+                        <Button Content="刷新" Command="{Binding RefreshCommand}" Margin="8,0,0,0"/>
+                    </StackPanel>
+                </StackPanel>
             </Border>
-            <Border Style="{StaticResource CardStyle}" Visibility="{Binding BusyVisibility}" Margin="0,0,0,16"><StackPanel><TextBlock Text="正在更新消息渠道状态…" FontWeight="SemiBold"/><ProgressBar IsIndeterminate="True" Height="4" Margin="0,12,0,0"/></StackPanel></Border>
-            <Border Style="{StaticResource CardStyle}" Visibility="{Binding EmptyVisibility}" Margin="0,0,0,16"><TextBlock Text="{Binding EmptyText}" Foreground="{DynamicResource MutedBrush}"/></Border>
-            <ItemsControl ItemsSource="{Binding ProfilesView}">
+
+            <Border Grid.Row="1" Style="{StaticResource CardStyle}" Visibility="{Binding BusyVisibility}" Margin="0,0,0,16">
+                <StackPanel><TextBlock Text="正在更新机器人状态…" FontWeight="SemiBold"/><ProgressBar IsIndeterminate="True" Height="4" Margin="0,12,0,0"/></StackPanel>
+            </Border>
+            <Border Grid.Row="2" Style="{StaticResource CardStyle}" Visibility="{Binding EmptyVisibility}" Margin="0,0,0,16">
+                <TextBlock Text="{Binding EmptyText}" Foreground="{DynamicResource MutedBrush}"/>
+            </Border>
+
+            <ItemsControl Grid.Row="3" ItemsSource="{Binding ProfilesView}" HorizontalContentAlignment="Stretch">
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
                         <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
                             <StackPanel>
-                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                    <StackPanel><StackPanel Orientation="Horizontal"><TextBlock Text="{Binding PlatformLabel}" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/><TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}" FontSize="19" FontWeight="SemiBold" BorderThickness="0" Background="Transparent" Margin="10,-4,0,0" MinWidth="180"/></StackPanel><TextBlock Text="{Binding Id}" FontFamily="Consolas" Style="{StaticResource SecondaryTextStyle}" Margin="0,5,0,0"/></StackPanel>
-                                    <StackPanel Grid.Column="1" Orientation="Horizontal"><Button Content="启动" Command="{Binding DataContext.StartProfileCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}"/><Button Content="停止" Command="{Binding DataContext.StopProfileCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" Margin="8,0,0,0"/><Button Content="删除" Tag="{Binding}" Click="DeleteProfile_Click" Foreground="{DynamicResource ErrorBrush}" Margin="8,0,0,0"/></StackPanel>
-                                </Grid>
-                                <Grid Margin="0,16,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                     <StackPanel>
-                                        <CheckBox Content="启用这个 Profile" IsChecked="{Binding Enabled}" Margin="0,0,0,8"/>
-                                        <CheckBox Content="启动 Bridge 时自动连接" IsChecked="{Binding AutoStart}" Margin="0,0,0,8"/>
-                                        <CheckBox Content="将运行进度发送到聊天" IsChecked="{Binding SendProgressUpdates}" Margin="0,0,0,12"/>
-                                        <StackPanel Visibility="{Binding TelegramVisibility}"><TextBlock Text="Telegram Token（只保存到 DPAPI，不写入 settings.json）" Style="{StaticResource FieldLabelStyle}"/><PasswordBox PasswordChanged="SecretBox_PasswordChanged" Padding="10,7" Margin="0,5,0,0"/><TextBlock Text="允许的用户 ID（每行一个）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/><TextBox Text="{Binding AllowedIdsText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="70"/><TextBlock Text="Polling 超时（秒）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/><TextBox Text="{Binding PollingTimeoutSeconds, UpdateSourceTrigger=PropertyChanged}"/></StackPanel>
-                                        <StackPanel Visibility="{Binding QqVisibility}"><TextBlock Text="AppID" Style="{StaticResource FieldLabelStyle}"/><TextBox Text="{Binding AppId, UpdateSourceTrigger=PropertyChanged}" Margin="0,5,0,0"/><TextBlock Text="AppSecret（保存到 settings.json，并同时写入 DPAPI）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/><PasswordBox PasswordChanged="SecretBox_PasswordChanged" Padding="10,7"/><TextBlock Text="允许的用户 OpenID（每行一个）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/><TextBox Text="{Binding AllowedIdsText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="70"/><CheckBox Content="Gateway 断线后自动重连" IsChecked="{Binding ReconnectEnabled}" Margin="0,12,0,0"/></StackPanel>
-                                        <TextBlock Text="代理模式" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/><ComboBox SelectedValue="{Binding ProxyMode}" SelectedValuePath="Tag"><ComboBoxItem Content="使用环境变量" Tag="environment"/><ComboBoxItem Content="直接连接" Tag="direct"/><ComboBoxItem Content="自定义 HTTP 代理" Tag="custom-http"/></ComboBox><TextBox Text="{Binding ProxyUrl, UpdateSourceTrigger=PropertyChanged}" ToolTip="自定义 HTTP 代理，例如 http://127.0.0.1:7897" Margin="0,7,0,0"/>
+                                        <TextBlock Text="{Binding PlatformLabel}" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                        <TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}" FontSize="19" FontWeight="SemiBold" BorderThickness="0" Background="Transparent" Margin="0,4,0,0"/>
                                     </StackPanel>
-                                    <Border Grid.Column="2" Background="{DynamicResource CodeBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="14"><StackPanel><TextBlock Text="连接与分配" FontSize="16" FontWeight="SemiBold"/><TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold" Margin="0,10,0,0"/><TextBlock Text="{Binding ConnectionText}" Style="{StaticResource SecondaryTextStyle}" Margin="0,4,0,0"/><TextBlock Text="{Binding SharedText}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,4,0,0"/><TextBlock Text="账户" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,3"/><TextBlock Text="{Binding AccountText}" TextWrapping="Wrap"/><TextBlock Text="凭据" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,3"/><TextBlock Text="{Binding CredentialSummary}" TextWrapping="Wrap"/><TextBlock Text="绑定" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,3"/><TextBlock Text="{Binding BindingCountText}"/><CheckBox Content="分配给 Codex" IsChecked="{Binding CodexAssigned}" Margin="0,16,0,6"/><CheckBox Content="分配给 OpenClaw" IsChecked="{Binding OpenClawAssigned}"/><TextBlock Text="同一 Token / AppID+Secret 被多个 Profile 使用时，Bridge 只会维护一个 Poller / Gateway。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,14,0,0"/><TextBlock Text="{Binding LastError}" Foreground="{DynamicResource ErrorBrush}" TextWrapping="Wrap" Margin="0,12,0,0"/></StackPanel></Border>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+                                        <Button Content="连接" Command="{Binding DataContext.StartProfileCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}"/>
+                                        <Button Content="断开连接" Command="{Binding DataContext.StopProfileCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" Margin="8,0,0,0"/>
+                                        <Button Content="删除机器人" Tag="{Binding}" Click="DeleteProfile_Click" Foreground="{DynamicResource ErrorBrush}" Margin="8,0,0,0"/>
+                                    </StackPanel>
                                 </Grid>
-                                <StackPanel Orientation="Horizontal" Margin="0,16,0,0"><Button Content="保存 Profile" Command="{Binding DataContext.SaveProfileCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" Style="{StaticResource PrimaryButtonStyle}"/><TextBlock Text="更改后也请保存后端分配。" Style="{StaticResource SecondaryTextStyle}" VerticalAlignment="Center" Margin="12,0,0,0"/></StackPanel>
+
+                                <controls:ResponsiveCardPanel MinItemWidth="420" MaxColumns="2" Margin="0,18,0,0">
+                                    <StackPanel>
+                                        <CheckBox Content="启用这个机器人" IsChecked="{Binding Enabled}" Margin="0,0,0,8"/>
+                                        <CheckBox Content="打开软件时自动连接" IsChecked="{Binding AutoStart}" Margin="0,0,0,8"/>
+                                        <CheckBox Content="任务执行时发送进度更新" IsChecked="{Binding SendProgressUpdates}" Margin="0,0,0,14"/>
+
+                                        <StackPanel Visibility="{Binding TelegramVisibility}">
+                                            <TextBlock Text="机器人密钥（Token）" Style="{StaticResource FieldLabelStyle}"/>
+                                            <PasswordBox PasswordChanged="SecretBox_PasswordChanged" Padding="10,7" Margin="0,5,0,0"/>
+                                            <TextBlock Text="留空表示保留已保存的机器人密钥。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                            <TextBlock Text="允许使用机器人的用户" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/>
+                                            <TextBlock Text="只有加入这里的 Telegram 用户才能通过机器人操作 Bridge。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,0,0,5"/>
+                                            <TextBlock Text="用户 ID（每行一个）" Style="{StaticResource FieldLabelStyle}"/>
+                                            <TextBox Text="{Binding AllowedIdsText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="70"/>
+                                            <TextBlock Text="这是 Telegram 为账号分配的数字编号。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,5,0,0"/>
+                                            <TextBlock Text="最近联系过机器人" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/>
+                                            <ItemsControl ItemsSource="{Binding RecentTelegramIdentities}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <DockPanel Margin="0,3,0,0">
+                                                            <Button DockPanel.Dock="Right" Content="允许此用户" Command="{Binding RelativeSource={RelativeSource AncestorType=ItemsControl}, Path=DataContext.AllowRecentIdentityCommand}" CommandParameter="{Binding}" Padding="10,4" MinHeight="30"/>
+                                                            <StackPanel Margin="0,0,8,0">
+                                                                <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap"/>
+                                                                <StackPanel Orientation="Horizontal">
+                                                                    <TextBlock Text="最近联系：" Style="{StaticResource SecondaryTextStyle}"/>
+                                                                    <TextBlock Text="{Binding SeenText}" Style="{StaticResource SecondaryTextStyle}"/>
+                                                                </StackPanel>
+                                                            </StackPanel>
+                                                        </DockPanel>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <TextBlock Text="接收消息超时（秒）" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/>
+                                            <TextBox Text="{Binding PollingTimeoutSeconds, UpdateSourceTrigger=PropertyChanged}"/>
+                                        </StackPanel>
+
+                                        <StackPanel Visibility="{Binding QqVisibility}">
+                                            <TextBlock Text="机器人 ID（AppID）" Style="{StaticResource FieldLabelStyle}"/>
+                                            <TextBox Text="{Binding AppId, UpdateSourceTrigger=PropertyChanged}" Margin="0,5,0,0"/>
+                                            <TextBlock Text="机器人密钥（AppSecret）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/>
+                                            <PasswordBox PasswordChanged="SecretBox_PasswordChanged" Padding="10,7"/>
+                                            <TextBlock Text="留空表示保留已保存的机器人密钥。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                            <TextBlock Text="允许使用机器人的用户或群聊" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/>
+                                            <TextBlock Text="只有加入这里的用户或群聊才能通过这个机器人操作 Codex 或 OpenClaw。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,0,0,5"/>
+                                            <TextBlock Text="已允许的用户 OpenID（每行一个）" Style="{StaticResource FieldLabelStyle}"/>
+                                            <TextBox Text="{Binding AllowedIdsText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="64"/>
+                                            <TextBlock Text="允许的群聊 OpenID（每行一个）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/>
+                                            <TextBox Text="{Binding AllowedGroupIdsText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="56"/>
+                                            <TextBlock Text="允许的群成员 OpenID（可选，每行一个）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/>
+                                            <TextBox Text="{Binding AllowedGroupMemberIdsText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" MinHeight="56"/>
+                                            <TextBlock Text="OpenID 是 QQ 平台用于识别用户和群聊的内部编号，通常不需要手动填写。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                            <TextBlock Text="最近联系过机器人" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/>
+                                            <ItemsControl ItemsSource="{Binding RecentQqIdentities}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <DockPanel Margin="0,3,0,0">
+                                                            <Button DockPanel.Dock="Right" Content="{Binding AllowText}" Command="{Binding RelativeSource={RelativeSource AncestorType=ItemsControl}, Path=DataContext.AllowRecentIdentityCommand}" CommandParameter="{Binding}" Padding="10,4" MinHeight="30"/>
+                                                            <StackPanel Margin="0,0,8,0">
+                                                                <TextBlock Text="{Binding DisplayText}" TextWrapping="Wrap"/>
+                                                                <StackPanel Orientation="Horizontal">
+                                                                    <TextBlock Text="最近联系：" Style="{StaticResource SecondaryTextStyle}"/>
+                                                                    <TextBlock Text="{Binding DiscoveredAtDisplay}" Style="{StaticResource SecondaryTextStyle}"/>
+                                                                </StackPanel>
+                                                            </StackPanel>
+                                                        </DockPanel>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <CheckBox Content="连接中断后自动重连" IsChecked="{Binding ReconnectEnabled}" Margin="0,12,0,0"/>
+                                        </StackPanel>
+
+                                        <TextBlock Text="连接方式" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,5"/>
+                                        <ComboBox SelectedValue="{Binding ProxyMode}" SelectedValuePath="Tag">
+                                            <ComboBoxItem Content="跟随系统网络设置" Tag="environment"/>
+                                            <ComboBoxItem Content="直接连接" Tag="direct"/>
+                                            <ComboBoxItem Content="使用自定义 HTTP 代理" Tag="custom-http"/>
+                                        </ComboBox>
+                                        <TextBox Text="{Binding ProxyUrl, UpdateSourceTrigger=PropertyChanged}" ToolTip="自定义 HTTP 代理，例如 http://127.0.0.1:7897" Margin="0,7,0,0"/>
+                                    </StackPanel>
+
+                                    <Border Background="{DynamicResource CodeBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="14">
+                                        <StackPanel>
+                                            <TextBlock Text="状态与处理方式" FontSize="16" FontWeight="SemiBold"/>
+                                            <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold" Margin="0,10,0,0"/>
+                                            <TextBlock Text="{Binding ConnectionText}" Style="{StaticResource SecondaryTextStyle}" Margin="0,4,0,0"/>
+                                            <TextBlock Text="{Binding SharedText}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                            <TextBlock Text="机器人账户" Style="{StaticResource FieldLabelStyle}" Margin="0,14,0,3"/>
+                                            <TextBlock Text="{Binding AccountText}" TextWrapping="Wrap"/>
+                                            <TextBlock Text="密钥状态" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,3"/>
+                                            <TextBlock Text="{Binding CredentialSummary}" TextWrapping="Wrap"/>
+                                            <TextBlock Text="关联聊天" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,3"/>
+                                            <TextBlock Text="{Binding BindingCountText}"/>
+                                            <TextBlock Text="消息交给谁处理" Style="{StaticResource FieldLabelStyle}" Margin="0,16,0,6"/>
+                                            <CheckBox Content="Codex" IsChecked="{Binding CodexAssigned}"/>
+                                            <CheckBox Content="OpenClaw" IsChecked="{Binding OpenClawAssigned}" Margin="0,8,0,0"/>
+                                            <TextBlock Text="多个机器人使用同一密钥时，会共用一个连接。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,14,0,0"/>
+                                            <TextBlock Text="{Binding LastError}" Foreground="{DynamicResource ErrorBrush}" TextWrapping="Wrap" Margin="0,12,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+                                </controls:ResponsiveCardPanel>
+
+                                <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                                    <Button Content="保存机器人设置" Command="{Binding DataContext.SaveProfileCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" Style="{StaticResource PrimaryButtonStyle}"/>
+                                    <TextBlock Text="机器人设置和处理方式会一起保存。" Style="{StaticResource SecondaryTextStyle}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="12,0,0,0"/>
+                                </StackPanel>
                             </StackPanel>
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
-            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16"><StackPanel><TextBlock Text="Backend Routing" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="勾选项决定每个后端可以使用哪些 Channel Profile；实际聊天投递仍由包含 backend、profile、conversation 与 targetId 的显式绑定决定。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,0,0"/><Button Content="保存 Codex / OpenClaw 分配" Command="{Binding SaveRoutingCommand}" HorizontalAlignment="Left" Margin="0,14,0,0" Style="{StaticResource PrimaryButtonStyle}"/></StackPanel></Border>
-        </StackPanel>
+
+            <Expander Grid.Row="4" Header="{Binding TutorialHeader}" IsExpanded="False" Margin="0,0,0,16">
+                <Border Style="{StaticResource CardStyle}" Margin="0,8,0,0">
+                    <StackPanel>
+                        <StackPanel Visibility="{Binding QqTutorialVisibility}">
+                            <TextBlock Text="QQ 官方平台：q.qq.com" FontWeight="SemiBold"/>
+                            <TextBlock Text="步骤 1：点击下方按钮打开 QQ 开放平台，并使用 QQ 登录。&#10;步骤 2：在 QQ 开放平台创建机器人，完成名称、头像等基本设置。具体入口以平台当前页面为准。&#10;步骤 3：在机器人的开发或管理设置中找到 AppID 和 AppSecret。它们分别对应本页的“机器人 ID（AppID）”和“机器人密钥（AppSecret）”。&#10;步骤 4：把 AppID 和 AppSecret 填入上面的设置，点击“保存机器人设置”。&#10;步骤 5：点击“连接”，状态显示“已连接”后，软件即可接收 QQ 机器人的消息。&#10;步骤 6：在 QQ 中给机器人发送一条消息，返回这里，在“最近联系过机器人”中找到自己的账号或群聊，点击“允许此用户”或“允许此群聊”。&#10;步骤 7：在“消息交给谁处理”中选择 Codex、OpenClaw 或两者。&#10;步骤 8：再次点击“保存机器人设置”。AppSecret 相当于机器人的连接密钥，请不要发给其他人；私聊、群聊和主动消息能力以 QQ 开放平台实际授权和平台规则为准。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,8,0,12"/>
+                            <Button Content="打开 QQ 官方平台" Tag="https://q.qq.com" Click="OpenOfficialUrl_Click" HorizontalAlignment="Left"/>
+                        </StackPanel>
+                        <StackPanel Visibility="{Binding TelegramTutorialVisibility}">
+                            <TextBlock Text="Telegram 官方教程：t.me/BotFather · core.telegram.org/bots/tutorial" FontWeight="SemiBold"/>
+                            <TextBlock Text="步骤 1：点击下方按钮打开 Telegram 官方 BotFather。&#10;步骤 2：在 BotFather 中发送 /newbot。&#10;步骤 3：按提示输入机器人显示名称，例如 CloudLight Bot。&#10;步骤 4：输入唯一的机器人用户名，通常需要以 bot 结尾。&#10;步骤 5：BotFather 会返回 Bot Token，它对应本页的“机器人密钥（Token）”；请妥善保管，不要发给其他人。&#10;步骤 6：把 Token 填入上面的设置，点击“保存机器人设置”。&#10;步骤 7：在 Telegram 中打开刚创建的机器人并发送 /start。&#10;步骤 8：返回这里，在“最近联系过机器人”中找到自己的账号，点击“允许此用户”。&#10;步骤 9：在“消息交给谁处理”中选择 Codex、OpenClaw 或两者。&#10;步骤 10：点击“连接”，确认状态显示“已连接”。同一个机器人不要同时被其他程序接收消息。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,8,0,12"/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Content="打开 BotFather" Tag="https://t.me/BotFather" Click="OpenOfficialUrl_Click" HorizontalAlignment="Left"/>
+                                <Button Content="打开官方教程" Tag="https://core.telegram.org/bots/tutorial" Click="OpenOfficialUrl_Click" HorizontalAlignment="Left" Margin="8,0,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Expander>
+        </Grid>
     </ScrollViewer>
 </UserControl>

@@ -23,7 +23,7 @@
     <system:String x:Key="ChannelsIntro">配置 Telegram 与 QQ 机器人，并管理关联的 Codex 会话。</system:String>
     <system:String x:Key="TelegramPlan">通过 Telegram 机器人连接 Telegram。</system:String>
     <system:String x:Key="QqPlan">通过 QQ 官方机器人连接 QQ。</system:String>
-    <system:String x:Key="TelegramToken">Telegram Bot Token</system:String>
+    <system:String x:Key="TelegramToken">Telegram 机器人密钥</system:String>
     <system:String x:Key="TelegramSaveToken">安全保存 Token</system:String>
     <system:String x:Key="TelegramDeleteToken">删除 Token</system:String>
     <system:String x:Key="TelegramSaveConfig">保存配置</system:String>

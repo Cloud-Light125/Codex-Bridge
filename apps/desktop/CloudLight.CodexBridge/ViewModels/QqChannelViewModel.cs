@@ -319,7 +319,7 @@ public sealed class QqChannelViewModel : ObservableObject
             var status = await _api.ConfigureQqAsync(BuildRequest(), _lifetime.Token).ConfigureAwait(false);
             await RunOnUiAsync(() => { ApplyStatus(status); OperationMessage = "QQ 官方机器人配置已保存。"; });
         }
-        catch (Exception exception) { await ReportErrorAsync("保存 QQ Bot 配置", exception); }
+        catch (Exception exception) { await ReportErrorAsync("保存 QQ 机器人设置", exception); }
     }
 
     private async Task TestAsync()

@@ -88,9 +88,9 @@ public sealed class CommandsViewModel : ObservableObject
     public bool IsOpenClaw => _backend == "openclaw";
     public string PageTitle => IsOpenClaw ? "OpenClaw 指令" : "Codex 指令";
     public string PageDescription => IsOpenClaw
-        ? "只显示可在 OpenClaw 路由中使用的远程指令；运行状态和 Session 由 OpenClaw Gateway 提供。"
-        : "只显示 Codex 路由中可用的远程指令；Codex Thread、运行状态和额度能力保持独立。";
-    public string BackendNotice => IsOpenClaw ? "当前聊天路由到 OpenClaw 时，序号表示 OpenClaw Session；路由到 Codex 时，序号表示 Codex Thread。" : "";
+        ? "显示 OpenClaw 可以使用的远程指令；会话状态由 OpenClaw 提供。"
+        : "显示 Codex 可以使用的远程指令；Codex 会话和运行状态保持独立。";
+    public string BackendNotice => IsOpenClaw ? "当前聊天交给 OpenClaw 时，序号表示 OpenClaw 会话；交给 Codex 时，序号表示 Codex 会话。" : "";
     public Visibility BackendNoticeVisibility => IsOpenClaw ? Visibility.Visible : Visibility.Collapsed;
     public ICommand RefreshCommand { get; }
     public ICommand AddCommand { get; }

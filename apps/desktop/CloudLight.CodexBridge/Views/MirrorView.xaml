@@ -1,22 +1,63 @@
 <UserControl x:Class="CloudLight.CodexBridge.Views.MirrorView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:CloudLight.CodexBridge.Controls"
              DataContext="{Binding Settings}">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel MaxWidth="980" HorizontalAlignment="Left">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+        <Grid MaxWidth="1480" HorizontalAlignment="Center">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,16">
-                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                    <StackPanel><TextBlock Text="仅同步最终回答" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="每次任务只向各平台发送一次最终回答。" Style="{StaticResource SecondaryTextStyle}" Margin="0,6,0,0"/></StackPanel>
-                    <CheckBox Grid.Column="1" Content="总开关" IsChecked="{Binding MirrorEnabled}" Style="{StaticResource SwitchCheckBoxStyle}"/>
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="启用消息同步" Style="{StaticResource SectionTitleStyle}"/>
+                        <TextBlock Text="主动把 Codex 的消息发送到已配置的 QQ 或 Telegram 机器人。关闭后不会主动发送镜像消息，但不影响机器人接收和处理远程消息。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,6,20,0"/>
+                    </StackPanel>
+                    <CheckBox Grid.Column="1" Content="启用" IsChecked="{Binding MirrorEnabled}" Style="{StaticResource SwitchCheckBoxStyle}"/>
                 </Grid>
             </Border>
-            <Grid Margin="0,0,0,16"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                <Border Style="{StaticResource CardStyle}"><StackPanel><TextBlock Text="Telegram" Style="{StaticResource SectionTitleStyle}"/><CheckBox Content="启用同步" IsChecked="{Binding TelegramMirrorEnabled}" Margin="0,14,0,10"/><TextBlock Text="目标聊天 ID" Style="{StaticResource FieldLabelStyle}"/><TextBox Text="{Binding TelegramMirrorChatId, UpdateSourceTrigger=PropertyChanged}"/></StackPanel></Border>
-                <Border Grid.Column="2" Style="{StaticResource CardStyle}"><StackPanel><TextBlock Text="QQ 机器人" Style="{StaticResource SectionTitleStyle}"/><CheckBox Content="启用同步" IsChecked="{Binding QqMirrorEnabled}" Margin="0,14,0,10"/><TextBlock Text="同步到" Style="{StaticResource FieldLabelStyle}"/><ComboBox SelectedValue="{Binding QqMirrorConversationType}" SelectedValuePath="Tag"><ComboBoxItem Content="私聊" Tag="c2c"/><ComboBoxItem Content="群聊" Tag="group"/></ComboBox><TextBlock Text="用户或群聊标识（OpenID）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/><TextBox Text="{Binding QqMirrorOpenId, UpdateSourceTrigger=PropertyChanged}"/><TextBlock Text="{Binding QqCapabilityNotice}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,9,0,0"/></StackPanel></Border>
-            </Grid>
-            <Border Style="{StaticResource CardStyle}">
-                <StackPanel><TextBlock Text="辅助通知" Style="{StaticResource SectionTitleStyle}"/><TextBlock Text="最终回答始终是主要同步内容；仅在需要时开启其他提醒。" Style="{StaticResource SecondaryTextStyle}" Margin="0,5,0,12"/><CheckBox Content="同步 Codex 最终回答" IsChecked="{Binding MirrorAssistant}"/><CheckBox Content="等待你的回答" IsChecked="{Binding MirrorInput}" Margin="0,8,0,0"/><CheckBox Content="错误或停止提醒" IsChecked="{Binding MirrorError}" Margin="0,8,0,0"/><CheckBox Content="远程回复必须包含 #N 聊天编号" IsChecked="{Binding RequireThreadNumber}" Margin="0,14,0,0"/><TextBlock Text="{Binding MirrorStatusText}" Style="{StaticResource SecondaryTextStyle}" Margin="0,14,0,0"/><Button Content="保存消息同步设置" Command="{Binding SaveCommand}" Style="{StaticResource PrimaryButtonStyle}" HorizontalAlignment="Left" Margin="0,16,0,0"/></StackPanel>
+            <controls:ResponsiveCardPanel Grid.Row="1" MinItemWidth="360" MaxColumns="2" Margin="0,0,0,16">
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="Telegram" Style="{StaticResource SectionTitleStyle}"/>
+                        <CheckBox Content="启用此目标" IsChecked="{Binding TelegramMirrorEnabled}" Margin="0,14,0,10"/>
+                        <TextBlock Text="目标聊天 ID" Style="{StaticResource FieldLabelStyle}"/>
+                        <TextBox Text="{Binding TelegramMirrorChatId, UpdateSourceTrigger=PropertyChanged}"/>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="QQ 机器人" Style="{StaticResource SectionTitleStyle}"/>
+                        <CheckBox Content="启用此目标" IsChecked="{Binding QqMirrorEnabled}" Margin="0,14,0,10"/>
+                        <TextBlock Text="同步到" Style="{StaticResource FieldLabelStyle}"/>
+                        <ComboBox SelectedValue="{Binding QqMirrorConversationType}" SelectedValuePath="Tag"><ComboBoxItem Content="私聊" Tag="c2c"/><ComboBoxItem Content="群聊" Tag="group"/></ComboBox>
+                        <TextBlock Text="用户或群聊标识（OpenID）" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/>
+                        <TextBox Text="{Binding QqMirrorOpenId, UpdateSourceTrigger=PropertyChanged}"/>
+                        <TextBlock Text="{Binding QqCapabilityNotice}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,9,0,0"/>
+                    </StackPanel>
+                </Border>
+            </controls:ResponsiveCardPanel>
+            <Border Grid.Row="2" Style="{StaticResource CardStyle}">
+                <StackPanel>
+                    <TextBlock Text="同步内容" Style="{StaticResource SectionTitleStyle}"/>
+                    <TextBlock Text="正式回答始终同步；不会发送分析、过程说明、工具输出或内部日志。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,5,0,12"/>
+                    <CheckBox Content="仅同步最终消息" IsChecked="{Binding MirrorFinalOnly}"/>
+                    <TextBlock Text="只发送任务明确标记的正式最终回答。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="27,3,0,0"/>
+                    <StackPanel IsEnabled="{Binding MirrorRemindersEnabled}" Margin="0,14,0,0">
+                        <TextBlock Text="额外提醒（可选）" Style="{StaticResource FieldLabelStyle}"/>
+                        <CheckBox Content="需要我回答时提醒" IsChecked="{Binding MirrorInput}"/>
+                        <CheckBox Content="任务失败或被停止时提醒" IsChecked="{Binding MirrorError}" Margin="0,8,0,0"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding MirrorReminderStateText}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="27,5,0,0"/>
+                    <CheckBox Content="远程回复必须包含 #N 聊天编号" IsChecked="{Binding RequireThreadNumber}" Margin="0,14,0,0"/>
+                    <TextBlock Text="{Binding MirrorStatusText}" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,14,0,0"/>
+                    <Button Content="保存消息同步设置" Command="{Binding SaveCommand}" Style="{StaticResource PrimaryButtonStyle}" HorizontalAlignment="Left" Margin="0,16,0,0"/>
+                </StackPanel>
             </Border>
-        </StackPanel>
+        </Grid>
     </ScrollViewer>
 </UserControl>

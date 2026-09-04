@@ -966,6 +966,9 @@ func (s *Server) profileSetRunning(response http.ResponseWriter, request *http.R
 func writeProfileOperationError(response http.ResponseWriter, httpStatus int, code string, status channelprofiles.ProfileStatus, err error) {
 	message := bridgelog.Redact(err.Error())
 	if status.Platform == channelprofiles.PlatformQQ {
+		if classified := qqbot.ClassifyError(err); classified != "" && classified != "network_error" {
+			code = classified
+		}
 		message = qqbot.SafeErrorMessage(err)
 	}
 	writeJSON(response, httpStatus, map[string]any{

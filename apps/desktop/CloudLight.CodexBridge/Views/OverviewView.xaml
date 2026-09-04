@@ -1,41 +1,42 @@
 <UserControl x:Class="CloudLight.CodexBridge.Views.OverviewView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel MaxWidth="1180" HorizontalAlignment="Left">
-            <UniformGrid Columns="5" Margin="0,0,0,16">
-                <Border Style="{StaticResource MetricCardStyle}" Margin="0,0,12,0">
-                    <StackPanel><TextBlock Text="Codex" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding CodexState}" Style="{StaticResource MetricValueStyle}"/><TextBlock Text="{Binding SessionCount}" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
-                </Border>
-                <Border Style="{StaticResource MetricCardStyle}" Margin="0,0,12,0">
-                    <StackPanel><TextBlock Text="QQ 机器人" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding QqState}" Style="{StaticResource MetricValueStyle}"/><TextBlock Text="按聊天编号发送" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
-                </Border>
-                <Border Style="{StaticResource MetricCardStyle}" Margin="0,0,12,0">
-                    <StackPanel><TextBlock Text="Telegram" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding TelegramState}" Style="{StaticResource MetricValueStyle}"/><TextBlock Text="机器人与关联会话" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:CloudLight.CodexBridge.Controls">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+        <Grid MaxWidth="1480" HorizontalAlignment="Center">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <controls:ResponsiveCardPanel MinItemWidth="220" MaxColumns="5" Margin="0,0,0,16">
+                <Border Style="{StaticResource MetricCardStyle}">
+                    <StackPanel><TextBlock Text="Codex" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding CodexState}" Style="{StaticResource MetricValueStyle}" TextWrapping="Wrap"/><TextBlock Text="{Binding SessionCount}" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
                 </Border>
                 <Border Style="{StaticResource MetricCardStyle}">
-                    <StackPanel><TextBlock Text="消息同步" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding MirrorState}" Style="{StaticResource MetricValueStyle}"/><TextBlock Text="每次任务只发送最终回答" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
+                    <StackPanel><TextBlock Text="QQ 机器人" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding QqState}" Style="{StaticResource MetricValueStyle}" TextWrapping="Wrap"/><TextBlock Text="按聊天编号发送" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap"/></StackPanel>
                 </Border>
-                <Border Style="{StaticResource MetricCardStyle}" Margin="12,0,0,0">
+                <Border Style="{StaticResource MetricCardStyle}">
+                    <StackPanel><TextBlock Text="Telegram" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding TelegramState}" Style="{StaticResource MetricValueStyle}" TextWrapping="Wrap"/><TextBlock Text="机器人与关联会话" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap"/></StackPanel>
+                </Border>
+                <Border Style="{StaticResource MetricCardStyle}">
+                    <StackPanel><TextBlock Text="消息同步" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding MirrorState}" Style="{StaticResource MetricValueStyle}" TextWrapping="Wrap"/><TextBlock Text="正式回答与可选提醒" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap"/></StackPanel>
+                </Border>
+                <Border Style="{StaticResource MetricCardStyle}">
                     <StackPanel><TextBlock Text="任务中心" Style="{StaticResource EyebrowTextStyle}"/><TextBlock Text="{Binding TaskSummary}" Style="{StaticResource MetricValueStyle}" TextWrapping="Wrap"/><TextBlock Text="统一任务状态" Style="{StaticResource SecondaryTextStyle}"/></StackPanel>
                 </Border>
-            </UniformGrid>
-            <Grid>
-                <Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            </controls:ResponsiveCardPanel>
+            <controls:ResponsiveCardPanel Grid.Row="1" MinItemWidth="420" MaxColumns="2">
                 <Border Style="{StaticResource CardStyle}">
                     <StackPanel>
                         <TextBlock Text="当前工作区" Style="{StaticResource SectionTitleStyle}"/>
                         <TextBlock Text="当前会话" Style="{StaticResource EyebrowTextStyle}" Margin="0,18,0,4"/>
-                        <TextBox Text="{Binding CurrentThread, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}"/>
+                        <TextBlock Text="{Binding CurrentThread, Mode=OneWay}" TextWrapping="Wrap"/>
                         <Separator Margin="0,16"/>
                         <TextBlock Text="当前任务" Style="{StaticResource EyebrowTextStyle}"/>
-                        <TextBlock Text="{Binding RunningTurn}" FontSize="18" Margin="0,6,0,0"/>
+                        <TextBlock Text="{Binding RunningTurn}" FontSize="18" TextWrapping="Wrap" Margin="0,6,0,0"/>
                     </StackPanel>
                 </Border>
-                <Border Grid.Column="2" Style="{StaticResource CardStyle}">
+                <Border Style="{StaticResource CardStyle}">
                     <StackPanel>
                         <TextBlock Text="最近活动" Style="{StaticResource SectionTitleStyle}"/>
-                        <TextBox Text="{Binding RecentActivity, Mode=OneWay}" Style="{StaticResource ReadOnlyTextStyle}" Margin="0,16,0,0"/>
+                        <TextBlock Text="{Binding RecentActivity, Mode=OneWay}" TextWrapping="Wrap" Margin="0,16,0,0"/>
                         <TextBlock Text="最近任务" Style="{StaticResource EyebrowTextStyle}" Margin="0,18,0,4"/>
                         <ItemsControl ItemsSource="{Binding RecentTaskItems}" MaxHeight="180" ScrollViewer.VerticalScrollBarVisibility="Auto">
                             <ItemsControl.ItemTemplate>
@@ -45,7 +46,7 @@
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                             <StackPanel>
                                                 <TextBlock Text="{Binding Task.NumberLabel}" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                                <TextBlock Text="{Binding Task.Title}" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                                                <TextBlock Text="{Binding Task.Title}" TextWrapping="Wrap" Margin="0,2,0,0"/>
                                                 <TextBlock Text="{Binding Task.StatusDisplay}" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,2,0,0"/>
                                             </StackPanel>
                                             <Button Grid.Column="1" Content="{Binding QuickActionLabel}" Command="{Binding DataContext.QuickTaskActionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" Visibility="{Binding QuickActionVisibility}" Margin="8,0,0,0"/>
@@ -57,7 +58,7 @@
                         <TextBlock Text="首页仅保留运行概况。渠道凭据、同步目标和高级设置分别在对应页面管理。" Style="{StaticResource SecondaryTextStyle}" TextWrapping="Wrap" Margin="0,18,0,0"/>
                     </StackPanel>
                 </Border>
-            </Grid>
-        </StackPanel>
+            </controls:ResponsiveCardPanel>
+        </Grid>
     </ScrollViewer>
 </UserControl>

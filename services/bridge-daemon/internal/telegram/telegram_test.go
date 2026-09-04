@@ -46,7 +46,7 @@ func TestAdapterAllowlistDedupAndTopicRoute(t *testing.T) {
 	adapter.mu.Lock()
 	adapter.status.BotID = "99"
 	adapter.mu.Unlock()
-	valid := Update{UpdateID: 7, Message: &Message{MessageID: 8, MessageThreadID: 9, From: &User{ID: 42}, Chat: Chat{ID: -1001}, Text: "hello"}}
+	valid := Update{UpdateID: 7, Message: &Message{MessageID: 8, MessageThreadID: 9, From: &User{ID: 42, Username: "cloud_user", FirstName: "Cloud", LastName: "Light"}, Chat: Chat{ID: -1001, Type: "private", FirstName: "Cloud", LastName: "Light"}, Text: "hello"}}
 	adapter.handleUpdate(context.Background(), valid, 99)
 	adapter.handleUpdate(context.Background(), valid, 99)
 	adapter.handleUpdate(context.Background(), Update{UpdateID: 8, Message: &Message{From: &User{ID: 43}, Chat: Chat{ID: -1001}, Text: "blocked"}}, 99)
@@ -58,6 +58,17 @@ func TestAdapterAllowlistDedupAndTopicRoute(t *testing.T) {
 	}
 	if received[0].Address.ChatID != "-1001" || received[0].Address.TopicID != "9" || received[0].UserID != "42" {
 		t.Fatalf("unexpected route: %#v", received[0])
+	}
+	status := adapter.TelegramStatus()
+	var foundValid bool
+	for _, identity := range status.RecentIdentities {
+		if identity.UserID == 42 && identity.ChatID == -1001 && identity.FirstName == "Cloud" && identity.LastName == "Light" && identity.DisplayName == "Cloud Light" &&
+			identity.ChatTitle == "Cloud Light" && identity.Username == "cloud_user" && identity.LastSeenAt != "" {
+			foundValid = true
+		}
+	}
+	if len(status.RecentIdentities) != 2 || !foundValid {
+		t.Fatalf("unexpected recent identity: %#v", status.RecentIdentities)
 	}
 }
 
@@ -86,6 +97,30 @@ func TestConfigureDeduplicatesAllowlist(t *testing.T) {
 	}
 	if len(status.AllowedUserIDs) != 1 || status.AllowedUserIDs[0] != 42 {
 		t.Fatalf("allowlist was not deduplicated: %#v", status.AllowedUserIDs)
+	}
+}
+
+func TestConfigureUpdatesOptionsWhileRunningWithoutReplacingToken(t *testing.T) {
+	adapter := NewAdapter(nil)
+	token := "123:secret"
+	if _, err := adapter.Configure(ConfigureRequest{Token: &token, AllowedUserIDs: []int64{42}, PollingTimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	adapter.status.Running = true
+	adapter.status.Connected = true
+	adapter.mu.Unlock()
+
+	status, err := adapter.Configure(ConfigureRequest{AllowedUserIDs: []int64{43}, PollingTimeoutSeconds: 45, ProxyMode: ProxyModeDirect})
+	if err != nil {
+		t.Fatalf("ordinary option change while running failed: %v", err)
+	}
+	if status.AllowedUserCount != 1 || status.AllowedUserIDs[0] != 43 || status.ProxyMode != ProxyModeDirect || !status.Running {
+		t.Fatalf("unexpected status after ordinary option change: %#v", status)
+	}
+	newToken := "456:new-secret"
+	if _, err := adapter.Configure(ConfigureRequest{Token: &newToken, AllowedUserIDs: []int64{43}, PollingTimeoutSeconds: 45}); err == nil {
+		t.Fatal("replacing the token while running must still require a controlled stop")
 	}
 }
 
