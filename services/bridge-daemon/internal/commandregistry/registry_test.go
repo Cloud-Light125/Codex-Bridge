@@ -188,6 +188,33 @@ func TestBackendCapabilitiesFilterCommandsAndHelp(t *testing.T) {
 	}
 }
 
+func TestHelpTextIsCompleteAndReadable(t *testing.T) {
+	help := NewInMemory().HelpText()
+	for _, want := range []string{
+		"CloudLight Codex Bridge 指令帮助",
+		"当前后端：Codex",
+		"参数说明：",
+		"【会话与绑定】",
+		"【运行与输出】",
+		"【Task Center 任务】",
+		"/output [聊天编号或任务编号]",
+		"/last-output [聊天编号或任务编号]",
+		"/recent-projects [数量]",
+		"/project-chats <项目> [数量]",
+		"/tasks [状态]",
+		"常用示例：",
+		"/status #12",
+		"/new demo 修复统计页面",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help is missing %q:\n%s", want, help)
+		}
+	}
+	if strings.Contains(help, "/oc-refresh") {
+		t.Fatal("Codex help included an OpenClaw-only command")
+	}
+}
+
 func containsCommand(commands []Definition, name string) bool {
 	for _, command := range commands {
 		if command.Name == name {

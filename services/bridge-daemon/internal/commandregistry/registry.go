@@ -196,7 +196,7 @@ func DefaultActions() []ActionDefinition {
 func BuiltInDefaults() []DefaultCommandDefinition {
 	return []DefaultCommandDefinition{
 		{ID: "builtin.start", DefaultName: "/start", DefaultDisplayName: "开始使用", DefaultDescription: "查看机器人是否可用及当前绑定状态", DefaultAction: ActionBridgeStart, DefaultEnabled: true, DefaultTelegramMenuLabel: "开始使用"},
-		{ID: "builtin.help", DefaultName: "/help", DefaultDisplayName: "指令帮助", DefaultDescription: "查看当前已启用的远程指令", DefaultAction: ActionBridgeHelp, DefaultAliases: []string{"/commands"}, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看指令帮助"},
+		{ID: "builtin.help", DefaultName: "/help", DefaultDisplayName: "指令帮助", DefaultDescription: "按功能分组显示当前已启用的指令、参数、别名和常用示例", DefaultAction: ActionBridgeHelp, DefaultAliases: []string{"/commands"}, DefaultEnabled: true, DefaultTelegramMenuLabel: "查看指令帮助"},
 		{ID: "builtin.status", DefaultName: "/status", DefaultDisplayName: "查看状态", DefaultDescription: "查看 Bridge 与当前后端连接状态；配合 #编号查看指定会话", DefaultAction: ActionBridgeStatus, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号]", DefaultTelegramMenuLabel: "查看连接状态"},
 		{ID: "builtin.threads", DefaultName: "/threads", DefaultDisplayName: "查看会话列表", DefaultDescription: "查看当前后端的会话编号、标题和状态", DefaultAction: ActionThreadsList, DefaultEnabled: true, DefaultParameterHelp: "[页码]", DefaultTelegramMenuLabel: "查看会话列表"},
 		{ID: "builtin.thread", DefaultName: "/thread", DefaultDisplayName: "会话详情", DefaultDescription: "查看当前后端指定或当前会话的状态、模型和更新时间", DefaultAction: ActionThreadInfo, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号]", DefaultTelegramMenuLabel: "查看会话详情"},
@@ -222,10 +222,10 @@ func BuiltInDefaults() []DefaultCommandDefinition {
 		{ID: "builtin.confirm", DefaultName: "/confirm", DefaultDisplayName: "确认快捷操作", DefaultDescription: "确认短期有效的高风险任务快捷操作", DefaultAction: ActionTaskConfirm, DefaultEnabled: true, DefaultParameterHelp: "<action-id>", DefaultTelegramMenuLabel: "确认快捷操作"},
 		{ID: "builtin.projects", DefaultName: "/projects", DefaultDisplayName: "项目列表", DefaultDescription: "查看可用 Project 及默认 Backend", DefaultAction: ActionProjectsList, DefaultEnabled: true, DefaultTelegramMenuLabel: "项目列表"},
 		{ID: "builtin.project", DefaultName: "/project", DefaultDisplayName: "项目上下文", DefaultDescription: "查看或切换当前远程聊天的 Project 上下文", DefaultAction: ActionProjectSelect, DefaultEnabled: true, DefaultParameterHelp: "[项目别名]", DefaultTelegramMenuLabel: "项目上下文"},
-		{ID: "builtin.output", DefaultName: "/output", DefaultDisplayName: "当前运行输出", DefaultDescription: "查看指定会话或任务当前这一轮截至现在的完整输出", DefaultAction: ActionCurrentOutput, DefaultEnabled: true, DefaultParameterHelp: "<聊天编号或任务编号>", DefaultTelegramMenuLabel: "当前运行输出"},
-		{ID: "builtin.last-output", DefaultName: "/last-output", DefaultDisplayName: "上次运行输出", DefaultDescription: "查看指定会话或任务上一轮的完整输出", DefaultAction: ActionLastOutput, DefaultEnabled: true, DefaultParameterHelp: "<聊天编号或任务编号>", DefaultTelegramMenuLabel: "上次运行输出"},
-		{ID: "builtin.recent-projects", DefaultName: "/recent-projects", DefaultDisplayName: "最近项目", DefaultDescription: "查看最近使用的项目", DefaultAction: ActionRecentProjects, DefaultEnabled: true, DefaultParameterHelp: "[数量]", DefaultTelegramMenuLabel: "最近项目"},
-		{ID: "builtin.project-chats", DefaultName: "/project-chats", DefaultDisplayName: "项目最近会话", DefaultDescription: "查看指定项目最近的 Codex/OpenClaw 会话", DefaultAction: ActionProjectChats, DefaultEnabled: true, DefaultParameterHelp: "<项目> [数量]", DefaultTelegramMenuLabel: "项目最近会话"},
+		{ID: "builtin.output", DefaultName: "/output", DefaultDisplayName: "当前运行输出", DefaultDescription: "查看指定会话或任务当前这一轮截至现在的完整输出；已绑定会话可以省略目标", DefaultAction: ActionCurrentOutput, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号或任务编号]", DefaultTelegramMenuLabel: "当前运行输出"},
+		{ID: "builtin.last-output", DefaultName: "/last-output", DefaultDisplayName: "上次运行输出", DefaultDescription: "查看指定会话或任务上一轮的完整输出；已绑定会话可以省略目标", DefaultAction: ActionLastOutput, DefaultEnabled: true, DefaultParameterHelp: "[聊天编号或任务编号]", DefaultTelegramMenuLabel: "上次运行输出"},
+		{ID: "builtin.recent-projects", DefaultName: "/recent-projects", DefaultDisplayName: "最近项目", DefaultDescription: "只读汇总已配置项目、最近 Codex 会话和 OpenClaw Session 中出现的项目", DefaultAction: ActionRecentProjects, DefaultEnabled: true, DefaultParameterHelp: "[数量]", DefaultTelegramMenuLabel: "最近项目"},
+		{ID: "builtin.project-chats", DefaultName: "/project-chats", DefaultDisplayName: "项目最近会话", DefaultDescription: "只读查看指定项目最近的 Codex/OpenClaw 会话；项目名或 Windows 路径含空格时请加双引号", DefaultAction: ActionProjectChats, DefaultEnabled: true, DefaultParameterHelp: "<项目> [数量]", DefaultTelegramMenuLabel: "项目最近会话"},
 	}
 }
 
@@ -543,26 +543,104 @@ func (r *Registry) HelpTextForBackend(backend string) string {
 }
 
 func (r *Registry) helpTextForDefinitions(list []Definition, backend string) string {
-	lines := []string{"可用指令："}
+	lines := []string{
+		"CloudLight Codex Bridge 指令帮助",
+		"当前后端：" + helpBackendName(backend),
+		"",
+		"参数说明：<内容> 表示必填，[内容] 表示可选；聊天编号可写成 #N，任务编号可写成 T<N>；项目名或 Windows 路径含空格时请使用双引号。",
+	}
+	sectionOrder := []string{"连接与状态", "会话与绑定", "运行与输出", "停止与取消", "Task Center 任务", "项目与会话查询", "账户与 OpenClaw", "其他指令"}
+	grouped := make(map[string][]Definition, len(sectionOrder))
 	for _, item := range list {
 		if !item.Enabled {
 			continue
 		}
-		line := item.Name
-		if item.ParameterHelp != "" {
-			line += " " + item.ParameterHelp
-		}
-		lines = append(lines, "", line)
-		if len(item.Aliases) > 0 {
-			lines = append(lines, "别名："+strings.Join(item.Aliases, "、"))
-		}
-		lines = append(lines, item.Description)
+		section := helpSectionForAction(item.Action)
+		grouped[section] = append(grouped[section], item)
 	}
-	sample := "#63 继续修改这个功能"
-	if normalizeBackendCapability(backend) == BackendCapabilityOpenClaw {
-		sample = "#12 继续处理这个任务"
+	for _, section := range sectionOrder {
+		items := grouped[section]
+		if len(items) == 0 {
+			continue
+		}
+		lines = append(lines, "", "【"+section+"】")
+		for _, item := range items {
+			line := item.Name
+			if item.ParameterHelp != "" {
+				line += " " + item.ParameterHelp
+			}
+			description := strings.TrimSpace(item.Description)
+			if description == "" {
+				description = strings.TrimSpace(item.DisplayName)
+			}
+			if description != "" {
+				line += " — " + description
+			}
+			lines = append(lines, line)
+			if len(item.Aliases) > 0 {
+				lines = append(lines, "别名："+strings.Join(item.Aliases, "、"))
+			}
+		}
 	}
-	return strings.Join(append(lines, "", "发送任务：", sample), "\n")
+	lines = append(lines, "", "常用示例：")
+	lines = append(lines, helpExamples(backend)...)
+	lines = append(lines, "", "提示：状态、会话、输出和项目查询不会创建新任务；普通文本会发送到当前绑定会话。停止、取消、创建、继续、重试和快捷操作会改变任务状态。")
+	return strings.Join(lines, "\n")
+}
+
+func helpBackendName(backend string) string {
+	switch normalizeBackendCapability(backend) {
+	case BackendCapabilityOpenClaw:
+		return "OpenClaw"
+	case BackendCapabilityBoth:
+		return "Codex + OpenClaw"
+	default:
+		return "Codex"
+	}
+}
+
+func helpSectionForAction(action string) string {
+	switch action {
+	case ActionBridgeStart, ActionBridgeHelp, ActionBridgeStatus:
+		return "连接与状态"
+	case ActionThreadsList, ActionThreadInfo, ActionThreadHistory, ActionThreadBind, ActionThreadUnbind, ActionThreadCurrent:
+		return "会话与绑定"
+	case ActionThreadRunning, ActionThreadWaiting, ActionThreadRecent, ActionThreadFailed, ActionCurrentOutput, ActionLastOutput:
+		return "运行与输出"
+	case ActionThreadStop, ActionInteractionCancel, ActionTaskCancel:
+		return "停止与取消"
+	case ActionTasksList, ActionTaskInfo, ActionTaskNew, ActionTaskContinue, ActionTaskRetry, ActionTaskActions, ActionTaskAction, ActionTaskConfirm:
+		return "Task Center 任务"
+	case ActionProjectsList, ActionProjectSelect, ActionRecentProjects, ActionProjectChats:
+		return "项目与会话查询"
+	case ActionAccountQuota:
+		return "账户与 OpenClaw"
+	case ActionOpenClawRefresh:
+		return "账户与 OpenClaw"
+	default:
+		return "其他指令"
+	}
+}
+
+func helpExamples(backend string) []string {
+	examples := []string{
+		"/threads",
+		"/status #12",
+		"/bind 12",
+		"/current",
+		"/output #12",
+		"/last-output #12",
+		"/recent-projects 5",
+		"/project-chats \"D:\\code\\My Project\" 5",
+	}
+	normalized := normalizeBackendCapability(backend)
+	if normalized == BackendCapabilityCodex || normalized == BackendCapabilityBoth {
+		examples = append(examples, "/running", "/waiting", "/tasks running", "/new demo 修复统计页面")
+	}
+	if normalized == BackendCapabilityOpenClaw || normalized == BackendCapabilityBoth {
+		examples = append(examples, "/oc-refresh", "/bind oc:agent:main:main")
+	}
+	return examples
 }
 
 func (r *Registry) SupportsTarget(action string) bool {

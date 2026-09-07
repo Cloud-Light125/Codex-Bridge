@@ -2,7 +2,7 @@
 
 CloudLight Codex Bridge 是面向 Windows 的 Codex 与 OpenClaw 桌面助手。它可以浏览并继续现有 Codex 会话，也可以通过 OpenClaw Gateway 选择已有 Session；Telegram 或 QQ 机器人始终由 Bridge 统一接收消息，再转发给选定后端。
 
-当前版本：`1.3.2`
+当前版本：`1.3.3`
 
 ## 主要能力
 
@@ -28,22 +28,22 @@ CloudLight Codex Bridge 是面向 Windows 的 Codex 与 OpenClaw 桌面助手。
 
 ## 下载与安装
 
-1.3.2 的发布目录：
+1.3.3 的发布目录：
 
 ```text
-artifacts\win-x64-1.3.2
+artifacts\win-x64-1.3.3
 ```
 
 完整安装包：
 
 ```text
-artifacts\win-x64-1.3.2\CloudLight-CodexBridge-Setup-1.3.2-win-x64.exe
+artifacts\win-x64-1.3.3\CloudLight-CodexBridge-Setup-1.3.3-win-x64.exe
 ```
 
 便携版可以直接运行：
 
 ```text
-artifacts\win-x64-1.3.2\CloudLight.CodexBridge.exe
+artifacts\win-x64-1.3.3\CloudLight.CodexBridge.exe
 ```
 
 安装器只为当前 Windows 用户安装，不需要管理员权限。卸载软件不会删除 Codex 数据、应用设置、关联会话、聊天编号、日志或已保存的机器人密钥。
@@ -126,10 +126,25 @@ artifacts\win-x64-1.3.2\CloudLight.CodexBridge.exe
 | `/current` | 查看当前关联会话 |
 | `/stop` | 停止当前聊天发起的任务 |
 | `/cancel` | 取消当前正在等待的回答 |
+| `/tasks [状态]` | 查看 Task Center 任务，可筛选 `running`、`waiting`、`failed`、`completed` |
+| `/task <任务编号>` | 查看任务状态、会话、结果和摘要 |
+| `/new <项目别名> <任务内容>` | 按项目创建并启动任务 |
+| `/continue <任务编号> <继续内容>` | 在原项目和会话上继续任务 |
+| `/retry <任务编号>` | 重试失败或中断的任务 |
+| `/actions <任务编号>` | 查看任务当前可用的快捷操作 |
+| `/action <任务编号> <操作> [参数]` | 执行任务快捷操作；高风险操作需要确认 |
+| `/confirm <action-id>` | 确认高风险快捷操作 |
+| `/projects` | 查看可用项目和默认后端 |
+| `/project [项目别名]` | 查看或切换当前聊天的项目上下文 |
+| `/output [编号或 T<任务编号>]` | 查看当前运行这一轮截至现在的完整输出 |
+| `/last-output [编号或 T<任务编号>]` | 查看上一轮完整输出 |
+| `/recent-projects [数量]` | 只读查看最近使用的项目 |
+| `/project-chats <项目> [数量]` | 查看指定项目最近的 Codex/OpenClaw 会话 |
+| `/oc-refresh` | OpenClaw 专属：刷新 Session 列表 |
 
-这些是首次启动时自动加载并默认锁定的系统指令。“指令”页面可以逐条解锁、改名、添加别名、停用或恢复，也可以创建任意数量映射到受支持功能的自定义指令。QQ 与 Telegram 始终读取同一个有效配置；中文指令即使不符合 Telegram 菜单规则，仍可直接在聊天文本中使用。
+这些是首次启动时自动加载并默认锁定的系统指令。发送 `/help` 会按“连接与状态”“会话与绑定”“运行与输出”“Task Center 任务”“项目与会话查询”等分组显示当前后端可用命令、参数格式、别名和示例。“指令”页面可以逐条解锁、改名、添加别名、停用或恢复，也可以创建任意数量映射到受支持功能的自定义指令。QQ 与 Telegram 始终读取同一个有效配置；中文指令即使不符合 Telegram 菜单规则，仍可直接在聊天文本中使用。
 
-`/threads`、`/thread`、`/history`、`/running`、`/waiting`、`/recent`、`/failed`、`/quota` 和 `/status` 均由 Bridge 在本地直接查询，不会向 Codex 提交新任务、创建 User Message、改变会话或推进消息同步游标。查询命令不要求当前聊天先执行 `/bind`，但仍沿用 QQ 与 Telegram 已配置的允许账号列表。
+`/threads`、`/thread`、`/history`、`/running`、`/waiting`、`/recent`、`/failed`、`/quota`、`/status`、`/output`、`/last-output`、`/recent-projects` 和 `/project-chats` 均由 Bridge 在本地直接查询，不会向 Codex 提交新任务、创建 User Message、改变会话或推进消息同步游标。查询命令不要求当前聊天先执行 `/bind`，但仍沿用 QQ 与 Telegram 已配置的允许账号列表。带空格的项目名或 Windows 路径请使用双引号，例如：`/project-chats "D:\\code\\My Project" 5`。
 
 `/threads` 也会列出当前可用的 OpenClaw Session。Codex Thread 与 OpenClaw Session 共用同一个全局 `#N` 编号；绑定时也继续支持完整 Session Key：
 
@@ -203,13 +218,13 @@ QQ 配置中仍会使用 OpenID，这是 QQ 开放平台提供的用户或群聊
 
 开发环境与构建说明见 [docs/development.md](docs/development.md)，架构说明见 [docs/architecture.md](docs/architecture.md)。
 
-生成 1.3.2 Release：
+生成 1.3.3 Release：
 
 ```powershell
-.\scripts\build.ps1 -Version 1.3.2
+.\scripts\build.ps1 -Version 1.3.3
 ```
 
-脚本输出到 `artifacts\win-x64-1.3.2`，并拒绝覆盖已存在的版本目录。构建不会执行 Git 提交、标签或推送。
+脚本输出到 `artifacts\win-x64-1.3.3`，并拒绝覆盖已存在的版本目录。构建不会执行 Git 提交、标签或推送。
 
 ## 许可证与第三方说明
 
@@ -220,4 +235,4 @@ QQ 配置中仍会使用 OpenID，这是 QQ 开放平台提供的用户或群聊
 - [licenses/gorilla-websocket-LICENSE.txt](licenses/gorilla-websocket-LICENSE.txt)
 - [docs/upstream-sources.md](docs/upstream-sources.md)
 
-1.3.2 安装包尚未进行商业代码签名，也不包含自动更新。
+1.3.3 安装包尚未进行商业代码签名，也不包含自动更新。

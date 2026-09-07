@@ -3,6 +3,7 @@ package qq
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,6 +117,26 @@ func newServiceFixture(t *testing.T, controlService Control, runtime Runtime) (*
 		flows: make(map[string]*interactionFlow), flowByInput: make(map[string]string),
 	}
 	return service, adapter, repository
+}
+
+func TestLegacyQQHelpUsesCompleteSharedCommandHelp(t *testing.T) {
+	service, adapter, _ := newServiceFixture(t, &fakeControl{}, &fakeRuntime{})
+	service.handleCommand(context.Background(), channels.InboundMessage{Address: channels.ChannelAddress{ChannelType: "qq", AccountID: "100", ConversationType: "private", ChatID: "200"}}, "/help")
+	if len(adapter.sent) == 0 {
+		t.Fatal("legacy QQ /help did not send a response")
+	}
+	help := strings.Join(func() []string {
+		parts := make([]string, 0, len(adapter.sent))
+		for _, message := range adapter.sent {
+			parts = append(parts, message.Text)
+		}
+		return parts
+	}(), "\n")
+	for _, want := range []string{"/output", "/last-output", "/recent-projects", "/project-chats", "/tasks", "常用示例："} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("shared QQ help is missing %q:\n%s", want, help)
+		}
+	}
 }
 
 func TestThreadsCacheAndBindAreConversationScoped(t *testing.T) {

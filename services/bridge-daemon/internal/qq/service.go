@@ -14,6 +14,7 @@ import (
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/bindings"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/channels"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/commandregistry"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
@@ -268,8 +269,8 @@ func (s *Service) handleCommand(ctx context.Context, message channels.InboundMes
 		} else {
 			s.send(ctx, message.Address, "Codex Bridge 已就绪。当前会话尚未绑定。\n使用 /threads 查看最近会话，再用 /bind 1 绑定。")
 		}
-	case "/help":
-		s.send(ctx, message.Address, "可用命令：\n/threads 最近的 Thread\n/bind <序号、完整 ID 或唯一前缀> 绑定\n/unbind 解除绑定\n/current 当前绑定\n/status 运行状态\n/stop 停止由本 QQ 会话发起的任务\n/cancel 取消正在等待的 QQ 用户输入")
+	case "/help", "/commands":
+		s.send(ctx, message.Address, commandregistry.NewInMemory().HelpText())
 	case "/status":
 		s.status(ctx, message)
 	case "/threads":
