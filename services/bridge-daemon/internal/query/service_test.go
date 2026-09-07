@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,9 +19,11 @@ import (
 )
 
 type fakeControl struct {
+	mu                    sync.Mutex
 	threads               []control.ThreadSummary
 	details               map[string]control.ThreadDetail
 	historyLimits         []int
+	turnOutputCalls       []string
 	activityCalls         int
 	activityHistoryLimits []int
 }
@@ -77,12 +80,23 @@ func (f *fakeControl) ReadThread(_ context.Context, threadID string, _ bool) (co
 }
 
 func (f *fakeControl) ReadThreadHistory(ctx context.Context, threadID string, limit int) (control.ThreadDetail, error) {
+	f.mu.Lock()
 	f.historyLimits = append(f.historyLimits, limit)
+	f.mu.Unlock()
 	return f.ReadThread(ctx, threadID, true)
 }
 
+func (f *fakeControl) ReadThreadTurnOutput(_ context.Context, threadID, turnID string) (control.ThreadDetail, error) {
+	f.mu.Lock()
+	f.turnOutputCalls = append(f.turnOutputCalls, threadID+"/"+turnID)
+	f.mu.Unlock()
+	return f.details[threadID], nil
+}
+
 func (f *fakeControl) ReadThreadActivity(ctx context.Context, threadID string) (control.ThreadDetail, error) {
+	f.mu.Lock()
 	f.activityCalls++
+	f.mu.Unlock()
 	detail, err := f.ReadThread(ctx, threadID, false)
 	if len(detail.Turns) > 1 {
 		detail.Turns = detail.Turns[len(detail.Turns)-1:]
@@ -91,7 +105,9 @@ func (f *fakeControl) ReadThreadActivity(ctx context.Context, threadID string) (
 }
 
 func (f *fakeControl) ReadThreadActivityHistory(ctx context.Context, threadID string, limit int) (control.ThreadDetail, error) {
+	f.mu.Lock()
 	f.activityHistoryLimits = append(f.activityHistoryLimits, limit)
+	f.mu.Unlock()
 	detail, err := f.ReadThread(ctx, threadID, false)
 	for index := range detail.Turns {
 		detail.Turns[index].Items = nil
@@ -180,6 +196,52 @@ func TestHistoryDoesNotUseUnphasedAssistantForPaginatedThreads(t *testing.T) {
 	_, assistant = historyTexts(turn, control.FinalSelectionModePaginated)
 	if assistant != "CORRECT-FINAL" {
 		t.Fatalf("paginated history did not select explicit final: %q", assistant)
+	}
+}
+
+func TestOutputReadsOneTurnAndKeepsActiveQueriesSeparateFromLastOutput(t *testing.T) {
+	thread := control.ThreadSummary{ThreadID: "output-thread", Title: "输出测试", Number: 1}
+	registry := newRegistry(t, []control.ThreadSummary{thread})
+	controlService := &fakeControl{threads: []control.ThreadSummary{thread}, details: map[string]control.ThreadDetail{
+		thread.ThreadID: {ThreadSummary: thread, Turns: []control.Turn{{TurnID: "turn-live", Status: "inProgress", Items: []control.Item{
+			{Type: "agentMessage", Phase: "commentary", Text: "实时进度"},
+			{Type: "agentMessage", Phase: "final_answer", Text: "当前回答"},
+		}}}},
+	}}
+	runtime := &fakeRuntime{states: map[string]control.RuntimeState{thread.ThreadID: {State: bridgeruntime.StateRunning, TurnID: "turn-live"}}}
+	service := New(controlService, runtime, registry)
+	current, handled := service.Execute(context.Background(), "/output #1")
+	if !handled || !strings.Contains(strings.Join(current.Parts, "\n"), "实时进度") || !strings.Contains(strings.Join(current.Parts, "\n"), "当前回答") {
+		t.Fatalf("current output was incomplete: %#v", current)
+	}
+	if len(controlService.turnOutputCalls) != 1 || controlService.turnOutputCalls[0] != "output-thread/turn-live" || len(controlService.historyLimits) != 0 {
+		t.Fatalf("output query did not use the single-Turn reader: turn=%#v history=%#v", controlService.turnOutputCalls, controlService.historyLimits)
+	}
+	runtime.states[thread.ThreadID] = control.RuntimeState{State: bridgeruntime.StateIdle, TurnID: "turn-live", LastTurnResult: "completed"}
+	last, handled := service.Execute(context.Background(), "/last-output #1")
+	if !handled || !strings.Contains(strings.Join(last.Parts, "\n"), "当前回答") {
+		t.Fatalf("last output was not recovered: %#v", last)
+	}
+}
+
+func TestProjectQueriesNormalizePathsAndReportAmbiguity(t *testing.T) {
+	threads := []control.ThreadSummary{
+		{ThreadID: "project-a", Number: 1, Title: "A", CWD: `D:\Work\Repo`, UpdatedAt: "2026-09-07T01:00:00Z"},
+		{ThreadID: "project-b", Number: 2, Title: "B", CWD: `E:\Work\Repo`, UpdatedAt: "2026-09-07T02:00:00Z"},
+	}
+	registry := newRegistry(t, threads)
+	service := New(&fakeControl{threads: threads, details: map[string]control.ThreadDetail{}}, &fakeRuntime{states: map[string]control.RuntimeState{}}, registry)
+	projects, handled := service.Execute(context.Background(), "/recent-projects 5")
+	if !handled || !strings.Contains(strings.Join(projects.Parts, "\n"), `D:\Work\Repo`) || !strings.Contains(strings.Join(projects.Parts, "\n"), `E:\Work\Repo`) {
+		t.Fatalf("recent projects omitted observed working directories: %#v", projects)
+	}
+	ambiguous, handled := service.Execute(context.Background(), `/project-chats Repo 5`)
+	if !handled || !strings.Contains(ambiguous.Parts[0], "多个工作目录") {
+		t.Fatalf("duplicate project basename was not reported as ambiguous: %#v", ambiguous)
+	}
+	selected, handled := service.Execute(context.Background(), `/project-chats "d:\\work\\repo" 1`)
+	if !handled || !strings.Contains(selected.Parts[0], "项目 Repo 最近会话") || !strings.Contains(selected.Parts[0], "#1") {
+		t.Fatalf("case-insensitive path lookup failed: %#v", selected)
 	}
 }
 

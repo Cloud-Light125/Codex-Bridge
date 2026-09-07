@@ -90,3 +90,16 @@ func TestNormalizePaginatedThreadShapesPreservesTurnStateAndPhases(t *testing.T)
 		t.Fatalf("message phases/items were not preserved: %#v", turn.Items)
 	}
 }
+
+func TestNormalizeThreadDetailSortsTurnsChronologically(t *testing.T) {
+	detail := normalizeThreadDetail(map[string]any{"thread": map[string]any{
+		"id": "thread-order", "historyMode": "paginated",
+		"turns": []map[string]any{
+			{"id": "turn-new", "status": "completed", "createdAt": "2026-09-07T00:02:00Z"},
+			{"id": "turn-old", "status": "completed", "createdAt": "2026-09-07T00:01:00Z"},
+		},
+	}})
+	if len(detail.Turns) != 2 || detail.Turns[0].TurnID != "turn-old" || detail.Turns[1].TurnID != "turn-new" {
+		t.Fatalf("turns were not normalized to ASC order: %#v", detail.Turns)
+	}
+}

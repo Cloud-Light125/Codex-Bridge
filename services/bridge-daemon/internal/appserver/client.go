@@ -297,6 +297,12 @@ func (c *Client) ThreadReadHistory(ctx context.Context, threadID string, limit i
 	return c.history.ReadThread(ctx, threadID, limit)
 }
 
+// ThreadReadTurn reads one Turn's paginated items without hydrating the rest
+// of the Thread. It is used by explicit user queries such as /last-output.
+func (c *Client) ThreadReadTurn(ctx context.Context, threadID, turnID string) (map[string]any, error) {
+	return c.history.ReadTurn(ctx, threadID, turnID)
+}
+
 // ThreadReadActivity reads metadata and, for paginated threads, only the
 // newest Turn without Items. It is intended for list/status refreshes.
 func (c *Client) ThreadReadActivity(ctx context.Context, threadID string) (map[string]any, error) {

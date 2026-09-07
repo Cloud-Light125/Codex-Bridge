@@ -45,6 +45,10 @@ const (
 	ActionTaskConfirm       = "task.confirm"
 	ActionProjectsList      = "projects.list"
 	ActionProjectSelect     = "project.select"
+	ActionCurrentOutput     = "output.current"
+	ActionLastOutput        = "output.last"
+	ActionRecentProjects    = "projects.recent"
+	ActionProjectChats      = "project.chats"
 )
 
 const (
@@ -182,6 +186,10 @@ func DefaultActions() []ActionDefinition {
 		{ID: ActionTaskConfirm, DisplayName: "确认任务快捷操作", BackendCapability: BackendCapabilityBoth},
 		{ID: ActionProjectsList, DisplayName: "查看项目列表", BackendCapability: BackendCapabilityBoth},
 		{ID: ActionProjectSelect, DisplayName: "切换项目上下文", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionCurrentOutput, DisplayName: "查看当前运行输出", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
+		{ID: ActionLastOutput, DisplayName: "查看上次运行输出", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
+		{ID: ActionRecentProjects, DisplayName: "查看最近项目", BackendCapability: BackendCapabilityBoth},
+		{ID: ActionProjectChats, DisplayName: "查看项目最近会话", TargetSupport: true, BackendCapability: BackendCapabilityBoth},
 	}
 }
 
@@ -214,6 +222,10 @@ func BuiltInDefaults() []DefaultCommandDefinition {
 		{ID: "builtin.confirm", DefaultName: "/confirm", DefaultDisplayName: "确认快捷操作", DefaultDescription: "确认短期有效的高风险任务快捷操作", DefaultAction: ActionTaskConfirm, DefaultEnabled: true, DefaultParameterHelp: "<action-id>", DefaultTelegramMenuLabel: "确认快捷操作"},
 		{ID: "builtin.projects", DefaultName: "/projects", DefaultDisplayName: "项目列表", DefaultDescription: "查看可用 Project 及默认 Backend", DefaultAction: ActionProjectsList, DefaultEnabled: true, DefaultTelegramMenuLabel: "项目列表"},
 		{ID: "builtin.project", DefaultName: "/project", DefaultDisplayName: "项目上下文", DefaultDescription: "查看或切换当前远程聊天的 Project 上下文", DefaultAction: ActionProjectSelect, DefaultEnabled: true, DefaultParameterHelp: "[项目别名]", DefaultTelegramMenuLabel: "项目上下文"},
+		{ID: "builtin.output", DefaultName: "/output", DefaultDisplayName: "当前运行输出", DefaultDescription: "查看指定会话或任务当前这一轮截至现在的完整输出", DefaultAction: ActionCurrentOutput, DefaultEnabled: true, DefaultParameterHelp: "<聊天编号或任务编号>", DefaultTelegramMenuLabel: "当前运行输出"},
+		{ID: "builtin.last-output", DefaultName: "/last-output", DefaultDisplayName: "上次运行输出", DefaultDescription: "查看指定会话或任务上一轮的完整输出", DefaultAction: ActionLastOutput, DefaultEnabled: true, DefaultParameterHelp: "<聊天编号或任务编号>", DefaultTelegramMenuLabel: "上次运行输出"},
+		{ID: "builtin.recent-projects", DefaultName: "/recent-projects", DefaultDisplayName: "最近项目", DefaultDescription: "查看最近使用的项目", DefaultAction: ActionRecentProjects, DefaultEnabled: true, DefaultParameterHelp: "[数量]", DefaultTelegramMenuLabel: "最近项目"},
+		{ID: "builtin.project-chats", DefaultName: "/project-chats", DefaultDisplayName: "项目最近会话", DefaultDescription: "查看指定项目最近的 Codex/OpenClaw 会话", DefaultAction: ActionProjectChats, DefaultEnabled: true, DefaultParameterHelp: "<项目> [数量]", DefaultTelegramMenuLabel: "项目最近会话"},
 	}
 }
 
@@ -271,7 +283,7 @@ func (r *Registry) ListForBackend(backend string) ListResponse {
 }
 
 func (r *Registry) Resolve(text string) (Invocation, bool) {
-	fields := strings.Fields(strings.TrimSpace(text))
+	fields := parseCommandFields(text)
 	if len(fields) == 0 {
 		return Invocation{}, false
 	}
@@ -287,6 +299,66 @@ func (r *Registry) Resolve(text string) (Invocation, bool) {
 		}
 	}
 	return Invocation{}, false
+}
+
+// parseCommandFields preserves quoted arguments for commands such as
+// /project-chats "CloudLight QQ History" while retaining the old whitespace
+// behavior for unquoted commands. It is intentionally small and does not try
+// to be a general shell parser.
+func parseCommandFields(text string) []string {
+	var fields []string
+	var current strings.Builder
+	quote := rune(0)
+	escaped := false
+	runes := []rune(strings.TrimSpace(text))
+	for index := 0; index < len(runes); index++ {
+		char := runes[index]
+		if escaped {
+			current.WriteRune(char)
+			escaped = false
+			continue
+		}
+		if char == '\\' && quote != '\'' {
+			// A Windows path such as D:\\Work\\Repo is data, not a
+			// sequence of escape commands. Only consume a backslash when
+			// it introduces a quote, another backslash, or whitespace.
+			if index+1 < len(runes) {
+				next := runes[index+1]
+				if next == '\\' || next == '\'' || next == '"' || next == ' ' || next == '\t' || next == '\r' || next == '\n' {
+					escaped = true
+					continue
+				}
+			}
+			current.WriteRune(char)
+			continue
+		}
+		if quote != 0 {
+			if char == quote {
+				quote = 0
+			} else {
+				current.WriteRune(char)
+			}
+			continue
+		}
+		switch char {
+		case '\'', '"':
+			quote = char
+		case ' ', '\t', '\r', '\n':
+			if current.Len() > 0 {
+				fields = append(fields, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(char)
+		}
+	}
+	if escaped {
+		current.WriteRune('\\')
+	}
+	if current.Len() > 0 {
+		fields = append(fields, current.String())
+	}
+	return fields
 }
 
 func (r *Registry) Get(id string) (Definition, bool) {

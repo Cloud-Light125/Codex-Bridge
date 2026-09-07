@@ -293,7 +293,10 @@ func (m *Manager) requireSelectedThread(selected string, snapshot control.Thread
 			Code: "ephemeral_thread", Message: "The selected Codex Thread is ephemeral and cannot be reported as persisted.",
 			ThreadID: selected, CurrentState: StateFailed,
 		}
-		m.failTurnTrace(selected, StateFailed, err.Error())
+		if trace := m.turnTrace(selected); trace != nil {
+			trace.setTerminalState("start-attempt-failed")
+		}
+		m.recordStartAttemptFailure(selected, m.RuntimeState(selected), err)
 		return err
 	}
 	return nil
@@ -419,11 +422,13 @@ func (m *Manager) verifyCompletedTurn(threadID, turnID string, trace *turnTrace)
 	defer cancel()
 	if !waitForPersistenceWindow(ctx, completedPersistenceInitialDelay) {
 		m.completePersistenceFailure(threadID, turnID, "persistence verification was cancelled before the write window elapsed", nil)
+		m.schedulePendingPersistenceReconcile(threadID, turnID)
 		return
 	}
 	client, err := m.runningClient()
 	if err != nil {
 		m.completePersistenceFailure(threadID, turnID, fmt.Sprintf("primary App Server unavailable: %v", err), nil)
+		m.schedulePendingPersistenceReconcile(threadID, turnID)
 		return
 	}
 	_, _, _, startedAt, before, warnings, persistenceError := trace.values()
@@ -462,9 +467,87 @@ func (m *Manager) verifyCompletedTurn(threadID, turnID string, trace *turnTrace)
 	if lastVerification != nil {
 		m.saveVerification(*lastVerification)
 		m.applyVerificationState(*lastVerification)
+		if lastVerification.Status == StateCompletedUnverified {
+			m.schedulePendingPersistenceReconcile(threadID, turnID)
+		}
 		return
 	}
 	m.completePersistenceFailure(threadID, turnID, fmt.Sprintf("completed thread/read failed after finite retries: %v", lastReadError), nil)
+	m.schedulePendingPersistenceReconcile(threadID, turnID)
+}
+
+// schedulePendingPersistenceReconcile continues only transient persistence
+// checks after the finite fast retry window. It is deliberately low frequency
+// and bounded in time; a pending check never becomes a failed Turn merely
+// because Codex's history write is delayed.
+func (m *Manager) schedulePendingPersistenceReconcile(threadID, turnID string) {
+	key := strings.Join([]string{strings.TrimSpace(threadID), strings.TrimSpace(turnID)}, "\x00")
+	m.traceMu.Lock()
+	if m.pendingReconciles == nil {
+		m.pendingReconciles = make(map[string]bool)
+	}
+	if m.pendingReconciles[key] {
+		m.traceMu.Unlock()
+		return
+	}
+	m.pendingReconciles[key] = true
+	m.traceMu.Unlock()
+	go func() {
+		defer func() {
+			m.traceMu.Lock()
+			delete(m.pendingReconciles, key)
+			m.traceMu.Unlock()
+		}()
+		previous := time.Duration(0)
+		for _, elapsed := range []time.Duration{30 * time.Second, 60 * time.Second, 2 * time.Minute, 5 * time.Minute, 5 * time.Minute, 5 * time.Minute} {
+			timer := time.NewTimer(elapsed - previous)
+			select {
+			case <-m.ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			previous = elapsed
+			if m.reconcilePendingPersistence(threadID, turnID) {
+				return
+			}
+		}
+	}()
+}
+
+func (m *Manager) reconcilePendingPersistence(threadID, turnID string) bool {
+	state := m.RuntimeState(threadID)
+	if state.TurnID != "" && state.TurnID != turnID {
+		return true
+	}
+	client, err := m.runningClient()
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(m.ctx, 20*time.Second)
+	defer cancel()
+	raw, err := client.ThreadReadHistory(ctx, threadID, appserver.DefaultHistoryTurnLimit)
+	if err != nil {
+		return false
+	}
+	main := persistenceSnapshot(raw, turnID)
+	var before fileSnapshot
+	var startedAt time.Time
+	var warnings []string
+	var persistenceError bool
+	if trace := m.turnTrace(threadID); trace != nil {
+		_, _, _, startedAt, before, warnings, persistenceError = trace.values()
+	}
+	verification := m.completedWithoutProbe(threadID, turnID, main, before, startedAt, warnings, persistenceError)
+	m.saveVerification(verification)
+	m.applyVerificationState(verification)
+	if verification.Status == StatePersisted {
+		if m.autoPersistenceProbe {
+			go m.probeCompletedTurnDiagnostic(threadID, turnID, main, before, startedAt, warnings, persistenceError)
+		}
+		return true
+	}
+	return verification.Status != StateCompletedUnverified
 }
 
 func (m *Manager) probeCompletedTurnDiagnostic(threadID, turnID string, main control.ThreadPersistenceSnapshot, before fileSnapshot, startedAt time.Time, warnings []string, persistenceError bool) {
@@ -490,10 +573,7 @@ func waitForPersistenceWindow(ctx context.Context, delay time.Duration) bool {
 }
 
 func persistenceVerificationRetryable(threadID string, main control.ThreadPersistenceSnapshot, verification control.PersistenceVerification) bool {
-	if verification.Status != StatePersistenceFailed || main.ThreadID != threadID || main.Ephemeral {
-		return false
-	}
-	if verification.Probe.ThreadID != "" && verification.Probe.ThreadID != threadID {
+	if verification.Status != StateCompletedUnverified || main.ThreadID != threadID || main.Ephemeral {
 		return false
 	}
 	return true
@@ -524,17 +604,17 @@ func (m *Manager) completedWithoutProbe(
 		verification.Status = StatePersistenceFailed
 		verification.Message = "持久化失败：Thread 为 ephemeral。"
 	case !mainSnapshot.FoundTurn:
-		verification.Status = StatePersistenceFailed
-		verification.Message = "持久化失败：当前 App Server 的 thread/read 找不到目标 Turn。"
+		verification.Status = StateCompletedUnverified
+		verification.Message = "Turn 已完成，主 App Server 尚未在历史分页中返回目标 Turn。"
 	case !strings.EqualFold(mainSnapshot.TurnStatus, "completed"):
-		verification.Status = StatePersistenceFailed
-		verification.Message = "持久化失败：完成后的 thread/read 中目标 Turn 状态不是 completed。"
+		verification.Status = StateCompletedUnverified
+		verification.Message = "Turn 已完成，主 App Server 返回的目标 Turn 尚未稳定为 completed。"
 	case mainSnapshot.AssistantMessageItemID == "":
-		verification.Status = StatePersistenceFailed
-		verification.Message = "持久化失败：完成后的 thread/read 尚未包含正式 assistant message。"
+		verification.Status = StateCompletedUnverified
+		verification.Message = "Turn 已完成，主 App Server 尚未返回明确的 final assistant message。"
 	default:
 		verification.Status = StatePersisted
-		verification.Message = fmt.Sprintf("已确认：主 App Server 已读取到 Turn %s 的正式 assistant message；独立 probe 不阻塞 Mirror。", turnID)
+		verification.Message = fmt.Sprintf("已确认：主 App Server 已读取到 Turn %s 的明确 final assistant message；独立 probe 不阻塞 Mirror。", turnID)
 		if persistenceError {
 			verification.Message += " stderr 持久化警告保留用于诊断。"
 		}
@@ -583,12 +663,12 @@ func (m *Manager) verifySnapshots(
 		message = "Thread ID 不一致：该发送已被拒绝，不能通过后续事件升级为持久化成功。"
 	}
 	if statusName == StatePersisted && mainSnapshot.RolloutPath != "" && verification.Probe.RolloutPath != "" && !samePath(mainSnapshot.RolloutPath, verification.Probe.RolloutPath) {
-		statusName = StatePersistenceFailed
-		message = "数据目录不一致：主 App Server 与新 App Server 返回了不同的 rollout path。"
+		verification.Warnings = mergeWarnings(verification.Warnings, []string{"diagnostic probe returned a different rollout path"})
+		message += " probe rollout path 不同，已记录为诊断警告。"
 	}
 	if statusName == StatePersisted && (!verification.Rollout.Exists || !verification.Rollout.ContainsIdentifier) {
-		statusName = StatePersistenceFailed
-		message = "未持久化：rollout 尚未包含目标 Turn 或正式消息标识。"
+		verification.Warnings = mergeWarnings(verification.Warnings, []string{"rollout evidence was incomplete; main App Server final evidence was authoritative"})
+		message += " rollout 证据不完整，但不覆盖主 App Server 的 authoritative final evidence。"
 	}
 	verification.Status = statusName
 	verification.Message = message
@@ -620,37 +700,49 @@ func evaluatePersistence(
 	probeErr error,
 	persistenceError bool,
 ) (string, string) {
-	if main.ThreadID != selectedThreadID || (probe.ThreadID != "" && probe.ThreadID != selectedThreadID) {
+	if main.ThreadID != selectedThreadID {
 		return StateThreadMismatch, "Thread ID 不一致：持久化验证拒绝把结果路由到所选 Thread。"
 	}
-	if main.Ephemeral || probe.Ephemeral {
+	if main.Ephemeral {
 		return StatePersistenceFailed, "持久化失败：Thread 为 ephemeral。"
 	}
 	if expectedTurnID == "" || !main.FoundTurn {
-		return StatePersistenceFailed, "未持久化：当前 Bridge App Server 的 thread/read 找不到目标 Turn。"
+		return StateCompletedUnverified, "正在确认：主 App Server 尚未返回目标 Turn。"
 	}
 	if !strings.EqualFold(main.TurnStatus, "completed") {
-		return StatePersistenceFailed, "未持久化：当前 Bridge App Server 中的目标 Turn 尚未处于 completed 状态。"
+		return StateCompletedUnverified, "正在确认：主 App Server 中的目标 Turn 尚未处于 completed 状态。"
 	}
 	if main.AssistantMessageItemID == "" {
-		return StatePersistenceFailed, "未持久化：当前 Bridge App Server 尚未读取到正式 assistant message。"
+		return StateCompletedUnverified, "正在确认：主 App Server 尚未读取到明确的 final assistant message。"
 	}
+	// Main App Server evidence is authoritative for Mirror delivery. The
+	// independent process is diagnostic/stronger evidence only; a transient
+	// probe failure or a probe that has not caught up must not turn a completed
+	// Turn into a failed task.
+	warning := ""
 	if probeErr != nil {
-		return StatePersistenceFailed, "未持久化：新的独立 Codex App Server 验证失败。"
+		warning = "独立 probe 暂时失败，已保留为诊断警告。"
 	}
-	if probe.ThreadID != selectedThreadID || !probe.FoundTurn {
-		return StatePersistenceFailed, "未持久化：当前 Bridge 进程能看到该 Turn，但新的 App Server 无法读取。"
+	if probe.ThreadID != "" && probe.ThreadID != selectedThreadID {
+		warning = "独立 probe 返回了不同 Thread，已保留为诊断警告。"
 	}
-	if !strings.EqualFold(probe.TurnStatus, "completed") {
-		return StatePersistenceFailed, "未持久化：新的独立 App Server 读取到目标 Turn，但其状态不是 completed。"
+	if probe.ThreadID == selectedThreadID && !probe.FoundTurn {
+		warning = "独立 probe 尚未读取到目标 Turn，已保留为诊断警告。"
 	}
-	if probe.AssistantMessageItemID == "" {
-		return StatePersistenceFailed, "未持久化：新的独立 App Server 尚未读取到正式 assistant message。"
+	if probe.ThreadID == selectedThreadID && probe.FoundTurn && !strings.EqualFold(probe.TurnStatus, "completed") {
+		warning = "独立 probe 尚未读取到 completed 状态，已保留为诊断警告。"
+	}
+	if probe.ThreadID == selectedThreadID && probe.FoundTurn && strings.EqualFold(probe.TurnStatus, "completed") && probe.AssistantMessageItemID == "" {
+		warning = "独立 probe 尚未读取到 final assistant message，已保留为诊断警告。"
+	}
+	message := fmt.Sprintf("已确认：主 App Server 已读取到 Turn %s 的明确 final assistant message。", expectedTurnID)
+	if warning != "" {
+		message += " " + warning
 	}
 	if persistenceError {
-		return StatePersisted, fmt.Sprintf("已持久化：rollout 与新的独立 Codex App Server 均已读取到 Turn %s 的正式消息；先前 stderr 警告未被持久化证据证实。", expectedTurnID)
+		message += " stderr 持久化警告保留用于诊断。"
 	}
-	return StatePersisted, fmt.Sprintf("已持久化：新的独立 Codex App Server 已读取到 Turn %s。", expectedTurnID)
+	return StatePersisted, message
 }
 
 func completedNotificationState(status string) string {
@@ -667,39 +759,61 @@ func completedNotificationState(status string) string {
 
 func (m *Manager) applyVerificationState(verification control.PersistenceVerification) {
 	current := m.RuntimeState(verification.ThreadID)
-	if current.TurnID == verification.ExpectedTurnID && current.State == StatePersisted && verification.Status == StatePersisted {
+	if current.TurnID == verification.ExpectedTurnID && (current.PersistenceStatus == PersistenceConfirmed || current.State == StatePersisted) && verification.Status == StatePersisted {
 		return
 	}
 	state := current
 	state.ThreadID = verification.ThreadID
 	state.TurnID = verification.ExpectedTurnID
-	state.State = verification.Status
 	state.Origin = "local"
-	state.Error = ""
 	state.Persistence = &verification
-	state.CanInterrupt = false
+	state.LastTurnResult = "completed"
+	switch verification.Status {
+	case StateCompletedUnverified:
+		state.State = StateCompletedUnverified
+		state.PersistenceStatus = PersistencePending
+		state.Error = ""
+	case StatePersisted:
+		state.State = StateIdle
+		state.PersistenceStatus = PersistenceConfirmed
+		state.Error = ""
+	case StatePersistenceFailed, StateThreadMismatch:
+		// The Turn itself completed. Persistence abnormality is surfaced in a
+		// separate field and never masquerades as a failed execution result.
+		state.State = StateIdle
+		state.PersistenceStatus = PersistenceAbnormal
+		state.Error = bridgelog.Redact(verification.Message)
+	default:
+		state.State = StateIdle
+		state.PersistenceStatus = PersistenceAbnormal
+		state.Error = bridgelog.Redact(verification.Message)
+	}
 	m.setState(state, true)
 	m.broker.PublishScoped(events.TurnPersistence, verification.ThreadID, verification.ExpectedTurnID, "", map[string]any{"verification": verification, "runtime": state})
 	if verification.Status == StateCompletedUnverified {
 		return
 	}
-	if verification.Status == StatePersisted {
-		m.broker.PublishScoped(events.TurnCompleted, verification.ThreadID, verification.ExpectedTurnID, "", map[string]any{"status": StatePersisted, "verification": verification})
-	} else {
-		m.broker.PublishScoped(events.TurnFailed, verification.ThreadID, verification.ExpectedTurnID, "", map[string]any{"status": verification.Status, "error": verification.Message, "verification": verification})
+	completionPayload := map[string]any{"status": StatePersisted, "persistenceStatus": state.PersistenceStatus, "verification": verification}
+	if verification.Status != StatePersisted {
+		completionPayload["persistenceStatus"] = PersistenceAbnormal
+		completionPayload["message"] = verification.Message
 	}
+	// A completed Turn remains a completed task even when final verification is
+	// abnormal. Task Center and Mirror therefore receive TurnCompleted, while
+	// the persistence diagnostic remains visible in the payload.
+	m.broker.PublishScoped(events.TurnCompleted, verification.ThreadID, verification.ExpectedTurnID, "", completionPayload)
 }
 
 func (m *Manager) completePersistenceFailure(threadID, turnID, message string, verification *control.PersistenceVerification) {
 	if verification == nil {
 		value := control.PersistenceVerification{
-			ThreadID: threadID, ExpectedTurnID: turnID, Status: StatePersistenceFailed,
+			ThreadID: threadID, ExpectedTurnID: turnID, Status: StateCompletedUnverified,
 			Message: bridgelog.Redact(message), Environment: m.codexEnvironment(threadID), Warnings: []string{}, VerifiedAt: nowText(),
 		}
 		verification = &value
 		m.saveVerification(value)
 	}
-	verification.Status = StatePersistenceFailed
+	verification.Status = StateCompletedUnverified
 	if verification.Message == "" {
 		verification.Message = bridgelog.Redact(message)
 	}
@@ -714,12 +828,13 @@ func persistenceSnapshot(raw map[string]any, expectedTurnID string) control.Thre
 		Ephemeral: boolText(payload["ephemeral"]), CWD: textValue(payload["cwd"]),
 		UpdatedAt: diagnosticTime(payload["updatedAt"]), Status: statusText(payload["status"]),
 	}
-	turns := objectSlice(payload["turns"])
-	snapshot.TurnCount = len(turns)
-	if len(turns) > 0 {
-		snapshot.LastTurnID = firstNonEmpty(textValue(turns[len(turns)-1]["id"]), textValue(turns[len(turns)-1]["turnId"]))
-	}
 	detail := control.NormalizeThreadDetail(raw)
+	snapshot.TurnCount = len(detail.Turns)
+	if len(detail.Turns) > 0 {
+		// NormalizeThreadDetail guarantees chronological ASC order for both
+		// paginated and legacy histories.
+		snapshot.LastTurnID = detail.Turns[len(detail.Turns)-1].TurnID
+	}
 	mode := control.FinalSelectionModeForHistory(detail.HistoryMode)
 	for _, turn := range detail.Turns {
 		turnID := turn.TurnID
@@ -736,7 +851,7 @@ func persistenceSnapshot(raw map[string]any, expectedTurnID string) control.Thre
 				snapshot.UserMessageItemID = item.ItemID
 			}
 		}
-		if item, ok := control.SelectFinalAssistantItem(turn, mode); ok {
+		if item, ok := control.FindPersistedAssistantEvidence(turn, mode); ok {
 			snapshot.AssistantMessageItemID = item.ItemID
 		}
 		break

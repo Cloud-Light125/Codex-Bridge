@@ -4,16 +4,22 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
 )
 
 type historyControlReaderFake struct {
-	fullReadCalls     int
-	historyLimits     []int
-	activityCalls     int
-	activityLimits    []int
+	fullReadCalls  int
+	historyLimits  []int
+	activityCalls  int
+	activityLimits []int
+	threadList     map[string]any
 }
 
 func (f *historyControlReaderFake) ThreadList(context.Context, int, string) (map[string]any, error) {
+	if f.threadList != nil {
+		return f.threadList, nil
+	}
 	return map[string]any{"data": []map[string]any{}}, nil
 }
 
@@ -78,5 +84,26 @@ func TestServiceHistoryCompatibilityLayerUsesBoundedOptionalReaders(t *testing.T
 	}
 	if len(reader.activityLimits) != 1 || reader.activityLimits[0] != 10 || len(failedActivity.Turns) != 1 || failedActivity.Turns[0].Error != "boom" {
 		t.Fatalf("status-only history path was not bounded/preserved: limits=%#v detail=%#v", reader.activityLimits, failedActivity)
+	}
+}
+
+func TestListThreadsReadOnlyDoesNotAllocateConversationNumber(t *testing.T) {
+	reader := &historyControlReaderFake{threadList: map[string]any{"data": []map[string]any{{
+		"id": "new-thread", "name": "new", "cwd": `D:\work\new`, "createdAt": "2026-09-07T00:00:00Z",
+	}}}}
+	registry := conversationregistry.NewInMemory()
+	service := NewService(reader, nil, registry)
+	list, err := service.ListThreadsReadOnly(context.Background(), 20, "")
+	if err != nil || len(list.Threads) != 1 {
+		t.Fatalf("read-only list failed: list=%#v err=%v", list, err)
+	}
+	if list.Threads[0].Number != 0 || len(registry.List()) != 0 {
+		t.Fatalf("read-only list allocated or exposed a new number: thread=%#v registry=%#v", list.Threads[0], registry.List())
+	}
+	if _, err := service.ListThreads(context.Background(), 20, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(registry.List()) != 1 {
+		t.Fatalf("normal list did not allocate the discoverable number: %#v", registry.List())
 	}
 }

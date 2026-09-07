@@ -54,6 +54,50 @@ func TestApplyVerificationStateDoesNotRepublishPersistedTurn(t *testing.T) {
 	}
 }
 
+func TestStartAttemptFailurePreservesPreviousRuntimeProjection(t *testing.T) {
+	manager := &Manager{
+		states: map[string]control.RuntimeState{
+			"thread": {
+				ThreadID: "thread", State: StateIdle, TurnID: "last-turn",
+				LastTurnResult: "completed", PersistenceStatus: PersistenceConfirmed,
+			},
+		},
+		broker:       events.NewBroker(),
+		interactions: interactions.NewStore(),
+	}
+	previous := manager.RuntimeState("thread")
+	manager.recordStartAttemptFailure("thread", previous, errors.New("turn/start transport unavailable"))
+	got := manager.RuntimeState("thread")
+	if got.State != StateIdle || got.TurnID != "last-turn" || got.LastTurnResult != "completed" || got.PersistenceStatus != PersistenceConfirmed {
+		t.Fatalf("start failure changed the previous execution projection: %#v", got)
+	}
+	if got.LastStartError == "" || got.Error != "" {
+		t.Fatalf("start failure diagnostics were not isolated: %#v", got)
+	}
+}
+
+func TestPendingPersistenceDoesNotPublishTurnFailure(t *testing.T) {
+	broker := events.NewBroker()
+	manager := &Manager{states: map[string]control.RuntimeState{"thread": {ThreadID: "thread", TurnID: "turn"}}, broker: broker, interactions: interactions.NewStore()}
+	stream, unsubscribe := broker.Subscribe()
+	defer unsubscribe()
+	manager.applyVerificationState(control.PersistenceVerification{ThreadID: "thread", ExpectedTurnID: "turn", Status: StateCompletedUnverified})
+	state := manager.RuntimeState("thread")
+	if state.State != StateCompletedUnverified || state.PersistenceStatus != PersistencePending || state.LastTurnResult != "completed" {
+		t.Fatalf("pending verification changed the wrong state fields: %#v", state)
+	}
+	for {
+		select {
+		case event := <-stream:
+			if event.EventType == events.TurnFailed {
+				t.Fatalf("pending verification published turn failure: %#v", event)
+			}
+		default:
+			return
+		}
+	}
+}
+
 func TestEvaluatePersistenceRequiresIndependentProbeTurn(t *testing.T) {
 	main := control.ThreadPersistenceSnapshot{ThreadID: "thread-a", FoundTurn: true, LastTurnID: "turn-a", TurnStatus: "completed", AssistantMessageItemID: "assistant-a"}
 	probe := control.ThreadPersistenceSnapshot{ThreadID: "thread-a", FoundTurn: true, LastTurnID: "turn-a", TurnStatus: "completed", AssistantMessageItemID: "assistant-a"}
@@ -64,21 +108,21 @@ func TestEvaluatePersistenceRequiresIndependentProbeTurn(t *testing.T) {
 
 	probe.FoundTurn = false
 	status, _ = evaluatePersistence("thread-a", "turn-a", main, probe, nil, false)
-	if status != StatePersistenceFailed {
-		t.Fatalf("missing probe turn result = %q; want %q", status, StatePersistenceFailed)
+	if status != StatePersisted {
+		t.Fatalf("missing probe turn result = %q; want %q", status, StatePersisted)
 	}
 
 	status, _ = evaluatePersistence("thread-a", "turn-a", main, control.ThreadPersistenceSnapshot{}, errors.New("probe unavailable"), false)
-	if status != StatePersistenceFailed {
-		t.Fatalf("failed probe result = %q; want %q", status, StatePersistenceFailed)
+	if status != StatePersisted {
+		t.Fatalf("failed probe result = %q; want %q", status, StatePersisted)
 	}
 
 	main.TurnStatus = "inProgress"
 	probe.TurnStatus = "inProgress"
 	probe.FoundTurn = true
 	status, _ = evaluatePersistence("thread-a", "turn-a", main, probe, nil, false)
-	if status != StatePersistenceFailed {
-		t.Fatalf("running turn result = %q; want %q", status, StatePersistenceFailed)
+	if status != StateCompletedUnverified {
+		t.Fatalf("running turn result = %q; want %q", status, StateCompletedUnverified)
 	}
 }
 
@@ -101,14 +145,14 @@ func TestEvaluatePersistenceWaitsForAssistantMessage(t *testing.T) {
 	main := control.ThreadPersistenceSnapshot{ThreadID: "thread-a", FoundTurn: true, TurnStatus: "completed"}
 	probe := control.ThreadPersistenceSnapshot{ThreadID: "thread-a", FoundTurn: true, TurnStatus: "completed", AssistantMessageItemID: "assistant-a"}
 	status, _ := evaluatePersistence("thread-a", "turn-a", main, probe, nil, false)
-	if status != StatePersistenceFailed {
-		t.Fatalf("missing main assistant result = %q; want %q", status, StatePersistenceFailed)
+	if status != StateCompletedUnverified {
+		t.Fatalf("missing main assistant result = %q; want %q", status, StateCompletedUnverified)
 	}
 	main.AssistantMessageItemID = "assistant-a"
 	probe.AssistantMessageItemID = ""
 	status, _ = evaluatePersistence("thread-a", "turn-a", main, probe, nil, false)
-	if status != StatePersistenceFailed {
-		t.Fatalf("missing probe assistant result = %q; want %q", status, StatePersistenceFailed)
+	if status != StatePersisted {
+		t.Fatalf("missing probe assistant result = %q; want %q", status, StatePersisted)
 	}
 }
 

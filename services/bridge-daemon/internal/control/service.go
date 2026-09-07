@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/conversationregistry"
@@ -25,6 +26,12 @@ type ThreadHistoryReader interface {
 	ThreadReadHistory(ctx context.Context, threadID string, limit int) (map[string]any, error)
 }
 
+// ThreadTurnReader is the single-Turn, full-item read path used by explicit
+// output queries. The optional interface keeps older test doubles usable.
+type ThreadTurnReader interface {
+	ThreadReadTurn(ctx context.Context, threadID, turnID string) (map[string]any, error)
+}
+
 type ThreadActivityReader interface {
 	ThreadReadActivity(ctx context.Context, threadID string) (map[string]any, error)
 }
@@ -39,6 +46,10 @@ type DetailReader interface {
 
 type DetailHistoryReader interface {
 	ReadThreadHistory(ctx context.Context, threadID string, limit int) (ThreadDetail, error)
+}
+
+type DetailTurnReader interface {
+	ReadThreadTurnOutput(ctx context.Context, threadID, turnID string) (ThreadDetail, error)
 }
 
 type DetailActivityReader interface {
@@ -121,6 +132,30 @@ func (s *Service) ListThreads(ctx context.Context, limit int, cursor string) (Th
 	return result, nil
 }
 
+// ListThreadsReadOnly returns the same normalized list view without allocating
+// a new global conversation number. Remote status/project/output queries use
+// this path; binding/list surfaces that intentionally discover sessions may
+// continue using ListThreads.
+func (s *Service) ListThreadsReadOnly(ctx context.Context, limit int, cursor string) (ThreadList, error) {
+	raw, err := s.reader.ThreadList(ctx, limit, cursor)
+	if err != nil {
+		return ThreadList{}, err
+	}
+	result := normalizeThreadList(raw)
+	store := conversationregistry.ForCodex(s.registry)
+	for index := range result.Threads {
+		if store != nil {
+			if record, ok := store.ByTarget(conversationregistry.BackendCodex, result.Threads[index].ThreadID); ok {
+				result.Threads[index].Number = record.Number
+			}
+		}
+		if s.states != nil {
+			result.Threads[index].Status = s.states.RuntimeState(result.Threads[index].ThreadID).State
+		}
+	}
+	return result, nil
+}
+
 func (s *Service) ReadThread(ctx context.Context, threadID string, includeTurns bool) (ThreadDetail, error) {
 	var (
 		raw map[string]any
@@ -139,6 +174,36 @@ func (s *Service) ReadThread(ctx context.Context, threadID string, includeTurns 
 func (s *Service) ReadThreadHistory(ctx context.Context, threadID string, limit int) (ThreadDetail, error) {
 	raw, err := s.readThreadHistoryRaw(ctx, threadID, limit)
 	return s.decorateThread(raw, threadID, err)
+}
+
+// ReadThreadTurnOutput hydrates only the requested Turn when the backend
+// exposes the paginated single-Turn path. Legacy readers fall back to the
+// existing bounded history surface and select the requested Turn from it.
+func (s *Service) ReadThreadTurnOutput(ctx context.Context, threadID, turnID string) (ThreadDetail, error) {
+	var (
+		raw map[string]any
+		err error
+	)
+	if reader, ok := s.reader.(ThreadTurnReader); ok {
+		raw, err = reader.ThreadReadTurn(ctx, threadID, turnID)
+	} else {
+		raw, err = s.readThreadHistoryRaw(ctx, threadID, DefaultHistoryTurnLimit)
+	}
+	detail, decorateErr := s.decorateThread(raw, threadID, err)
+	if decorateErr != nil {
+		return ThreadDetail{}, decorateErr
+	}
+	if strings.TrimSpace(turnID) != "" {
+		filtered := make([]Turn, 0, 1)
+		for _, turn := range detail.Turns {
+			if turn.TurnID == strings.TrimSpace(turnID) {
+				filtered = append(filtered, turn)
+				break
+			}
+		}
+		detail.Turns = filtered
+	}
+	return detail, nil
 }
 
 // ReadThreadActivity intentionally does not load Items. For the real

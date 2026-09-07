@@ -48,7 +48,7 @@ type requestAuthMetadata struct {
 }
 
 func newOfficialClient(httpClient *http.Client, tokens *TokenProvider) *officialClient {
-	return &officialClient{http: httpClient, tokens: tokens, baseURL: apiBaseProduction, userAgent: "CloudLight-Codex-Bridge/1.3.1"}
+	return &officialClient{http: httpClient, tokens: tokens, baseURL: apiBaseProduction, userAgent: "CloudLight-Codex-Bridge/1.3.2"}
 }
 
 func (c *officialClient) gateway(ctx context.Context) (string, error) {

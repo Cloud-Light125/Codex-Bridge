@@ -198,8 +198,9 @@ func (s *Service) HandleEvent(event events.Event) {
 		s.collectSummary(&task, event.Payload)
 		s.touchTask(task)
 	case events.TurnCompleted, events.OpenClawMessageCompleted:
-		// Codex emits TurnCompleted only after its existing persistence
-		// verification succeeds. OpenClaw emits its terminal message event.
+		// Codex TurnCompleted means execution completed; persistence evidence is
+		// carried separately and may still be pending or abnormal. OpenClaw emits
+		// its terminal message event directly.
 		finalText := ""
 		if event.EventType == events.OpenClawMessageCompleted {
 			finalText = firstNonEmpty(payloadString(event.Payload, "finalText"), payloadString(event.Payload, "text"), payloadString(event.Payload, "message"))

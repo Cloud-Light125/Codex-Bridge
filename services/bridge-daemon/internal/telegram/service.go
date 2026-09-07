@@ -205,6 +205,7 @@ func (s *Service) SetCommandRegistry(commands *commandregistry.Registry) {
 	s.commands = commands
 	s.queries = bridgequery.New(s.control, s.runtime, s.registry, commands)
 	s.queries.SetOpenClawBackend(s.openclaw)
+	s.queries.SetTaskService(s.taskService)
 	s.mu.Unlock()
 	commands.AddChangeListener(func() { go s.syncCommandMenu() })
 }
@@ -221,6 +222,9 @@ func (s *Service) SetOpenClawBackend(backend conversation.IConversationBackend) 
 func (s *Service) SetTaskService(service *taskcenter.Service) {
 	s.mu.Lock()
 	s.taskService = service
+	if s.queries != nil {
+		s.queries.SetTaskService(service)
+	}
 	s.mu.Unlock()
 }
 
@@ -552,9 +556,16 @@ func (s *Service) handleOpenClawTargetCommand(ctx context.Context, message chann
 		s.stopOpenClawSession(ctx, message, session.Key)
 	case commandregistry.ActionBridgeStatus, commandregistry.ActionThreadInfo:
 		s.runQueryActionForBackend(ctx, message, conversation.BackendOpenClaw, session.Key, commandregistry.ActionThreadInfo, []string{selector})
+	case commandregistry.ActionThreadCurrent:
+		s.runQueryActionForBackend(ctx, message, conversation.BackendOpenClaw, session.Key, commandregistry.ActionThreadCurrent, []string{selector})
 	case commandregistry.ActionThreadHistory:
 		args := append([]string{selector}, invocation.Arguments...)
 		s.runQueryActionForBackend(ctx, message, conversation.BackendOpenClaw, session.Key, commandregistry.ActionThreadHistory, args)
+	case commandregistry.ActionCurrentOutput, commandregistry.ActionLastOutput:
+		args := append([]string{selector}, invocation.Arguments...)
+		s.runQueryActionForBackend(ctx, message, conversation.BackendOpenClaw, session.Key, invocation.Definition.Action, args)
+	case commandregistry.ActionRecentProjects, commandregistry.ActionProjectChats:
+		s.runQueryActionForBackend(ctx, message, conversation.BackendOpenClaw, session.Key, invocation.Definition.Action, invocation.Arguments)
 	default:
 		s.send(ctx, message.Address, fmt.Sprintf("指令 %s 不支持 #编号 会话上下文。", invocation.Definition.Name))
 	}
@@ -586,8 +597,15 @@ func (s *Service) handleTargetCommand(ctx context.Context, message channels.Inbo
 	switch invocation.Definition.Action {
 	case commandregistry.ActionBridgeStatus, commandregistry.ActionThreadInfo:
 		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, commandregistry.ActionThreadInfo, []string{strconv.Itoa(record.Number)})
+	case commandregistry.ActionThreadCurrent:
+		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, commandregistry.ActionThreadCurrent, []string{strconv.Itoa(record.Number)})
 	case commandregistry.ActionThreadHistory:
 		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, commandregistry.ActionThreadHistory, append([]string{strconv.Itoa(record.Number)}, invocation.Arguments...))
+	case commandregistry.ActionCurrentOutput, commandregistry.ActionLastOutput:
+		args := append([]string{strconv.Itoa(record.Number)}, invocation.Arguments...)
+		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, invocation.Definition.Action, args)
+	case commandregistry.ActionRecentProjects, commandregistry.ActionProjectChats:
+		s.runQueryActionForBackend(ctx, message, record.Backend, record.TargetID, invocation.Definition.Action, invocation.Arguments)
 	case commandregistry.ActionThreadStop:
 		s.stopThread(ctx, message, record.TargetID)
 	case commandregistry.ActionTaskCancel, commandregistry.ActionInteractionCancel:
@@ -1034,7 +1052,7 @@ func (s *Service) unbind(ctx context.Context, message channels.InboundMessage) {
 func (s *Service) current(ctx context.Context, message channels.InboundMessage) {
 	binding, ok := s.findBinding(message.Address)
 	if !ok {
-		s.send(ctx, message.Address, "This chat/topic is not bound. Use /threads or /bind.")
+		s.send(ctx, message.Address, "当前 Telegram 会话尚未绑定。使用 /threads 或 /bind。")
 		return
 	}
 	if bindingBackend(binding) == conversation.BackendOpenClaw {
@@ -2087,6 +2105,7 @@ func (s *Service) queryService() *bridgequery.Service {
 	if s.queries == nil {
 		s.queries = bridgequery.New(s.control, s.runtime, s.registry, s.commands)
 		s.queries.SetOpenClawBackend(s.openclaw)
+		s.queries.SetTaskService(s.taskService)
 	}
 	return s.queries
 }

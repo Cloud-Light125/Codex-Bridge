@@ -219,6 +219,8 @@ func (m *Manager) onTurnStarted(threadID, turnID string) {
 	state.TurnID = turnID
 	state.StartedAt = firstNonEmpty(state.StartedAt, nowText())
 	state.Error = ""
+	state.LastStartError = ""
+	state.Persistence = nil
 	m.setState(state, true)
 	if trace != nil {
 		m.logger.Printf("rpcTrace stage=turn/started selectedThreadId=%s notificationThreadId=%s notificationTurnId=%s", trace.SelectedThreadID, threadID, turnID)
@@ -242,8 +244,8 @@ func (m *Manager) onTurnCompleted(threadID, turnID string, params map[string]any
 	}
 	if trace == nil {
 		state.State = StateIdle
-		state.TurnID = ""
-		state.Origin = ""
+		state.LastTurnResult = "completed"
+		state.PersistenceStatus = PersistencePending
 		state.Error = ""
 		m.setState(state, true)
 		m.broker.PublishScoped(events.ThreadUpdated, threadID, turnID, "", map[string]any{"runtime": state, "source": "appserver"})
@@ -260,21 +262,36 @@ func (m *Manager) onTurnCompleted(threadID, turnID string, params map[string]any
 	state.State = completedNotificationState(status)
 	switch {
 	case hasCompletionError:
-		state.State = StatePersistenceFailed
-		state.Error = "Codex turn/completed included an error; content omitted."
-		trace.addStderr(state.Error, true)
+		state.State = StateFailed
+		state.LastTurnResult = "failed"
+		state.PersistenceStatus = ""
+		state.Error = "Codex turn/completed included an execution error; content omitted."
+		trace.addStderr(state.Error, false)
 		eventType = events.TurnFailed
 	case strings.Contains(status, "interrupt"), strings.Contains(status, "cancel"):
+		state.State = StateIdle
+		state.LastTurnResult = "interrupted"
+		state.PersistenceStatus = ""
 		state.Error = "Turn was interrupted before persistence verification."
 		eventType = events.TurnInterrupted
 	case strings.Contains(status, "fail"), strings.Contains(status, "error"):
+		state.State = StateFailed
+		state.LastTurnResult = "failed"
+		state.PersistenceStatus = ""
 		state.Error = message
 		eventType = events.TurnFailed
 	case status == "completed":
+		state.State = StateCompletedUnverified
+		state.LastTurnResult = "completed"
+		state.PersistenceStatus = PersistencePending
 		state.Error = ""
 		eventType = events.TurnPersistence
 	default:
+		state.State = StateUnknown
+		state.LastTurnResult = "unknown"
+		state.PersistenceStatus = ""
 		state.Error = "turn/completed did not report status=completed"
+		eventType = events.TurnPersistence
 	}
 	state.CanInterrupt = false
 	m.setState(state, true)
@@ -441,6 +458,7 @@ func isToolType(value string) bool {
 
 func (m *Manager) bufferAssistantDelta(threadID, turnID, itemID, delta string) {
 	key := strings.Join([]string{threadID, turnID, itemID}, "\x00")
+	m.appendLiveOutput(threadID, turnID, itemID, delta)
 	m.deltaMu.Lock()
 	buffer := m.deltas[key]
 	if buffer == nil {
@@ -453,6 +471,104 @@ func (m *Manager) bufferAssistantDelta(threadID, turnID, itemID, delta string) {
 	m.deltaMu.Unlock()
 }
 
+const (
+	maxLiveTurnOutputs = 256
+	maxLiveTurnText    = 2 * 1024 * 1024
+	liveTurnTTL        = 30 * time.Minute
+)
+
+func liveOutputKey(threadID, turnID string) string {
+	return strings.Join([]string{strings.TrimSpace(threadID), strings.TrimSpace(turnID)}, "\x00")
+}
+
+func (m *Manager) appendLiveOutput(threadID, turnID, itemID, delta string) {
+	if strings.TrimSpace(threadID) == "" || strings.TrimSpace(turnID) == "" || delta == "" {
+		return
+	}
+	m.liveOutputMu.Lock()
+	defer m.liveOutputMu.Unlock()
+	if m.liveOutputs == nil {
+		m.liveOutputs = make(map[string]*liveTurnOutput)
+	}
+	key := liveOutputKey(threadID, turnID)
+	output := m.liveOutputs[key]
+	if output == nil {
+		output = &liveTurnOutput{ThreadID: threadID, TurnID: turnID, Segments: make(map[string]*strings.Builder)}
+		m.liveOutputs[key] = output
+	}
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		itemID = fmt.Sprintf("segment-%d", len(output.Order)+1)
+	}
+	segment := output.Segments[itemID]
+	if segment == nil {
+		segment = &strings.Builder{}
+		output.Segments[itemID] = segment
+		output.Order = append(output.Order, itemID)
+	}
+	remaining := maxLiveTurnText - output.Total
+	if remaining <= 0 {
+		output.UpdatedAt = time.Now().UTC()
+		return
+	}
+	runes := []rune(delta)
+	if len(runes) > remaining {
+		runes = runes[:remaining]
+	}
+	segment.WriteString(string(runes))
+	output.Total += len(runes)
+	output.UpdatedAt = time.Now().UTC()
+	m.pruneLiveOutputsLocked(output.UpdatedAt)
+}
+
+// LiveTurnOutput returns the bounded in-memory assistant stream for a live or
+// recently completed Turn. It is a fallback for explicit output queries; the
+// persisted history path remains the source of truth after a restart.
+func (m *Manager) LiveTurnOutput(threadID, turnID string) (string, bool) {
+	m.liveOutputMu.Lock()
+	defer m.liveOutputMu.Unlock()
+	output := m.liveOutputs[liveOutputKey(threadID, turnID)]
+	if output == nil {
+		return "", false
+	}
+	if output.UpdatedAt.IsZero() || time.Since(output.UpdatedAt) >= liveTurnTTL {
+		delete(m.liveOutputs, liveOutputKey(threadID, turnID))
+		return "", false
+	}
+	var result strings.Builder
+	for _, itemID := range output.Order {
+		if segment := output.Segments[itemID]; segment != nil {
+			result.WriteString(segment.String())
+		}
+	}
+	return result.String(), result.Len() > 0
+}
+
+func (m *Manager) pruneLiveOutputsLocked(now time.Time) {
+	for key, output := range m.liveOutputs {
+		if output == nil || output.UpdatedAt.IsZero() || now.Sub(output.UpdatedAt) >= liveTurnTTL {
+			delete(m.liveOutputs, key)
+		}
+	}
+	for len(m.liveOutputs) > maxLiveTurnOutputs {
+		oldestKey := ""
+		var oldest time.Time
+		for key, output := range m.liveOutputs {
+			if output == nil {
+				oldestKey = key
+				break
+			}
+			if oldestKey == "" || output.UpdatedAt.Before(oldest) {
+				oldestKey, oldest = key, output.UpdatedAt
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(m.liveOutputs, oldestKey)
+	}
+}
+
 func (m *Manager) deltaLoop() {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -462,6 +578,9 @@ func (m *Manager) deltaLoop() {
 			return
 		case <-ticker.C:
 			m.flushReadyDeltas(false)
+			m.liveOutputMu.Lock()
+			m.pruneLiveOutputsLocked(time.Now().UTC())
+			m.liveOutputMu.Unlock()
 		}
 	}
 }

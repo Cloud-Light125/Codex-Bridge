@@ -31,6 +31,9 @@ const (
 	StateCompletedUnverified = "completed-unverified"
 	StatePersisted           = "persisted"
 	StatePersistenceFailed   = "persistence-failed"
+	PersistencePending       = "pending"
+	PersistenceConfirmed     = "confirmed"
+	PersistenceAbnormal      = "failed"
 	StateThreadMismatch      = "thread-mismatch"
 	StateCompleted           = StatePersisted
 	StateFailed              = "failed"
@@ -66,6 +69,15 @@ type deltaBuffer struct {
 	FlushAt  time.Time
 }
 
+type liveTurnOutput struct {
+	ThreadID  string
+	TurnID    string
+	Segments  map[string]*strings.Builder
+	Order     []string
+	UpdatedAt time.Time
+	Total     int
+}
+
 type keyedThreadLock struct {
 	mu   sync.Mutex
 	refs int
@@ -95,9 +107,13 @@ type Manager struct {
 	deltaMu sync.Mutex
 	deltas  map[string]*deltaBuffer
 
+	liveOutputMu sync.Mutex
+	liveOutputs  map[string]*liveTurnOutput
+
 	traceMu              sync.RWMutex
 	traces               map[string]*turnTrace
 	lastVerifications    map[string]control.PersistenceVerification
+	pendingReconciles    map[string]bool
 	autoPersistenceProbe bool
 	configChanged        chan struct{}
 	configGeneration     uint64
@@ -147,7 +163,9 @@ func NewManager(version, listenAddress, codexPath, sandboxMode string, broker *e
 		interactions: interactions.NewStore(), registry: registry, states: make(map[string]control.RuntimeState),
 		starting: make(map[string]bool), threadLocks: make(map[string]*keyedThreadLock),
 		deltas: make(map[string]*deltaBuffer), traces: make(map[string]*turnTrace),
+		liveOutputs:          make(map[string]*liveTurnOutput),
 		lastVerifications:    make(map[string]control.PersistenceVerification),
+		pendingReconciles:    make(map[string]bool),
 		autoPersistenceProbe: status.AutomaticPersistenceProbe,
 		configChanged:        make(chan struct{}, 1), configGeneration: 1,
 	}, nil
@@ -468,6 +486,17 @@ func (m *Manager) ThreadReadHistory(ctx context.Context, threadID string, limit 
 		m.reconcileActivity(control.ActivityFromThreadRead(raw))
 	}
 	return raw, err
+}
+
+// ThreadReadTurn reads one Turn's complete persisted item stream. It is kept
+// separate from ThreadReadHistory so an explicit output query cannot consume
+// the global recent-history item budget.
+func (m *Manager) ThreadReadTurn(ctx context.Context, threadID, turnID string) (map[string]any, error) {
+	client, err := m.runningClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.ThreadReadTurn(ctx, threadID, turnID)
 }
 
 // ThreadReadActivity is intentionally metadata plus one newest Turn without

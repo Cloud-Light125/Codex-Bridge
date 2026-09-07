@@ -332,10 +332,10 @@ func (s *Service) handleEvent(event events.Event) {
 		}
 	case events.TurnCompleted:
 		s.forgetTurnOrigin(event.TurnID)
-		status, _ := event.Payload["status"].(string)
-		if strings.EqualFold(strings.TrimSpace(status), "persisted") {
-			s.triggerSync(event.ThreadID, "appserver", event.TurnID)
-		}
+		// TurnCompleted means execution completed. PersistenceStatus in the
+		// payload is a separate diagnostic and must not suppress a final sync;
+		// the sync path still applies the strict explicit-final selector.
+		s.triggerSync(event.ThreadID, "appserver", event.TurnID)
 	}
 }
 

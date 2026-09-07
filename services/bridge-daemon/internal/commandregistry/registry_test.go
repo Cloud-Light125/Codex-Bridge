@@ -144,6 +144,18 @@ func TestTaskActionCommandsAreSharedBuiltIns(t *testing.T) {
 	}
 }
 
+func TestResolvePreservesQuotedProjectNamesAndWindowsPaths(t *testing.T) {
+	registry := NewInMemory()
+	invocation, ok := registry.Resolve(`/project-chats "CloudLight QQ History" 5`)
+	if !ok || invocation.Definition.Action != ActionProjectChats || len(invocation.Arguments) != 2 || invocation.Arguments[0] != "CloudLight QQ History" || invocation.Arguments[1] != "5" {
+		t.Fatalf("quoted project selector was not preserved: %#v %v", invocation, ok)
+	}
+	invocation, ok = registry.Resolve(`/project-chats "D:\\code\\Codex Bridge" 3`)
+	if !ok || len(invocation.Arguments) != 2 || invocation.Arguments[0] != `D:\code\Codex Bridge` {
+		t.Fatalf("Windows path was parsed as an escape sequence: %#v %v", invocation, ok)
+	}
+}
+
 func TestBackendCapabilitiesFilterCommandsAndHelp(t *testing.T) {
 	registry := NewInMemory()
 	openClaw := registry.ListForBackend(BackendCapabilityOpenClaw)

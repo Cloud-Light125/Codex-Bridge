@@ -8,8 +8,9 @@ func ActivityFromThreadRead(raw map[string]any) ThreadActivity {
 		payload = nested
 	}
 	activity := ThreadActivity{
-		ThreadID: stringValue(firstValue(payload, "id", "threadId", "thread_id")),
-		Status:   statusValue(payload["status"]),
+		ThreadID:    stringValue(firstValue(payload, "id", "threadId", "thread_id")),
+		Status:      statusValue(payload["status"]),
+		HistoryMode: strings.ToLower(strings.TrimSpace(stringValue(firstValue(payload, "historyMode", "history_mode")))),
 	}
 	if archived, ok := boolValue(payload["archived"]); ok {
 		activity.Archived = archived
@@ -25,7 +26,9 @@ func ActivityFromThreadRead(raw map[string]any) ThreadActivity {
 	}
 	last := turns[len(turns)-1]
 	activity.TurnID = stringValue(firstValue(last, "id", "turnId", "turn_id"))
+	activity.LatestTurnID = activity.TurnID
 	turnStatus := strings.ToLower(statusValue(last["status"]))
+	activity.LatestTurnStatus = statusValue(last["status"])
 	if strings.Contains(turnStatus, "inprogress") || strings.Contains(turnStatus, "running") {
 		activity.Active = true
 	}

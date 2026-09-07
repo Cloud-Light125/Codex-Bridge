@@ -35,9 +35,18 @@ type ThreadDetail struct {
 }
 
 type RuntimeState struct {
-	ThreadID                string                   `json:"threadId"`
-	State                   string                   `json:"state"`
-	TurnID                  string                   `json:"turnId,omitempty"`
+	ThreadID string `json:"threadId"`
+	State    string `json:"state"`
+	TurnID   string `json:"turnId,omitempty"`
+	// LastTurnResult describes the last real Codex Turn. It is deliberately
+	// separate from State: a completed Turn may leave the conversation idle
+	// while its persistence evidence is still pending or abnormal.
+	LastTurnResult string `json:"lastTurnResult,omitempty"`
+	// PersistenceStatus is the Bridge's evidence status for LastTurnResult.
+	// Values are implementation-level strings such as pending, confirmed, or
+	// failed; callers should not use it as a Turn execution result.
+	PersistenceStatus       string                   `json:"persistenceStatus,omitempty"`
+	LastStartError          string                   `json:"lastStartError,omitempty"`
 	Origin                  string                   `json:"origin,omitempty"`
 	StartedAt               string                   `json:"startedAt,omitempty"`
 	LastActivityAt          string                   `json:"lastActivityAt,omitempty"`
@@ -71,13 +80,16 @@ type InterruptResult struct {
 }
 
 type ThreadActivity struct {
-	ThreadID        string
-	TurnID          string
-	Status          string
-	Active          bool
-	WaitingApproval bool
-	WaitingInput    bool
-	Archived        bool
+	ThreadID         string
+	TurnID           string
+	LatestTurnID     string
+	LatestTurnStatus string
+	HistoryMode      string
+	Status           string
+	Active           bool
+	WaitingApproval  bool
+	WaitingInput     bool
+	Archived         bool
 }
 
 type Turn struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/numberprefix"
 	bridgeruntime "cloudlight.dev/codexbridge/bridge-daemon/internal/runtime"
+	"cloudlight.dev/codexbridge/bridge-daemon/internal/taskcenter"
 )
 
 var HelpText = commandregistry.NewInMemory().HelpText()
@@ -27,12 +29,20 @@ type Control interface {
 	ReadThread(context.Context, string, bool) (control.ThreadDetail, error)
 }
 
+type readOnlyThreadLister interface {
+	ListThreadsReadOnly(context.Context, int, string) (control.ThreadList, error)
+}
+
 // Runtime deliberately exposes read-only state only. Query code cannot start,
 // interrupt, or otherwise modify a Codex Turn.
 type Runtime interface {
 	Status() bridgeruntime.Status
 	RuntimeState(string) control.RuntimeState
 	ListInteractions(string) []interactions.PendingInteraction
+}
+
+type liveOutputProvider interface {
+	LiveTurnOutput(string, string) (string, bool)
 }
 
 type rateLimitsProvider interface {
@@ -49,6 +59,7 @@ type Service struct {
 	registry any
 	commands *commandregistry.Registry
 	openclaw conversation.IConversationBackend
+	tasks    *taskcenter.Service
 	now      func() time.Time
 }
 
@@ -56,6 +67,10 @@ type Service struct {
 // all existing Codex query and numbered-thread behavior unchanged.
 func (s *Service) SetOpenClawBackend(backend conversation.IConversationBackend) {
 	s.openclaw = backend
+}
+
+func (s *Service) SetTaskService(service *taskcenter.Service) {
+	s.tasks = service
 }
 
 func New(controlService Control, runtime Runtime, registry any, commandRegistries ...*commandregistry.Registry) *Service {
@@ -109,6 +124,20 @@ func (s *Service) ExecuteActionForBackend(ctx context.Context, backend, target, 
 			arguments = []string{target}
 		}
 		return one(s.threadInfo(ctx, arguments)), true
+	case commandregistry.ActionThreadCurrent:
+		// Keep the channel-specific unbound response (it knows the address and
+		// profile), but use the same read-only status formatter for a bound
+		// target on both QQ and Telegram.
+		if strings.TrimSpace(target) == "" {
+			return Result{}, false
+		}
+		if backend == conversation.BackendOpenClaw {
+			return one(s.openClawThreadInfo(ctx, arguments, target)), true
+		}
+		if len(arguments) == 0 {
+			arguments = []string{target}
+		}
+		return one(s.threadInfo(ctx, arguments)), true
 	case commandregistry.ActionThreadHistory:
 		if backend == conversation.BackendOpenClaw {
 			return s.openClawHistory(ctx, arguments, target), true
@@ -131,13 +160,24 @@ func (s *Service) ExecuteActionForBackend(ctx context.Context, backend, target, 
 	case commandregistry.ActionAccountQuota:
 		return one(s.quota(ctx, arguments)), true
 	case commandregistry.ActionBridgeStatus:
-		if len(arguments) > 0 {
+		if len(arguments) > 0 || strings.TrimSpace(target) != "" {
 			if backend == conversation.BackendOpenClaw {
 				return one(s.openClawThreadInfo(ctx, arguments, target)), true
+			}
+			if len(arguments) == 0 {
+				arguments = []string{target}
 			}
 			return one(s.threadInfo(ctx, arguments)), true
 		}
 		return one(s.connectionStatusForBackend(backend)), true
+	case commandregistry.ActionCurrentOutput:
+		return s.output(ctx, arguments, target, false, backend), true
+	case commandregistry.ActionLastOutput:
+		return s.output(ctx, arguments, target, true, backend), true
+	case commandregistry.ActionRecentProjects:
+		return one(s.recentProjects(ctx, arguments)), true
+	case commandregistry.ActionProjectChats:
+		return one(s.projectChats(ctx, arguments)), true
 	case commandregistry.ActionOpenClawRefresh:
 		return one(s.openClawRefresh(ctx, arguments)), true
 	default:
@@ -170,7 +210,7 @@ func (s *Service) threads(ctx context.Context, arguments []string) string {
 	var list control.ThreadList
 	var err error
 	for current := 1; current <= page; current++ {
-		list, err = s.control.ListThreads(ctx, 20, cursor)
+		list, err = s.listThreadsReadOnly(ctx, 20, cursor)
 		if err != nil {
 			return "无法读取 Codex 会话，请确认 Codex 已连接。"
 		}
@@ -274,7 +314,7 @@ func (s *Service) openClawThreadInfo(ctx context.Context, arguments []string, ta
 		return message
 	}
 	state := statusChinese(firstNonEmpty(session.Status, "idle"))
-	lines := []string{fmt.Sprintf("#%d %s", session.Number, displayTitle(session.Title)), "后端：OpenClaw", "状态：" + state}
+	lines := []string{fmt.Sprintf("#%d %s", session.Number, displayTitle(session.Title)), "后端：OpenClaw", fmt.Sprintf("Session：#%d %s", session.Number, displayTitle(session.Title)), "状态：" + state}
 	if session.Model != "" {
 		lines = append(lines, "模型："+session.Model)
 	}
@@ -506,7 +546,12 @@ func (s *Service) threadInfo(ctx context.Context, arguments []string) string {
 	if state == "" {
 		state = detail.Status
 	}
-	lines = append(lines, "状态："+statusChinese(state))
+	lines = append(lines, "当前状态："+currentStateChinese(detail.Runtime, state))
+	lines = append(lines, "最近任务："+lastTurnChinese(detail.Runtime))
+	lines = append(lines, "结果确认："+persistenceChinese(detail.Runtime))
+	if detail.Runtime.PersistenceStatus == bridgeruntime.PersistenceAbnormal {
+		lines = append(lines, "说明：Codex 已完成任务，但 Bridge 暂时无法确认最终回复已写入会话历史。")
+	}
 	if detail.CWD != "" {
 		lines = append(lines, "项目："+detail.CWD)
 	}
@@ -593,6 +638,717 @@ func historyTexts(turn control.Turn, mode control.FinalSelectionMode) (string, s
 	return user, strings.TrimSpace(final.Text)
 }
 
+type outputTarget struct {
+	Backend  string
+	TargetID string
+	TurnID   string
+	Number   int
+	Title    string
+	Task     *taskcenter.Task
+}
+
+func (s *Service) output(ctx context.Context, arguments []string, target string, last bool, backend string) Result {
+	if len(arguments) > 1 {
+		name := "/output"
+		if last {
+			name = "/last-output"
+		}
+		return one("用法：" + name + " <聊天编号或任务编号>")
+	}
+	resolved, message := s.resolveOutputTarget(ctx, arguments, target, backend)
+	if message != "" {
+		return one(message)
+	}
+	if resolved.Backend == conversation.BackendOpenClaw {
+		return s.openClawOutput(ctx, resolved, last)
+	}
+	return s.codexOutput(ctx, resolved, last)
+}
+
+func (s *Service) resolveOutputTarget(ctx context.Context, arguments []string, target, backend string) (outputTarget, string) {
+	selector := ""
+	if len(arguments) == 1 {
+		selector = strings.TrimSpace(arguments[0])
+	}
+	if selector == "" {
+		selector = strings.TrimSpace(target)
+	}
+	if selector == "" {
+		return outputTarget{}, "请指定目标，例如 /output 280 或 /output T108。"
+	}
+	if len(arguments) == 0 && strings.TrimSpace(target) != "" {
+		if store := conversationregistry.ForAny(s.registry); store != nil {
+			if record, ok := store.ByTarget(backend, target); ok {
+				return outputTarget{Backend: record.Backend, TargetID: record.TargetID, Number: record.Number, Title: record.Title}, ""
+			}
+		}
+	}
+	if isTaskSelector(selector) {
+		if s.tasks == nil {
+			return outputTarget{}, "Task Center 尚未初始化，无法解析任务编号。"
+		}
+		number, err := strconv.Atoi(strings.TrimSpace(selector[1:]))
+		if err != nil || number < 1 {
+			return outputTarget{}, "任务编号格式应为 T108。"
+		}
+		task, ok := s.tasks.Tasks().Get(number)
+		if !ok || strings.TrimSpace(task.TargetID) == "" {
+			return outputTarget{}, fmt.Sprintf("任务 T%d 不存在或尚未关联运行会话。", number)
+		}
+		return outputTarget{Backend: firstNonEmpty(task.Backend, conversation.BackendCodex), TargetID: task.TargetID, TurnID: task.CurrentRunID, Number: task.ConversationNumber, Title: task.Title, Task: &task}, ""
+	}
+	selector = strings.TrimPrefix(selector, "#")
+	if number, err := strconv.Atoi(selector); err == nil && number > 0 {
+		store := conversationregistry.ForAny(s.registry)
+		if store == nil {
+			return outputTarget{}, "聊天编号尚未初始化。"
+		}
+		record, ok := store.ByNumber(number)
+		if !ok {
+			return outputTarget{}, fmt.Sprintf("聊天编号 #%d 不存在。", number)
+		}
+		return outputTarget{Backend: record.Backend, TargetID: record.TargetID, Number: record.Number, Title: record.Title}, ""
+	}
+	if store := conversationregistry.ForAny(s.registry); store != nil {
+		if record, ok := store.ByTarget(backend, selector); ok {
+			return outputTarget{Backend: record.Backend, TargetID: record.TargetID, Number: record.Number, Title: record.Title}, ""
+		}
+	}
+	return outputTarget{}, "无法解析目标，请使用全局聊天编号（如 280）或任务编号（如 T108）。"
+}
+
+func isTaskSelector(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 2 || !strings.EqualFold(value[:1], "T") {
+		return false
+	}
+	_, err := strconv.Atoi(value[1:])
+	return err == nil
+}
+
+func (s *Service) codexOutput(ctx context.Context, target outputTarget, last bool) Result {
+	if target.TargetID == "" {
+		return one("Codex 会话目标不可用。")
+	}
+	state := s.runtime.RuntimeState(target.TargetID)
+	turnID := strings.TrimSpace(target.TurnID)
+	activeTurnID := firstNonEmpty(state.TurnID, target.TurnID)
+	if !last {
+		if target.Task != nil && !target.Task.IsActive() {
+			return one(fmt.Sprintf("#%d 当前没有正在运行的任务。\n上一次输出请使用 /last-output %d。", target.Number, target.Number))
+		}
+		if turnID == "" {
+			turnID = state.TurnID
+		}
+		if turnID == "" || !runtimeOutputActive(state.State) {
+			label := fmt.Sprintf("#%d", target.Number)
+			if target.Task != nil {
+				label = target.Task.NumberLabel()
+			}
+			return one(label + " 当前没有正在运行的任务。\n最近一轮可使用 /last-output。")
+		}
+	} else if runtimeOutputActive(state.State) || (target.Task != nil && target.Task.IsActive()) {
+		// While a Turn is active (including completed-unverified), the
+		// current run is not the "last output" yet. Resolve the preceding
+		// Turn from bounded history below.
+		turnID = ""
+	}
+	if turnID == "" {
+		detail, err := control.ReadThreadHistory(ctx, s.control, target.TargetID, control.DefaultHistoryTurnLimit)
+		if err != nil || len(detail.Turns) == 0 {
+			return one("无法读取指定会话的运行输出，请确认 Codex 已连接。")
+		}
+		activeID := activeTurnID
+		for index := len(detail.Turns) - 1; index >= 0; index-- {
+			if activeID != "" && detail.Turns[index].TurnID == activeID {
+				if index > 0 {
+					turnID = detail.Turns[index-1].TurnID
+				}
+				break
+			}
+		}
+		if turnID == "" {
+			turnID = detail.Turns[len(detail.Turns)-1].TurnID
+		}
+	}
+	detail, err := s.readSingleTurn(ctx, target.TargetID, turnID)
+	if err != nil {
+		if live, ok := s.liveOutput(target.TargetID, turnID); ok {
+			return s.formatOutput(target, turnID, state.State, live, true)
+		}
+		return one("无法读取指定 Turn 的输出，请确认 Codex 历史仍可用。")
+	}
+	text := assistantVisibleOutput(detail.Turns)
+	if !last {
+		if live, ok := s.liveOutput(target.TargetID, turnID); ok {
+			text = live
+		}
+	}
+	if text == "" {
+		if live, ok := s.liveOutput(target.TargetID, turnID); ok {
+			text = live
+		}
+	}
+	if text == "" {
+		text = "（当前 Turn 尚未产生可见的助手文字输出。）"
+	}
+	return s.formatOutput(target, turnID, firstNonEmpty(turnStatus(detail.Turns), state.State), text, false)
+}
+
+func (s *Service) readSingleTurn(ctx context.Context, threadID, turnID string) (control.ThreadDetail, error) {
+	if reader, ok := s.control.(control.DetailTurnReader); ok {
+		return reader.ReadThreadTurnOutput(ctx, threadID, turnID)
+	}
+	detail, err := control.ReadThreadHistory(ctx, s.control, threadID, control.DefaultHistoryTurnLimit)
+	if err != nil {
+		return control.ThreadDetail{}, err
+	}
+	for _, turn := range detail.Turns {
+		if turn.TurnID == turnID {
+			detail.Turns = []control.Turn{turn}
+			return detail, nil
+		}
+	}
+	return control.ThreadDetail{}, errors.New("requested Turn was not found")
+}
+
+func (s *Service) liveOutput(threadID, turnID string) (string, bool) {
+	provider, ok := s.runtime.(liveOutputProvider)
+	if !ok {
+		return "", false
+	}
+	return provider.LiveTurnOutput(threadID, turnID)
+}
+
+func (s *Service) formatOutput(target outputTarget, turnID, status, body string, recovered bool) Result {
+	label := fmt.Sprintf("#%d", target.Number)
+	if target.Task != nil {
+		label = target.Task.NumberLabel()
+	} else if target.Number < 1 {
+		label = firstNonEmpty(target.Title, "Codex 会话")
+	}
+	header := label + " "
+	if target.Task != nil || !strings.HasPrefix(label, "#") {
+		header += "运行输出"
+	} else if strings.EqualFold(status, "completed") || strings.EqualFold(status, "persisted") {
+		header += "上一次运行输出"
+	} else {
+		header += "当前运行输出"
+	}
+	if target.Title != "" {
+		header += "\n标题：" + displayTitle(target.Title)
+	}
+	header += "\nTurn：" + shortID(turnID) + "\n状态：" + statusChinese(status)
+	if recovered {
+		header += "\n说明：以下为当前能够从 Codex 会话中读取到的输出；Bridge 重启前尚未写入历史的实时片段可能不可恢复。"
+	}
+	return Result{Parts: splitPrefixed(header, body, 3200)}
+}
+
+func assistantVisibleOutput(turns []control.Turn) string {
+	var output strings.Builder
+	seen := map[string]bool{}
+	for _, turn := range turns {
+		for _, item := range turn.Items {
+			if !control.IsAssistantMessageItem(item) || strings.TrimSpace(item.Text) == "" {
+				continue
+			}
+			if item.ItemID != "" && seen[item.ItemID] {
+				continue
+			}
+			if item.ItemID != "" {
+				seen[item.ItemID] = true
+			}
+			if output.Len() > 0 {
+				output.WriteString("\n\n")
+			}
+			output.WriteString(strings.TrimSpace(item.Text))
+			if output.Len() >= 8*1024*1024 {
+				return output.String() + "\n\n（输出达到安全上限，以上为当前可读取的完整前缀。）"
+			}
+		}
+	}
+	return output.String()
+}
+
+func turnStatus(turns []control.Turn) string {
+	if len(turns) == 0 {
+		return "unknown"
+	}
+	return turns[0].Status
+}
+
+func runtimeOutputActive(state string) bool {
+	switch state {
+	case bridgeruntime.StateAccepted, bridgeruntime.StateRunning, bridgeruntime.StateRunningExternal,
+		bridgeruntime.StateWaitingApproval, bridgeruntime.StateWaitingUserInput, bridgeruntime.StateInterrupting,
+		bridgeruntime.StateCompletedUnverified:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) openClawOutput(ctx context.Context, target outputTarget, last bool) Result {
+	if s.openclaw == nil {
+		return one("OpenClaw 后端尚未配置。")
+	}
+	detail, err := s.openclaw.ReadSession(ctx, target.TargetID)
+	if err != nil || detail.Key == "" {
+		return one("指定的 OpenClaw Session 当前不可用。")
+	}
+	if !last && !detail.HasActiveRun {
+		return one(fmt.Sprintf("#%d 当前没有正在运行的任务。\n最近一轮可使用 /last-output。", target.Number))
+	}
+	runID := target.TurnID
+	if !last && runID == "" && len(detail.ActiveRunIDs) > 0 {
+		runID = detail.ActiveRunIDs[0]
+	}
+	if last {
+		currentRunID := firstNonEmpty(runID, firstString(detail.ActiveRunIDs))
+		if detail.HasActiveRun || (target.Task != nil && target.Task.IsActive()) {
+			// Select the newest assistant run other than the active one.
+			runID = ""
+			for index := len(detail.Messages) - 1; index >= 0; index-- {
+				item := detail.Messages[index]
+				if !strings.EqualFold(item.Role, "assistant") || strings.TrimSpace(item.Text) == "" || item.RunID == "" || item.RunID == currentRunID {
+					continue
+				}
+				runID = item.RunID
+				break
+			}
+		} else if runID == "" {
+			for index := len(detail.Messages) - 1; index >= 0; index-- {
+				item := detail.Messages[index]
+				if strings.EqualFold(item.Role, "assistant") && strings.TrimSpace(item.Text) != "" && item.RunID != "" {
+					runID = item.RunID
+					break
+				}
+			}
+		}
+	}
+	if last && (detail.HasActiveRun || (target.Task != nil && target.Task.IsActive())) && runID == "" {
+		return one("当前任务尚无可读取的上一轮输出。")
+	}
+	var parts []string
+	for _, item := range detail.Messages {
+		if !strings.EqualFold(item.Role, "assistant") || strings.TrimSpace(item.Text) == "" {
+			continue
+		}
+		if runID != "" && item.RunID != "" && item.RunID != runID {
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(item.Text))
+	}
+	if len(parts) == 0 {
+		return one("（当前运行尚未产生可见的助手文字输出。）")
+	}
+	status := firstNonEmpty(detail.Status, "idle")
+	return s.formatOutput(target, runID, status, strings.Join(parts, "\n\n"), false)
+}
+
+type projectConversation struct {
+	Backend    string
+	TargetID   string
+	Number     int
+	Title      string
+	UpdatedAt  string
+	Status     string
+	TaskNumber int
+}
+
+type projectSnapshot struct {
+	Name          string
+	Aliases       []string
+	Path          string
+	Configured    bool
+	UpdatedAt     string
+	Conversations []projectConversation
+}
+
+// collectProjectSnapshots combines configured Task Center projects with the
+// working directories observed in recent Codex and OpenClaw sessions. It is
+// deliberately read-only: no conversation number is allocated here and no
+// project or task record is written.
+func (s *Service) collectProjectSnapshots(ctx context.Context) ([]projectSnapshot, error) {
+	entries := map[string]*projectSnapshot{}
+	nameKeys := map[string]string{}
+	nameAmbiguous := map[string]bool{}
+
+	registerName := func(name, key string) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			return
+		}
+		if prior, ok := nameKeys[name]; ok && prior != key {
+			nameAmbiguous[name] = true
+			nameKeys[name] = ""
+			return
+		}
+		if !nameAmbiguous[name] {
+			nameKeys[name] = key
+		}
+	}
+	lookupName := func(name string) string {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" || nameAmbiguous[name] {
+			return ""
+		}
+		return nameKeys[name]
+	}
+	add := func(name, path string, aliases []string, configured bool, updated string) *projectSnapshot {
+		name = strings.TrimSpace(name)
+		displayPath := displayProjectPath(path)
+		canonicalPath := normalizeProjectPath(path)
+		key := ""
+		if canonicalPath != "" {
+			key = "path:" + canonicalPath
+		}
+		if key == "" {
+			key = lookupName(name)
+		}
+		if key == "" {
+			key = "name:" + strings.ToLower(name)
+			if name == "" {
+				key = "unknown:" + strconv.Itoa(len(entries)+1)
+			}
+		}
+		entry := entries[key]
+		if entry == nil {
+			entry = &projectSnapshot{Name: name, Path: displayPath, Aliases: append([]string(nil), aliases...)}
+			entries[key] = entry
+		} else {
+			if entry.Name == "" {
+				entry.Name = name
+			}
+			if entry.Path == "" {
+				entry.Path = displayPath
+			}
+			entry.Aliases = uniqueProjectStrings(append(entry.Aliases, aliases...))
+		}
+		entry.Configured = entry.Configured || configured
+		entry.UpdatedAt = newerTimestamp(entry.UpdatedAt, updated)
+		registerName(entry.Name, key)
+		for _, alias := range entry.Aliases {
+			registerName(alias, key)
+		}
+		return entry
+	}
+	addConversation := func(entry *projectSnapshot, item projectConversation) {
+		if entry == nil || strings.TrimSpace(item.TargetID) == "" {
+			return
+		}
+		for index := range entry.Conversations {
+			current := &entry.Conversations[index]
+			if current.Backend == item.Backend && current.TargetID == item.TargetID {
+				if current.Title == "" {
+					current.Title = item.Title
+				}
+				current.Number = firstPositive(current.Number, item.Number)
+				current.UpdatedAt = newerTimestamp(current.UpdatedAt, item.UpdatedAt)
+				current.Status = firstNonEmpty(item.Status, current.Status)
+				current.TaskNumber = firstPositive(current.TaskNumber, item.TaskNumber)
+				entry.UpdatedAt = newerTimestamp(entry.UpdatedAt, item.UpdatedAt)
+				return
+			}
+		}
+		entry.Conversations = append(entry.Conversations, item)
+		entry.UpdatedAt = newerTimestamp(entry.UpdatedAt, item.UpdatedAt)
+	}
+
+	if s.tasks != nil && s.tasks.Projects() != nil {
+		for _, project := range s.tasks.Projects().List() {
+			add(project.Name, project.WorkingDirectory, project.Aliases, true, project.UpdatedAt)
+		}
+	}
+
+	threadList, threadErr := s.listThreadsReadOnly(ctx, 200, "")
+	for _, thread := range threadList.Threads {
+		if strings.TrimSpace(thread.CWD) == "" {
+			continue
+		}
+		entry := add(projectBaseName(thread.CWD), thread.CWD, nil, false, thread.UpdatedAt)
+		addConversation(entry, projectConversation{
+			Backend: conversation.BackendCodex, TargetID: thread.ThreadID, Number: thread.Number,
+			Title: thread.Title, UpdatedAt: thread.UpdatedAt, Status: thread.Status,
+		})
+	}
+	// A configured project remains useful when Codex is temporarily down; only
+	// return the connection error if there is no local project information at
+	// all. OpenClaw is likewise best-effort for this read-only aggregate.
+	if s.openclaw != nil {
+		if sessions, err := s.openclaw.ListSessions(ctx, 200); err == nil {
+			for _, session := range sessions {
+				if strings.TrimSpace(session.CWD) == "" {
+					continue
+				}
+				entry := add(projectBaseName(session.CWD), session.CWD, nil, false, session.UpdatedAt)
+				addConversation(entry, projectConversation{
+					Backend: conversation.BackendOpenClaw, TargetID: session.Key, Number: session.Number,
+					Title: session.Title, UpdatedAt: session.UpdatedAt, Status: session.Status,
+				})
+			}
+		}
+	}
+
+	if s.tasks != nil && s.tasks.Tasks() != nil {
+		projectsByID := map[string]taskcenter.Project{}
+		if s.tasks.Projects() != nil {
+			for _, project := range s.tasks.Projects().List() {
+				projectsByID[project.ProjectID] = project
+			}
+		}
+		for _, task := range s.tasks.Tasks().List(taskcenter.TaskFilter{}) {
+			if strings.TrimSpace(task.TargetID) == "" {
+				continue
+			}
+			project := projectsByID[task.ProjectID]
+			name := firstNonEmpty(task.ProjectNameSnapshot, project.Name, "未命名项目")
+			entry := add(name, project.WorkingDirectory, project.Aliases, project.ProjectID != "", task.LastActivityAt)
+			addConversation(entry, projectConversation{
+				Backend: firstNonEmpty(task.Backend, conversation.BackendCodex), TargetID: task.TargetID,
+				Number: task.ConversationNumber, Title: task.Title, UpdatedAt: task.LastActivityAt,
+				Status: task.Status, TaskNumber: task.TaskNumber,
+			})
+		}
+	}
+
+	if threadErr != nil && len(entries) == 0 {
+		return nil, threadErr
+	}
+	result := make([]projectSnapshot, 0, len(entries))
+	for _, entry := range entries {
+		sort.SliceStable(entry.Conversations, func(i, j int) bool {
+			return timestampAfter(entry.Conversations[i].UpdatedAt, entry.Conversations[j].UpdatedAt)
+		})
+		result = append(result, *entry)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].UpdatedAt == result[j].UpdatedAt {
+			return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+		}
+		return timestampAfter(result[i].UpdatedAt, result[j].UpdatedAt)
+	})
+	return result, nil
+}
+
+func (s *Service) recentProjects(ctx context.Context, arguments []string) string {
+	if len(arguments) > 1 {
+		return "用法：/recent-projects [数量]"
+	}
+	limit := 10
+	if len(arguments) == 1 {
+		parsed, err := strconv.Atoi(arguments[0])
+		if err != nil || parsed < 1 || parsed > 50 {
+			return "数量必须是 1～50。"
+		}
+		limit = parsed
+	}
+	projects, err := s.collectProjectSnapshots(ctx)
+	if err != nil {
+		return "无法读取最近项目，请确认 Codex 已连接。"
+	}
+	if len(projects) == 0 {
+		return "当前没有可显示的项目。"
+	}
+	if len(projects) > limit {
+		projects = projects[:limit]
+	}
+	lines := []string{"最近项目："}
+	for index, project := range projects {
+		name := firstNonEmpty(project.Name, projectBaseName(project.Path), "未命名项目")
+		line := fmt.Sprintf("%d. %s", index+1, displayTitle(name))
+		if project.Path != "" {
+			line += "\n   路径：" + project.Path
+		}
+		if len(project.Conversations) > 0 {
+			latest := project.Conversations[0]
+			line += "\n   最近会话：" + projectConversationLabel(latest)
+		}
+		if project.UpdatedAt != "" {
+			line += "\n   最近活动：" + relativeTime(project.UpdatedAt, s.now())
+		}
+		if !project.Configured {
+			line += "\n   来源：最近会话工作目录"
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *Service) projectChats(ctx context.Context, arguments []string) string {
+	if len(arguments) == 0 {
+		return "用法：/project-chats <项目> [数量]"
+	}
+	limit := 10
+	projectArguments := append([]string(nil), arguments...)
+	if len(projectArguments) >= 2 {
+		if parsed, err := strconv.Atoi(projectArguments[len(projectArguments)-1]); err == nil {
+			if parsed < 1 || parsed > 50 {
+				return "数量必须是 1～50。"
+			}
+			limit = parsed
+			projectArguments = projectArguments[:len(projectArguments)-1]
+		}
+	}
+	reference := strings.TrimSpace(strings.Join(projectArguments, " "))
+	if reference == "" {
+		return "用法：/project-chats <项目> [数量]"
+	}
+	projects, err := s.collectProjectSnapshots(ctx)
+	if err != nil {
+		return "无法读取项目会话，请确认 Codex 已连接。"
+	}
+	matches := make([]projectSnapshot, 0, 2)
+	for _, project := range projects {
+		if projectMatchesReference(project, reference) {
+			matches = append(matches, project)
+		}
+	}
+	if len(matches) == 0 {
+		return fmt.Sprintf("找不到项目 %q。可先使用 /recent-projects 查看项目名称。", reference)
+	}
+	if len(matches) > 1 && !projectReferenceIsExactPath(reference) {
+		lines := []string{fmt.Sprintf("项目 %q 对应多个工作目录，请使用完整路径：", reference)}
+		for _, project := range matches {
+			lines = append(lines, "- "+firstNonEmpty(project.Path, project.Name))
+		}
+		return strings.Join(lines, "\n")
+	}
+	project := matches[0]
+	if len(project.Conversations) == 0 {
+		return fmt.Sprintf("项目 %s 当前没有可显示的会话。", firstNonEmpty(project.Name, reference))
+	}
+	if len(project.Conversations) > limit {
+		project.Conversations = project.Conversations[:limit]
+	}
+	lines := []string{fmt.Sprintf("项目 %s 最近会话：", displayTitle(firstNonEmpty(project.Name, reference)))}
+	for index, item := range project.Conversations {
+		line := fmt.Sprintf("%d. %s", index+1, projectConversationLabel(item))
+		if item.UpdatedAt != "" {
+			line += " · " + relativeTime(item.UpdatedAt, s.now())
+		}
+		if item.Backend == conversation.BackendCodex && item.TargetID != "" {
+			state := s.runtime.RuntimeState(item.TargetID)
+			if state.State != "" {
+				line += "\n   当前状态：" + currentStateChinese(state, state.State)
+				line += " · 最近任务：" + lastTurnChinese(state)
+			}
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func projectConversationLabel(item projectConversation) string {
+	label := ""
+	if item.Number > 0 {
+		label = fmt.Sprintf("#%d ", item.Number)
+	}
+	if item.TaskNumber > 0 {
+		label += fmt.Sprintf("T%d ", item.TaskNumber)
+	}
+	label += "[" + firstNonEmpty(item.Backend, "unknown") + "] " + displayTitle(item.Title)
+	if item.Status != "" {
+		label += " · " + statusChinese(item.Status)
+	}
+	return strings.TrimSpace(label)
+}
+
+func projectMatchesReference(project projectSnapshot, reference string) bool {
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return false
+	}
+	if project.Path != "" && normalizeProjectPath(reference) == normalizeProjectPath(project.Path) {
+		return true
+	}
+	for _, candidate := range append([]string{project.Name}, project.Aliases...) {
+		if strings.EqualFold(strings.TrimSpace(candidate), reference) {
+			return true
+		}
+	}
+	return false
+}
+
+func projectReferenceIsExactPath(value string) bool {
+	return strings.Contains(value, `\`) || strings.Contains(value, "/") || filepath.VolumeName(value) != ""
+}
+
+func normalizeProjectPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(value)
+	if err == nil {
+		value = abs
+	}
+	return strings.ToLower(filepath.Clean(value))
+}
+
+func displayProjectPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(value)
+	if err == nil {
+		value = abs
+	}
+	return filepath.Clean(value)
+}
+
+func projectBaseName(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Base(filepath.Clean(path))
+}
+
+func uniqueProjectStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		key := strings.ToLower(value)
+		if value != "" && !seen[key] {
+			seen[key] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func firstPositive(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func newerTimestamp(current, candidate string) string {
+	if timestampAfter(candidate, current) {
+		return candidate
+	}
+	return current
+}
+
+func timestampAfter(left, right string) bool {
+	leftTime, leftOK := parseTime(left)
+	rightTime, rightOK := parseTime(right)
+	if leftOK && rightOK {
+		return leftTime.After(rightTime)
+	}
+	if leftOK != rightOK {
+		return leftOK
+	}
+	return strings.Compare(left, right) > 0
+}
+
 func (s *Service) running(ctx context.Context, arguments []string) string {
 	if len(arguments) != 0 {
 		return "用法：/running"
@@ -614,12 +1370,13 @@ func (s *Service) running(ctx context.Context, arguments []string) string {
 				line += fmt.Sprintf(" · 已运行 %d 分钟", int(elapsed/time.Minute))
 			}
 		}
+		line += " · " + statusChinese(state.State)
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
 		return "当前没有正在执行的 Codex 任务。"
 	}
-	return fmt.Sprintf("正在执行 %d 个任务：\n\n%s", len(lines), strings.Join(lines, "\n"))
+	return fmt.Sprintf("运行中或正在确认 %d 个任务：\n\n%s", len(lines), strings.Join(lines, "\n"))
 }
 
 func (s *Service) waiting(ctx context.Context, arguments []string) string {
@@ -851,11 +1608,20 @@ func (s *Service) connectionStatusForBackend(backend string) string {
 }
 
 func (s *Service) recentThreads(ctx context.Context, limit int) ([]control.ThreadSummary, error) {
-	list, err := s.control.ListThreads(ctx, limit, "")
+	list, err := s.listThreadsReadOnly(ctx, limit, "")
 	if err != nil {
 		return nil, err
 	}
 	return list.Threads, nil
+}
+
+func (s *Service) listThreadsReadOnly(ctx context.Context, limit int, cursor string) (control.ThreadList, error) {
+	if reader, ok := s.control.(readOnlyThreadLister); ok {
+		return reader.ListThreadsReadOnly(ctx, limit, cursor)
+	}
+	// Compatibility fallback for older injected readers. The production
+	// control.Service implements the non-allocating method above.
+	return s.control.ListThreads(ctx, limit, cursor)
 }
 
 // thread/list intentionally omits turns and can report an idle cached status
@@ -907,10 +1673,58 @@ func (s *Service) resolve(value string) (conversationregistry.Record, string) {
 
 func isRunningState(state string) bool {
 	switch state {
-	case bridgeruntime.StateAccepted, bridgeruntime.StateRunning, bridgeruntime.StateRunningExternal, bridgeruntime.StateInterrupting:
+	case bridgeruntime.StateAccepted, bridgeruntime.StateRunning, bridgeruntime.StateRunningExternal, bridgeruntime.StateInterrupting, bridgeruntime.StateCompletedUnverified:
 		return true
 	default:
 		return false
+	}
+}
+
+func currentStateChinese(state control.RuntimeState, fallback string) string {
+	if strings.TrimSpace(state.State) == "" {
+		return statusChinese(fallback)
+	}
+	return statusChinese(state.State)
+}
+
+func lastTurnChinese(state control.RuntimeState) string {
+	result := strings.ToLower(strings.TrimSpace(state.LastTurnResult))
+	if result == "" && state.Persistence != nil {
+		result = strings.ToLower(strings.TrimSpace(state.Persistence.Main.TurnStatus))
+	}
+	switch result {
+	case "completed", "persisted", "success", "succeeded":
+		return "已完成"
+	case "failed", "error", "systemerror":
+		return "失败"
+	case "interrupted", "cancelled", "canceled", "stopped":
+		return "已中断"
+	case "":
+		return "暂无结果"
+	default:
+		return statusChinese(result)
+	}
+}
+
+func persistenceChinese(state control.RuntimeState) string {
+	value := strings.ToLower(strings.TrimSpace(state.PersistenceStatus))
+	if value == "" && state.Persistence != nil {
+		value = strings.ToLower(strings.TrimSpace(state.Persistence.Status))
+	}
+	switch value {
+	case bridgeruntime.PersistencePending, "completed-unverified", "pending-verification", "verifying":
+		return "待确认"
+	case bridgeruntime.PersistenceConfirmed, "persisted":
+		return "已确认"
+	case bridgeruntime.PersistenceAbnormal, "persistence-failed", "thread-mismatch":
+		return "异常"
+	case "":
+		if strings.EqualFold(strings.TrimSpace(state.LastTurnResult), "completed") {
+			return "待确认"
+		}
+		return "暂无结果"
+	default:
+		return "待确认"
 	}
 }
 
@@ -918,14 +1732,18 @@ func statusChinese(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "idle", "notloaded":
 		return "空闲"
-	case "accepted", "running", "running-local", "running-external", "inprogress", "active":
+	case "accepted", "running", "running-local", "inprogress", "active":
 		return "运行中"
+	case "running-external":
+		return "外部运行中"
 	case "waiting", "waiting-user-input", "waitingonuserinput", "waitingoninput":
 		return "等待回答"
 	case "waiting-approval", "waitingonapproval":
 		return "等待桌面端审批"
-	case "failed", "persistence-failed", "thread-mismatch", "systemerror":
+	case "failed", "systemerror":
 		return "失败"
+	case "persistence-failed", "thread-mismatch":
+		return "结果确认异常"
 	case "stopped", "interrupted", "cancelled", "canceled":
 		return "已停止"
 	case "interrupting":
@@ -1186,4 +2004,11 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(values[0])
 }

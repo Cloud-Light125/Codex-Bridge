@@ -55,8 +55,13 @@ const (
 	maxHistoryPageCount      = 100
 	maxHistoryItemCount      = 300
 	maxHistoryItemsPerTurn   = 100
-	historyTurnPageLimit     = 50
-	historyItemPageLimit     = 100
+	// Output queries are scoped to one Turn. They may read more items than the
+	// bounded /history window, but remain bounded so a malformed or enormous
+	// Turn cannot grow memory without limit.
+	maxOutputTurnScan    = 1000
+	maxOutputItemCount   = 10000
+	historyTurnPageLimit = 50
+	historyItemPageLimit = 100
 )
 
 var ErrPaginatedHistoryUnavailable = errors.New("paginated Codex thread history is unavailable")
@@ -131,6 +136,47 @@ func (r *HistoryReader) ReadActivity(ctx context.Context, threadID string) (map[
 // /failed, which need Turn status/error fields but never message bodies.
 func (r *HistoryReader) ReadActivityHistory(ctx context.Context, threadID string, limit int) (map[string]any, error) {
 	return r.readActivity(ctx, threadID, normalizeHistoryTurnLimit(limit), true)
+}
+
+// ReadTurn reads one specific Turn and all of its persisted items. It is the
+// read path for /output and /last-output: unlike the bounded recent-history
+// path, it does not spend the global 300-item budget across other Turns.
+func (r *HistoryReader) ReadTurn(ctx context.Context, threadID, targetTurnID string) (map[string]any, error) {
+	threadID = strings.TrimSpace(threadID)
+	targetTurnID = strings.TrimSpace(targetTurnID)
+	if threadID == "" || targetTurnID == "" {
+		return nil, errors.New("thread ID and turn ID are required")
+	}
+	metadata, err := r.rpc.ThreadRead(ctx, threadID, false)
+	if err != nil {
+		return nil, err
+	}
+	mode := historyMode(metadata)
+	if mode == "legacy" {
+		return r.readLegacy(ctx, threadID)
+	}
+	turns, err := r.readTurnsLimit(ctx, threadID, maxOutputTurnScan)
+	if err != nil {
+		return nil, err
+	}
+	var target map[string]any
+	for _, turn := range turns {
+		if turnID(turn) == targetTurnID {
+			target = turn
+			break
+		}
+	}
+	if target == nil {
+		return nil, fmt.Errorf("Codex Turn %s was not found", shortHistoryID(targetTurnID))
+	}
+	items, err := r.readItems(ctx, threadID, targetTurnID, maxOutputItemCount)
+	if err != nil {
+		return nil, err
+	}
+	target = cloneHistoryMap(target)
+	target["items"] = items
+	r.setCapability(HistoryCapabilityPaginatedSupported, nil)
+	return withHistoryMode(withTurns(metadata, []map[string]any{target}), "paginated"), nil
 }
 
 func (r *HistoryReader) readActivity(ctx context.Context, threadID string, limit int, legacyNeedsTurns bool) (map[string]any, error) {
@@ -333,7 +379,13 @@ func (r *HistoryReader) readPaginated(ctx context.Context, metadata map[string]a
 }
 
 func (r *HistoryReader) readTurns(ctx context.Context, threadID string, limit int) ([]map[string]any, error) {
-	limit = normalizeHistoryTurnLimit(limit)
+	return r.readTurnsLimit(ctx, threadID, normalizeHistoryTurnLimit(limit))
+}
+
+func (r *HistoryReader) readTurnsLimit(ctx context.Context, threadID string, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = DefaultHistoryTurnLimit
+	}
 	turns := make([]map[string]any, 0, limit)
 	seenTurns := make(map[string]bool)
 	seenCursors := make(map[string]bool)

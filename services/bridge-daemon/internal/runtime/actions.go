@@ -11,6 +11,7 @@ import (
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/control"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/events"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/interactions"
+	bridgelog "cloudlight.dev/codexbridge/bridge-daemon/internal/logging"
 	"cloudlight.dev/codexbridge/bridge-daemon/internal/security"
 )
 
@@ -40,7 +41,9 @@ func (m *Manager) RuntimeState(threadID string) control.RuntimeState {
 	}
 	if state.Persistence == nil {
 		if verification, found := m.lastVerification(threadID); found {
-			state.Persistence = &verification
+			if state.TurnID == "" || verification.ExpectedTurnID == "" || verification.ExpectedTurnID == state.TurnID {
+				state.Persistence = &verification
+			}
 		}
 	}
 	state.PendingInteractionCount = pending
@@ -57,7 +60,9 @@ func (m *Manager) setState(state control.RuntimeState, publish bool) {
 	state.PendingInteractionCount = m.interactions.PendingCount(state.ThreadID)
 	if state.Persistence == nil {
 		if verification, found := m.lastVerification(state.ThreadID); found {
-			state.Persistence = &verification
+			if state.TurnID == "" || verification.ExpectedTurnID == "" || verification.ExpectedTurnID == state.TurnID {
+				state.Persistence = &verification
+			}
 		}
 	}
 	state.LastActivityAt = nowText()
@@ -73,6 +78,24 @@ func (m *Manager) setState(state control.RuntimeState, publish bool) {
 		m.broker.PublishScoped(events.TurnStatusChanged, state.ThreadID, state.TurnID, "", map[string]any{"runtime": state})
 		m.broker.PublishScoped(events.ThreadUpdated, state.ThreadID, state.TurnID, "", map[string]any{"runtime": state})
 	}
+}
+
+// recordStartAttemptFailure records an unsuccessful request to start a new
+// Turn without fabricating a failed Turn. In particular, no Turn ID means no
+// backend execution result exists yet; the previous conversation projection
+// must remain intact and reusable.
+func (m *Manager) recordStartAttemptFailure(threadID string, previous control.RuntimeState, err error) {
+	state := previous
+	state.ThreadID = threadID
+	state.LastStartError = ""
+	if err != nil {
+		state.LastStartError = bridgelog.Redact(err.Error())
+	}
+	state.Error = ""
+	if state.State == "" {
+		state.State = StateIdle
+	}
+	m.setState(state, true)
 }
 
 func (m *Manager) reconcileActivity(activity control.ThreadActivity) {
@@ -174,6 +197,7 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 		}
 		return control.TurnAccepted{}, busyError(threadID, state)
 	}
+	previous := current
 
 	payload := threadPayload(raw)
 	cwd := textValue(payload["cwd"])
@@ -184,7 +208,8 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 	m.logger.Printf("rpcTrace stage=thread/resume-request selectedThreadId=%s requestThreadId=%s", threadID, threadID)
 	resumeRaw, err := client.ThreadResume(ctx, threadID, cwd)
 	if err != nil {
-		m.failTurnTrace(threadID, StateFailed, fmt.Sprintf("thread/resume failed: %v", err))
+		trace.setTerminalState("start-attempt-failed")
+		m.recordStartAttemptFailure(threadID, previous, fmt.Errorf("thread/resume failed: %w", err))
 		return control.TurnAccepted{}, fmt.Errorf("resume Codex thread: %w", err)
 	}
 	resumed := persistenceSnapshot(resumeRaw, "")
@@ -204,28 +229,27 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 	}()
 	options, err := turnStartOptions(request, cwd, m.Status().SandboxMode)
 	if err != nil {
+		trace.setTerminalState("start-attempt-failed")
+		m.recordStartAttemptFailure(threadID, previous, err)
 		return control.TurnAccepted{}, fmt.Errorf("prepare Codex turn security policy: %w", err)
 	}
 	m.logger.Printf("rpcTrace stage=turn/start-request selectedThreadId=%s requestThreadId=%s", threadID, threadID)
 	result, err := client.TurnStart(ctx, threadID, text, options)
 	if err != nil {
 		if compatibilityError := turnStartProtocolCompatibilityError(err); compatibilityError != nil {
-			state := control.RuntimeState{ThreadID: threadID, State: StateFailed, Origin: "local", Error: compatibilityError.Message}
-			m.setState(state, true)
-			m.failTurnTrace(threadID, StateFailed, compatibilityError.Message)
+			trace.setTerminalState("start-attempt-failed")
+			m.recordStartAttemptFailure(threadID, previous, compatibilityError)
 			return control.TurnAccepted{}, compatibilityError
 		}
-		state := control.RuntimeState{ThreadID: threadID, State: StateFailed, Origin: "local", Error: "Turn 启动失败"}
-		m.setState(state, true)
-		m.failTurnTrace(threadID, StateFailed, err.Error())
+		trace.setTerminalState("start-attempt-failed")
+		m.recordStartAttemptFailure(threadID, previous, err)
 		return control.TurnAccepted{}, fmt.Errorf("start Codex turn: %w", err)
 	}
 	turn := nestedMap(result, "turn")
 	turnID := firstNonEmpty(textValue(turn["id"]), textValue(result["turnId"]))
 	if turnID == "" {
-		state := control.RuntimeState{ThreadID: threadID, State: StateFailed, Origin: "local", Error: "App Server 未返回 Turn ID"}
-		m.setState(state, true)
-		m.failTurnTrace(threadID, StateFailed, "Codex app-server did not return a turn id")
+		trace.setTerminalState("start-attempt-failed")
+		m.recordStartAttemptFailure(threadID, previous, errors.New("Codex app-server did not return a turn id"))
 		return control.TurnAccepted{}, errors.New("Codex app-server did not return a turn id")
 	}
 	returnedThreadID := firstNonEmpty(
@@ -249,7 +273,10 @@ func (m *Manager) StartTurn(ctx context.Context, threadID string, request contro
 	if origin == "" {
 		origin = "bridge"
 	}
-	state := control.RuntimeState{ThreadID: threadID, State: stateName, TurnID: turnID, Origin: origin, StartedAt: acceptedAt}
+	state := control.RuntimeState{ThreadID: threadID, State: stateName, TurnID: turnID, Origin: origin, StartedAt: acceptedAt,
+		LastTurnResult: previous.LastTurnResult, PersistenceStatus: previous.PersistenceStatus}
+	state.LastStartError = ""
+	state.Persistence = nil
 	if currentAfterStart.TurnID == turnID && currentAfterStart.State != "" && currentAfterStart.State != StateIdle {
 		stateName = currentAfterStart.State
 		state = currentAfterStart

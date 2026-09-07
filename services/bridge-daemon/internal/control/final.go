@@ -82,6 +82,15 @@ func SelectFinalAssistantItem(turn Turn, mode FinalSelectionMode) (Item, bool) {
 	return selection.Item, selection.Found
 }
 
+// FindPersistedAssistantEvidence is intentionally separate from the mirror
+// selector. Persistence verification needs evidence that a completed Turn has
+// an assistant message recorded, while remote delivery must continue to use
+// SelectFinalAssistantItem and its strict phase rules. In particular, this
+// helper never authorizes a commentary/progress item for delivery.
+func FindPersistedAssistantEvidence(turn Turn, mode FinalSelectionMode) (Item, bool) {
+	return SelectFinalAssistantItem(turn, mode)
+}
+
 // ResolveFinalAssistantItem is the explanatory form used by diagnostics and
 // candidate-selection logs. It deliberately does not inspect message text
 // beyond requiring a non-empty body for a usable item.

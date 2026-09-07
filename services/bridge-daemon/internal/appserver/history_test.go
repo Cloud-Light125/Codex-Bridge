@@ -120,6 +120,40 @@ func TestHistoryReaderPaginatedUsesTurnsAndItemsWithoutFullRead(t *testing.T) {
 	}
 }
 
+func TestHistoryReaderReadTurnHydratesOnlyRequestedTurn(t *testing.T) {
+	fake := &fakeHistoryRPC{
+		read: func(includeTurns bool) (map[string]any, error) {
+			if includeTurns {
+				t.Fatal("ReadTurn must not use full thread/read")
+			}
+			return paginatedMetadata("single-turn", "paginated"), nil
+		},
+		turns: func(ThreadTurnsListOptions) (map[string]any, error) {
+			return map[string]any{"data": []map[string]any{
+				{"id": "turn-2", "status": "completed"},
+				{"id": "turn-1", "status": "completed"},
+			}}, nil
+		},
+		items: func(options ThreadItemsListOptions) (map[string]any, error) {
+			if options.TurnID != "turn-1" {
+				t.Fatalf("items/list hydrated the wrong Turn: %#v", options)
+			}
+			return map[string]any{"data": []map[string]any{{"id": "item-1", "type": "agentMessage", "phase": "final_answer"}}}, nil
+		},
+	}
+	result, err := NewHistoryReader(fake, nil).ReadTurn(context.Background(), "single-turn", "turn-1")
+	if err != nil {
+		t.Fatalf("ReadTurn returned error: %v", err)
+	}
+	turns := historyObjects(result["thread"].(map[string]any)["turns"])
+	if len(turns) != 1 || turnID(turns[0]) != "turn-1" || len(historyObjects(turns[0]["items"])) != 1 {
+		t.Fatalf("ReadTurn returned unexpected payload: %#v", result)
+	}
+	if len(fake.itemCalls) != 1 || fake.itemCalls[0].TurnID != "turn-1" {
+		t.Fatalf("ReadTurn made unexpected item calls: %#v", fake.itemCalls)
+	}
+}
+
 func TestHistoryReaderDefaultWindowCapsTurnsAndItems(t *testing.T) {
 	fake := &fakeHistoryRPC{
 		read: func(includeTurns bool) (map[string]any, error) {

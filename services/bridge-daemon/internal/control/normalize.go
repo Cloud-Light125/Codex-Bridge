@@ -3,6 +3,7 @@ package control
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +29,28 @@ func normalizeThreadDetail(raw map[string]any) ThreadDetail {
 	for _, turn := range mapSlice(payload["turns"]) {
 		detail.Turns = append(detail.Turns, normalizeTurn(turn))
 	}
+	// The paginated app-server returns pages in descending order.  Keep the
+	// public DTO contract chronological regardless of whether the source was a
+	// paginated response, a legacy full read, or a test double.  Callers may
+	// therefore safely use Turns[len(Turns)-1] as the newest Turn.
+	sort.SliceStable(detail.Turns, func(left, right int) bool {
+		leftAt, leftOK := turnTime(detail.Turns[left])
+		rightAt, rightOK := turnTime(detail.Turns[right])
+		if leftOK && rightOK && !leftAt.Equal(rightAt) {
+			return leftAt.Before(rightAt)
+		}
+		return false
+	})
 	return detail
+}
+
+func turnTime(turn Turn) (time.Time, bool) {
+	for _, value := range []string{turn.CreatedAt, turn.UpdatedAt} {
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func NormalizeThreadDetail(raw map[string]any) ThreadDetail { return normalizeThreadDetail(raw) }
